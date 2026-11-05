@@ -16,9 +16,6 @@
 --   pipeline:new_state(opts?)       -> state_table  {full_run, blocks={...}}
 --     opts.baseline_first_sample: a pipeline with a DeltaValue block takes the first
 --     sample as its baseline and publishes nothing for it.
---     opts.resume_counter: a pipeline with a DeltaValue block carries on from this
---     counter value.
---   pipeline:counter_value(state)   -> number?  counter taken up so far, if any
 --   pipeline:run(value, state)      -> value, short_circuit, error
 --   pipeline:reset(state)           -> nil   (only resets when full_run == true)
 --   pipeline:force_reset(state)     -> nil   (reset unconditionally)
@@ -251,8 +248,8 @@ local function has_counter(pipeline)
     return false
 end
 
---- Measure this pipeline's counter from `value`, in every block that compares
---- against an earlier value.
+--- Measure this pipeline's counter from `value`. Only blocks up to the DeltaValue
+--- see the raw counter; any after it compare deltas, so they stay as they are.
 local function seed_counter(pipeline, state, value)
     for i, block in ipairs(pipeline.process_blocks) do
         local mt = getmetatable(block)
@@ -262,6 +259,7 @@ local function seed_counter(pipeline, state, value)
             block_state.curr_val = value
             block_state.empty = false
         end
+        if mt == DeltaValue then break end
     end
 end
 
@@ -269,20 +267,16 @@ end
 ---
 --- baseline_first_sample is for a devicecode restart: the kernel counter has kept
 --- its value, so measuring from initial_val would report the whole counter as new
---- traffic. resume_counter is for replacing state while the process keeps running.
----@param opts? { baseline_first_sample: boolean?, resume_counter: number? }
+--- traffic.
+---@param opts? { baseline_first_sample: boolean? }
 ---@return table
 function ProcessPipeline:new_state(opts)
     local state = { full_run = false, blocks = {} }
     for i, block in ipairs(self.process_blocks) do
         state.blocks[i] = block:new_state()
     end
-    if opts and has_counter(self) then
-        if type(opts.resume_counter) == 'number' then
-            seed_counter(self, state, opts.resume_counter)
-        elseif opts.baseline_first_sample then
-            state.baseline_pending = true
-        end
+    if opts and opts.baseline_first_sample and has_counter(self) then
+        state.baseline_pending = true
     end
     return state
 end
@@ -329,20 +323,6 @@ function ProcessPipeline:reset(state)
         end
         state.full_run = false
     end
-end
-
---- The counter value taken up by this pipeline so far, including anything queued
---- but not yet published, or nil if it has none.
----@param state table
----@return number?
-function ProcessPipeline:counter_value(state)
-    for i, block in ipairs(self.process_blocks) do
-        if getmetatable(block) == DeltaValue then
-            local block_state = state.blocks[i]
-            return block_state.curr_val or block_state.last_val
-        end
-    end
-    return nil
 end
 
 --- Reset regardless of whether the pipeline produced a published value.

@@ -134,7 +134,7 @@ local State = {
 	base_time        = nil,
 	fs_cap           = nil,
 	baseline_until   = nil,
-	carried_counters = {},
+	config_data      = nil,
 }
 
 -------------------------------------------------------------------------------
@@ -387,10 +387,7 @@ local function handle_metric(msg)
 
 	-- Get-or-create per-endpoint processing state.
 	if not State.metric_states[endpoint_str] then
-		local resume_counter = State.carried_counters[endpoint_str]
-		State.carried_counters[endpoint_str] = nil
 		State.metric_states[endpoint_str]    = pipe_cfg.pipeline:new_state({
-			resume_counter        = resume_counter,
 			baseline_first_sample = State.baseline_until ~= nil and now() <= State.baseline_until,
 		})
 		State.endpoint_to_pipe[endpoint_str] = metric_name
@@ -413,16 +410,16 @@ end
 -- Config handling
 -------------------------------------------------------------------------------
 
---- A config change replaces all pipeline state, but the process hasn't restarted,
---- so counters being tracked carry on from where they were.
-local function carry_counters_across_config()
-	State.carried_counters = {}
-	for endpoint_str, state in pairs(State.metric_states) do
-		local metric_name = State.endpoint_to_pipe[endpoint_str]
-		local pipe_cfg = metric_name and State.pipelines_map[metric_name]
-		local counter = pipe_cfg and pipe_cfg.pipeline:counter_value(state)
-		if counter then State.carried_counters[endpoint_str] = counter end
+local function deep_equal(a, b)
+	if a == b then return true end
+	if type(a) ~= 'table' or type(b) ~= 'table' then return false end
+	for k, v in pairs(a) do
+		if not deep_equal(v, b[k]) then return false end
 	end
+	for k in pairs(b) do
+		if a[k] == nil then return false end
+	end
+	return true
 end
 
 ---@param payload table?
@@ -450,11 +447,14 @@ local function handle_config(payload)
 	State.cloud_url = payload.data and payload.data.cloud_url
 	rebuild_cloud_config()
 
-	-- Replace all pipeline state (logic may have changed).
-	carry_counters_across_config()
+	-- Replace all pipeline state if the logic has changed. The same config applied
+	-- again keeps it, because counters being tracked have lost nothing.
+	if not deep_equal(State.config_data, payload.data) then
+		State.metric_states    = {}
+		State.endpoint_to_pipe = {}
+	end
+	State.config_data      = payload.data
 	State.pipelines_map    = new_pipelines_map
-	State.metric_states    = {}
-	State.endpoint_to_pipe = {}
 	State.publish_period   = new_publish_period
 
 	if State.base_time.synced and State.publish_period then
@@ -617,7 +617,7 @@ function M.start(conn, opts)
 	State.cloud_config     = nil
 	State.base_time        = types.new.BaseTime(now_real(), now())
 	State.fs_cap           = nil
-	State.carried_counters = {}
+	State.config_data      = nil
 	-- Monotonic time is time since boot, so this tells a restart from a fresh boot.
 	State.baseline_until   = (now() >= RESTART_MIN_UPTIME_S) and (now() + RESTART_BASELINE_WINDOW_S) or nil
 
@@ -652,7 +652,6 @@ M._test = {
 	State                = State,
 	handle_metric        = handle_metric,
 	prune_idle_endpoints = prune_idle_endpoints,
-	carry_counters_across_config = carry_counters_across_config,
 }
 
 return M

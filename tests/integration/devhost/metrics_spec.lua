@@ -427,6 +427,24 @@ function T.config_reapplied_after_a_restart_keeps_counting()
 	end)
 end
 
+-- A sample queued but not yet published must survive the same config being applied.
+function T.config_reapplied_before_publishing_keeps_the_queued_traffic()
+	with_delta_metrics(3600, function(clock, send, result_sub, reapply_config)
+		send(100000) -- baseline
+		flush_ticks()
+		send(110000)
+		flush_ticks()
+		reapply_config()
+		reapply_config()
+		send(120000)
+		flush_ticks()
+
+		local msg = recv_metric(clock, result_sub, 0.4)
+		assert(msg, 'expected a publish')
+		assert(msg.payload.value == 20000, 'expected all the growth, got ' .. tostring(msg.payload.value))
+	end)
+end
+
 -- Likewise on a fresh boot, where the whole counter used to be reported again.
 function T.config_reapplied_on_a_fresh_boot_does_not_repeat_the_counter()
 	with_delta_metrics(60, function(clock, send, result_sub, reapply_config)

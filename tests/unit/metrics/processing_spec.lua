@@ -235,29 +235,22 @@ function T.pipeline_baseline_still_reports_a_non_number()
 	assert(err ~= nil, 'expected the existing error for a non-number')
 end
 
--- A config change replaces pipeline state. A counter already being tracked carries
--- on from where it was, rather than reporting the whole counter or losing traffic.
-function T.pipeline_resumes_a_counter_after_a_state_replacement()
-	local pipeline = shipped_counter_pipeline()
-	local old = pipeline:new_state()
-	pipeline:run(100000, old)
-	pipeline:reset(old)
-	pipeline:run(110000, old)
-	assert(pipeline:counter_value(old) == 110000, 'expected the counter last taken up')
-
-	local state = pipeline:new_state({ resume_counter = pipeline:counter_value(old) })
-	local val, short, err = pipeline:run(120000, state)
-	assert(err == nil, tostring(err))
-	assert(short == false, '9% should pass the 5% trigger')
-	assert(val == 10000, 'expected only the growth, got ' .. tostring(val))
-end
-
-function T.pipeline_without_a_delta_block_has_no_counter_to_resume()
+-- A trigger after the DeltaValue compares deltas, so it must not be seeded with
+-- the raw counter, or real growth would be compared against the wrong thing.
+function T.pipeline_baseline_leaves_a_trigger_after_the_delta_alone()
 	local pipeline = assert(processing.new_process_pipeline())
+	pipeline:add(processing.DeltaValue.new({}))
 	pipeline:add(processing.DiffTrigger.new({ diff_method = 'any-change' }))
-	local state = pipeline:new_state()
-	pipeline:run('x', state)
-	assert(pipeline:counter_value(state) == nil, 'expected no counter')
+	local state = pipeline:new_state({ baseline_first_sample = true })
+
+	local _, short = pipeline:run(1000, state)
+	assert(short == true, 'baseline sample should not be published')
+
+	local val, err
+	val, short, err = pipeline:run(2000, state)
+	assert(err == nil, tostring(err))
+	assert(short == false, 'a delta equal to the raw baseline must still publish')
+	assert(val == 1000, 'expected delta=1000, got ' .. tostring(val))
 end
 
 return T
