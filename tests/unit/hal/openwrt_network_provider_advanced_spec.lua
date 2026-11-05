@@ -786,6 +786,42 @@ end
 -- mwan3's metric order with a weighted split across every member. HTTPS is not
 -- sticky: a sticky entry made while on a modem is checked before the policy and
 -- would keep that client on cellular after the WAN recovers.
+-- When every uplink looks dead, traffic uses the normal route rather than being refused.
+-- Tracking only pings, so a network that blocks pings can look dead when it isn't.
+function tests.test_bigbox_configs_fall_back_to_the_normal_route()
+	local cjson = require 'cjson.safe'
+	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
+	for _, target in ipairs({ 'bigbox-ss', 'bigbox-v1-cm', 'bigbox-v1-cm-2' }) do
+		local doc = ok(cjson.decode(ok(read_project_file('src/configs/' .. target .. '.json'))))
+		local net_intent = ok(net_config.normalise(doc.net, { rev = 1 }))
+		local ctx = ok(names.allocate(net_intent))
+		local changes = ok(mwan3.build_changes(net_intent, ctx))
+		ok(find_change(changes, { config = 'mwan3', option = 'last_resort', value = 'default' }),
+			target .. ' should render last_resort default')
+	end
+end
+
+function tests.test_last_resort_can_be_set_in_config()
+	local cjson = require 'cjson.safe'
+	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
+	local doc = ok(cjson.decode(ok(read_project_file('src/configs/bigbox-ss.json'))))
+	doc.net.data.wan.last_resort = 'unreachable'
+	local net_intent = ok(net_config.normalise(doc.net, { rev = 1 }))
+	local ctx = ok(names.allocate(net_intent))
+	local changes = ok(mwan3.build_changes(net_intent, ctx))
+	ok(find_change(changes, { config = 'mwan3', option = 'last_resort', value = 'unreachable' }),
+		'a configured last_resort should be rendered')
+end
+
+function tests.test_last_resort_rejects_an_unknown_value()
+	local cjson = require 'cjson.safe'
+	local doc = ok(cjson.decode(ok(read_project_file('src/configs/bigbox-ss.json'))))
+	doc.net.data.wan.last_resort = 'somewhere'
+	local net_intent, err = net_config.normalise(doc.net, { rev = 1 })
+	if net_intent ~= nil then fail('expected an unknown last_resort to be rejected') end
+	if not tostring(err):match('last_resort') then fail('expected the error to name last_resort: ' .. tostring(err)) end
+end
+
 function tests.test_bigbox_configs_render_strict_wan_modem_failover()
 	local cjson = require 'cjson.safe'
 	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
