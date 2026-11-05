@@ -45,9 +45,9 @@ end
 
 local function wanted() return true end
 
-local function run(conn, read_op, is_wanted)
+local function run(conn, read_op, begin_save, end_save)
 	local store = store_mod.new(conn)
-	return fibers.perform(import.run_op(store, read_op, is_wanted or wanted))
+	return fibers.perform(import.run_op(store, read_op, begin_save or wanted, end_save or function() end))
 end
 
 function tests.test_parse_reads_the_list_the_v09_ui_saves()
@@ -68,6 +68,22 @@ function tests.test_parse_drops_only_the_bad_records()
 	assert(#records == 2, 'valid records stay')
 	assert(skipped == 3, 'skipped ' .. tostring(skipped))
 	assert(records[2].apn == 'also-good' and records[2].unknown_field == nil)
+end
+
+-- v0.9 connected custom APNs without looking at MVNO fields, and its UI took free text
+-- there, so they mustn't cost a working record or change how it ranks.
+function tests.test_parse_keeps_records_v09_would_have_used()
+	local records, skipped = import.parse(user_cfg({
+		rec('none', { mvno_type = 'none' }),
+		rec('half', { mvno_type = 'gid' }),
+		rec('valid', { mvno_type = 'spn', mvno_match_data = 'x' }),
+		rec('null-field', { proxy = cjson.null, mmsc = {} }),
+	}))
+	assert(#records == 4 and skipped == 0, 'kept ' .. tostring(#records))
+	for _, item in ipairs(records) do
+		assert(item.mvno_type == nil and item.mvno_match_data == nil, item.apn)
+		assert(item.proxy == nil and item.mmsc == nil, item.apn)
+	end
 end
 
 function tests.test_parse_treats_no_apns_as_an_empty_list()
@@ -161,6 +177,32 @@ function tests.test_a_save_in_the_new_ui_supersedes_the_import()
 		local result = assert(run(conn, read_op, function() return false end))
 		assert(result.status == 'superseded')
 		assert(conn.puts == 0)
+	end)
+end
+
+function tests.test_save_is_bracketed_and_the_end_always_runs()
+	runfibers.run(function()
+		local events = {}
+		local conn = fake_conn()
+		local put = conn.call_op
+		function conn:call_op(topic, payload)
+			if topic[5] == 'put' then events[#events + 1] = 'put' end
+			return put(self, topic, payload)
+		end
+		local function begin_save() events[#events + 1] = 'begin'; return true end
+		local function end_save() events[#events + 1] = 'end' end
+		assert(run(conn, reading({ ok = true, reason = user_cfg({ rec('one') }) }), begin_save, end_save))
+		assert(table.concat(events, ',') == 'begin,put,end', table.concat(events, ','))
+
+		-- A failed put still ends the save.
+		events = {}
+		function conn:call_op(topic)
+			if topic[5] == 'put' then return op.always({ ok = false, reason = 'disk full' }, nil) end
+			return op.always({ ok = false, reason = 'not found' }, nil)
+		end
+		local result, err = run(conn, reading({ ok = true, reason = user_cfg({ rec('one') }) }), begin_save, end_save)
+		assert(result == nil and err == 'disk full', tostring(err))
+		assert(table.concat(events, ',') == 'begin,end', table.concat(events, ','))
 	end)
 end
 

@@ -22,6 +22,7 @@ local fibers = require "fibers"
 local op = require "fibers.op"
 local sleep = require "fibers.sleep"
 local pulse = require "fibers.pulse"
+local cond = require "fibers.cond"
 
 local perform = fibers.perform
 
@@ -1377,6 +1378,7 @@ function GsmService.start(conn, opts)
 	local apn_store_retry_delay_s = 1.0
 	local apn_import_pending = true
 	local apn_import_retry_delay_s = 0
+	local apn_import_save_done = nil -- a cond while the import's save is in flight
 
 	-- Transitional APN bridge. GSM is still on its pre-modern service
 	-- architecture; keep this surface deliberately small until GSM is migrated.
@@ -1520,7 +1522,13 @@ function GsmService.start(conn, opts)
 				perform(sleep.sleep_op(apn_import_retry_delay_s))
 			end
 			return perform(apn_legacy_import.run_op(apn_store, read_v09_user_cfg_op, function ()
-				return apn_import_pending
+				if not apn_import_pending then return false end
+				apn_import_save_done = cond.new()
+				return true
+			end, function ()
+				local done = apn_import_save_done
+				apn_import_save_done = nil
+				if done then done:signal() end
 			end))
 		end):wrap(function (st, rep, result, ierr)
 			if st ~= 'ok' then return nil, tostring(result or ierr or rep or 'apn_import_failed') end
@@ -1529,13 +1537,16 @@ function GsmService.start(conn, opts)
 	end
 
 	local function handle_apn_import_result(result, ierr)
+		-- A UI save has taken over, and what it saved stands.
+		if not apn_import_pending then return end
 		if not result then
 			apn_import_retry_delay_s = math.min(math.max(apn_import_retry_delay_s * 2, 1.0), APN_IMPORT_MAX_RETRY_S)
 			svc:obs_log('debug', { what = 'apn_v09_import_retry', err = tostring(ierr) })
 			return
 		end
-		apn_import_pending = false
 		local status = result.status
+		if status == 'superseded' then return end
+		apn_import_pending = false
 		if status == 'imported' then
 			svc:obs_log('info', { what = 'apn_v09_import_done', imported = result.imported, skipped = result.skipped })
 			handle_apn_store_load_result(result.records)
@@ -1556,14 +1567,21 @@ function GsmService.start(conn, opts)
 		if not apn_store_loaded then return nil, 'apn_store_not_ready' end
 		local list, lerr = apn_model.normalise_list(records)
 		if not list then return nil, lerr end
+		-- Stop the import before the first yield, and let any save it has in flight finish,
+		-- so this save can't land first and then be overwritten.
+		local import_was_pending = apn_import_pending
+		apn_import_pending = false
+		while apn_import_save_done do
+			perform(apn_import_save_done:wait_op())
+		end
 		local saved, serr = perform(apn_store:save_op(list))
 		if not saved then
+			apn_import_pending = import_was_pending
 			publish_apn_state({ state = 'degraded', ready = false, reason = serr or 'apn_store_save_failed' })
 			return nil, serr or 'apn_store_save_failed'
 		end
 		custom_apns = saved
 		svc.custom_apns = custom_apns
-		apn_import_pending = false
 		publish_apn_state({ state = 'ready', ready = true })
 		signal_all_modems()
 		return copy(custom_apns), nil

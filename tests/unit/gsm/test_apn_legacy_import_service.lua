@@ -6,6 +6,7 @@
 local busmod = require 'bus'
 local fibers = require 'fibers'
 local sleep = require 'fibers.sleep'
+local cond = require 'fibers.cond'
 local cjson = require 'cjson.safe'
 local runfibers = require 'tests.support.run_fibers'
 local fake_store = require 'tests.support.fake_control_store'
@@ -178,6 +179,110 @@ function tests.test_a_save_in_the_new_ui_beats_a_slow_import()
 		local list = assert(stored(h))
 		assert(#list == 1 and list[1].apn == 'typed', 'the new save must stand')
 		assert(count_calls(h.store, 'put') == 1)
+	end, { timeout = TIMEOUT })
+end
+
+-- A store whose put takes effect at once but whose reply waits for a gate, and a read that
+-- waits for its own gate, so tests can hold each write open while the other side moves.
+local function start_gated(scope)
+	local bus = busmod.new()
+	local h = { conn = bus:connect({ origin_base = { kind = 'test', service = 'probe' } }), values = {}, puts = {} }
+	h.read_gate = cond.new()
+	h.put_gates = {}
+	local server = bus:connect({ origin_base = { kind = 'test', service = 'fake-hal' } })
+	local function serve(topic, handler)
+		local ep = assert(bus_cleanup.bind(server, topic, { queue_len = 8 }))
+		assert(scope:spawn(function()
+			while true do
+				local req = fibers.perform(ep:recv_op())
+				if req == nil then return end
+				assert(scope:spawn(function() req:reply(handler(req.payload)) end))
+			end
+		end))
+	end
+	serve({ 'cap', 'control-store', 'gsm', 'rpc', 'get' }, function(payload)
+		local body = h.values[payload.key]
+		if body == nil then return { ok = false, reason = 'not found' } end
+		return { ok = true, reason = body }
+	end)
+	serve({ 'cap', 'control-store', 'gsm', 'rpc', 'put' }, function(payload)
+		h.values[payload.key] = payload.data
+		h.puts[#h.puts + 1] = payload.data
+		local gate = h.put_gates[#h.puts]
+		if gate then fibers.perform(gate:wait_op()) end
+		return { ok = true, reason = true }
+	end)
+	serve({ 'cap', 'fs', 'credentials', 'rpc', 'read' }, function()
+		h.reading = true
+		fibers.perform(h.read_gate:wait_op())
+		return { ok = true, reason = user_cfg({ rec('old') }) }
+	end)
+	bus:connect({ origin_base = { kind = 'test', service = 'config' } }):retain({ 'cfg', 'gsm' }, {
+		schema = 'devicecode.config.snapshot/1',
+		service = 'gsm',
+		rev = 1,
+		data = {
+			schema = 'devicecode.config/gsm/1',
+			apn_store = { kind = 'control-store', id = 'gsm', key = KEY },
+			modems = { default = { enabled = false, signal_freq = 60 }, known = {} },
+		},
+	})
+	assert(scope:spawn(function()
+		gsm_service.start(bus:connect({ origin_base = { service = 'gsm' } }), { name = 'gsm', env = 'dev', heartbeat_s = 60 })
+	end))
+	return h
+end
+
+local function final_list(h)
+	local topic = gsm_topics.rpc('list-custom-apns', 'main')
+	local reply = assert(fibers.perform(h.conn:call_op(topic, {}, { timeout = 2 })))
+	assert(reply.ok == true, tostring(reply.reason))
+	local body = h.values[KEY]
+	return reply.reason, body and cjson.decode(body).records or nil
+end
+
+-- The UI's save has landed but not replied when the import finishes reading.
+function tests.test_import_never_overwrites_a_ui_save_still_in_flight()
+	runfibers.run(function(scope)
+		local h = start_gated(scope)
+		h.put_gates[1] = cond.new()
+		wait_until(function() return h.reading end, 'the read')
+		local reply, err
+		assert(scope:spawn(function() reply, err = add_apn(h, 'typed') end))
+		wait_until(function() return #h.puts == 1 end, 'the UI save')
+		h.read_gate:signal()
+		fibers.perform(sleep.sleep_op(0.2))
+		h.put_gates[1]:signal()
+		wait_until(function() return reply ~= nil or err ~= nil end, 'the UI reply')
+		assert(reply and reply.ok == true, tostring(err))
+		fibers.perform(sleep.sleep_op(0.2))
+		assert(#h.puts == 1, 'the import must not write, wrote ' .. tostring(#h.puts - 1))
+		local memory, disk = final_list(h)
+		assert(#memory == 1 and memory[1].apn == 'typed', 'memory')
+		assert(#disk == 1 and disk[1].apn == 'typed', 'disk')
+	end, { timeout = TIMEOUT })
+end
+
+-- The import's save is in flight when the UI saves: the UI waits, then wins.
+function tests.test_ui_save_waits_for_an_import_save_then_wins()
+	runfibers.run(function(scope)
+		local h = start_gated(scope)
+		h.put_gates[1] = cond.new()
+		wait_until(function() return h.reading end, 'the read')
+		h.read_gate:signal()
+		wait_until(function() return #h.puts == 1 end, 'the import save')
+		local reply, err
+		assert(scope:spawn(function() reply, err = add_apn(h, 'typed') end))
+		fibers.perform(sleep.sleep_op(0.2))
+		assert(#h.puts == 1, 'the UI save must wait for the import save')
+		h.put_gates[1]:signal()
+		wait_until(function() return reply ~= nil or err ~= nil end, 'the UI reply')
+		assert(reply and reply.ok == true, tostring(err or (reply and reply.reason)))
+		assert(#h.puts == 2)
+		fibers.perform(sleep.sleep_op(0.2))
+		local memory, disk = final_list(h)
+		assert(memory[#memory].apn == 'typed', 'memory')
+		assert(disk[#disk].apn == 'typed', 'disk')
 	end, { timeout = TIMEOUT })
 end
 

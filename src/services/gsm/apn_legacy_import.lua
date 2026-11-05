@@ -21,6 +21,23 @@ local M = {}
 
 M.FILENAME = 'user.cfg'
 
+-- v0.9 connected a custom APN using only its apn, user, password and authtype, and its
+-- UI took free text everywhere else. MVNO fields had no effect there, so they mustn't
+-- cost a working record its place or change how it ranks now.
+local IGNORED_BY_V09 = { mvno_type = true, mvno_match_data = true }
+
+local function normalise_v09_record(rec)
+	if type(rec) ~= 'table' then return nil end
+	local out = {}
+	for k, v in pairs(rec) do
+		local t = type(v)
+		if not IGNORED_BY_V09[k] and (t == 'string' or t == 'number' or t == 'boolean') then
+			out[k] = v
+		end
+	end
+	return apn_model.normalise_record(out)
+end
+
 ---@param body any
 ---@return table? records
 ---@return integer|string skipped_or_err count of records dropped, or 'malformed'
@@ -38,7 +55,7 @@ function M.parse(body)
 	-- normalise_list rejects a whole list for one bad record, so go one at a time.
 	local records, seen, skipped = {}, {}, 0
 	for _, rec in ipairs(list) do
-		local item = apn_model.normalise_record(rec)
+		local item = normalise_v09_record(rec)
 		local key = item and table.concat({ item.carrier, item.mcc, item.mnc, item.apn }, '\0')
 		if item and not seen[key] then
 			seen[key] = true
@@ -60,12 +77,17 @@ end
 --   imported    records were saved; imported and skipped hold the counts
 --   no_source   no file, or no usable records in it; nothing written
 --   malformed   the file can't be parsed; nothing written
---   superseded  is_wanted() said no just before saving; nothing written
+--   superseded  begin_save() said no; nothing written
+--
+-- begin_save and end_save let the caller keep this save and UI saves from overlapping.
+-- begin_save runs with no yield before the save starts, and end_save always runs after
+-- it, including on failure or cancellation.
 ---@param store table
 ---@param read_op fun(): Op resolves to a filesystem reply and an error
----@param is_wanted fun(): boolean
+---@param begin_save fun(): boolean
+---@param end_save fun()
 ---@return Op
-function M.run_op(store, read_op, is_wanted)
+function M.run_op(store, read_op, begin_save, end_save)
 	return fibers.run_scope_op(function()
 		local exists, xerr = perform(store:exists_op())
 		if exists == nil then return nil, xerr or 'control_store_get_failed' end
@@ -85,7 +107,8 @@ function M.run_op(store, read_op, is_wanted)
 		local records, skipped = M.parse(reply.reason)
 		if not records then return { status = 'malformed' }, nil end
 		if #records == 0 then return { status = 'no_source', skipped = skipped }, nil end
-		if not is_wanted() then return { status = 'superseded' }, nil end
+		if not begin_save() then return { status = 'superseded' }, nil end
+		fibers.current_scope():finally(function () end_save() end)
 
 		local saved, serr = perform(store:save_op(records))
 		if not saved then return nil, serr or 'control_store_put_failed' end
