@@ -49,11 +49,16 @@ if neither specifies a type, GSM uses `IP`.
 }
 ```
 
-Whenever the modem is disabled, GSM checks active PDP contexts against its
-configured `pdp_type` before enabling it. Mismatched contexts are corrected and
-verified, then the modem is restarted once. On the next disabled-state pass,
-matching contexts need no writes or restart and autoconnect can enable the modem.
-Read, write, or restart failures are retried before enabling.
+Whenever an autoconnecting modem is disabled, GSM checks active PDP contexts
+against its configured `pdp_type` before enabling it. A mismatch is corrected
+once per modem, SIM and effective PDP configuration. The write preserves every
+other context setting, including the APN. After the correction the modem is
+restarted once; a write whose verification becomes unavailable is also treated
+as requiring that restart. On the next disabled-state pass, matching contexts
+need no write or restart and autoconnect can enable the modem. If the context
+reverts after restart, GSM reports the persistent mismatch and enables the modem
+without entering a reset loop. Definite read, write, or restart failures are
+retried before enabling.
 If no contexts are reported active, no contexts are rewritten.
 Replies containing another PDP command's records or a different command echo,
 and active CIDs missing from the context list, fail inspection and prevent enabling.
@@ -65,7 +70,8 @@ any state. Unsupported manufacturers retain their existing enable/connect behavi
 The backend prefers the secondary AT port and falls back to the primary AT port
 when no secondary port is available.
 Changing this setting does not immediately disconnect an already connected modem;
-it is enforced the next time the modem is disabled.
+it is enforced the next time an autoconnecting modem is disabled. Modems with
+autoconnect disabled are not reconfigured or restarted.
 
 ## GSM Internal Overview
 
