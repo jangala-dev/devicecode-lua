@@ -243,4 +243,118 @@ function T.devhost_signal_is_not_recorded_as_a_service_failure()
 	os.remove(path)
 end
 
+-- A service that won't finish cancelling, as a child in uninterruptible sleep would.
+local function stuck_loader(fake_hal, release)
+	local inner = make_service_loader(fake_hal, { finalised = false })
+	return function(name)
+		if name == 'stuck' then
+			return {
+				start = function()
+					fibers.current_scope():finally(function()
+						while not release.now do fibers.perform(sleep.sleep_op(0.005):wrap(function() end)) end
+					end)
+					while true do sleep.sleep(3600.0) end
+				end,
+			}
+		end
+		return inner(name)
+	end
+end
+
+local function run_main_with_stuck_service(path, services_csv, service_loader_for, body)
+	runfibers.run(function(scope)
+		local bus, fake_hal = new_stack(scope)
+		local store = temp_crash_store(path)
+		store:begin_run()
+		local release = { now = false }
+
+		local child = assert(scope:child())
+		assert(scope:spawn(function()
+			-- A boot failure raises here, as it does on its way to src/main.lua.
+			safe.pcall(mainmod.run, child, {
+				env = 'dev', services_csv = services_csv, bus = bus,
+				service_loader = service_loader_for(fake_hal, release),
+				exit_grace_period = 0.01, crash_store = store,
+			})
+		end))
+
+		body(child, store)
+		release.now = true
+		child:cancel('test done')
+		fibers.perform(child:join_op())
+	end, { timeout = 2.0 })
+end
+
+local function reader(path)
+	return temp_crash_store(path):next_pending(math.huge)
+end
+
+function T.devhost_signal_is_recorded_while_a_service_is_stuck_cancelling()
+	local path = os.tmpname()
+	os.remove(path)
+	run_main_with_stuck_service(path, 'hal,stuck', stuck_loader, function(child)
+		sleep.sleep(0.02)
+		child:cancel('signal:TERM')
+		local recorded = probe.wait_until(function() return reader(path) ~= nil end, { timeout = 0.5, interval = 0.01 })
+		assert(recorded, 'expected the signal to be recorded before the join finishes')
+		local rec = reader(path)
+		assert(rec.kind == 'signal', 'kind: ' .. tostring(rec.kind))
+		assert(rec.reason == 'signal:TERM', 'reason: ' .. tostring(rec.reason))
+	end)
+	os.remove(path)
+end
+
+function T.devhost_unexpected_cancel_of_main_is_recorded_as_an_error()
+	local path = os.tmpname()
+	os.remove(path)
+	run_main_with_stuck_service(path, 'hal,stuck', stuck_loader, function(child)
+		sleep.sleep(0.02)
+		child:cancel('something_else')
+		local recorded = probe.wait_until(function() return reader(path) ~= nil end, { timeout = 0.5, interval = 0.01 })
+		assert(recorded, 'expected the cancel to be recorded before the join finishes')
+		local rec = reader(path)
+		assert(rec.kind == 'main_error', 'kind: ' .. tostring(rec.kind))
+		assert(rec.reason == 'something_else', 'reason: ' .. tostring(rec.reason))
+	end)
+	os.remove(path)
+end
+
+function T.devhost_boot_failure_is_recorded_before_earlier_services_finish()
+	local path = os.tmpname()
+	os.remove(path)
+	run_main_with_stuck_service(path, 'hal,stuck,missing', function(fake_hal, release)
+		local load = stuck_loader(fake_hal, release)
+		return function(name)
+			if name == 'missing' then error('module not found: missing', 0) end
+			return load(name)
+		end
+	end, function()
+		local recorded = probe.wait_until(function() return reader(path) ~= nil end, { timeout = 0.5, interval = 0.01 })
+		assert(recorded, 'expected the boot failure to be recorded before the join finishes')
+		local rec = reader(path)
+		assert(rec.kind == 'boot_failed', 'kind: ' .. tostring(rec.kind))
+		assert(rec.service == 'missing', 'service: ' .. tostring(rec.service))
+		assert(rec.reason:match('module not found'), 'reason: ' .. tostring(rec.reason))
+	end)
+	os.remove(path)
+end
+
+function T.devhost_logs_from_the_v1_log_topic_reach_the_crash_record()
+	local path = os.tmpname()
+	os.remove(path)
+	runfibers.run(function(scope)
+		local bus, fake_hal, linger_box = new_stack(scope)
+		local store = temp_crash_store(path)
+		store:begin_run()
+		local conn = bus:connect()
+		local main_scope = spawn_main(scope, bus, fake_hal, linger_box, 'hal,linger,boom', store)
+		sleep.sleep(0.005)
+		conn:publish({ 'obs', 'v1', 'http', 'log', 'main', 'warn' }, { what = 'listener_trouble' })
+		fibers.perform(main_scope:join_op())
+	end, { timeout = 1.25 })
+	local rec = reader(path)
+	assert(tostring(rec.log):match('http warn listener_trouble'), 'log: ' .. tostring(rec.log))
+	os.remove(path)
+end
+
 return T

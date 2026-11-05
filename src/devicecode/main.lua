@@ -206,17 +206,48 @@ function M.run(scope, params)
     })
 
     -- Keep recent log lines for the crash record. This is here and not in the
-    -- monitor service, because monitor could be the service that fails.
+    -- monitor service, because monitor could be the service that fails. The HTTP
+    -- service logs on the v1 topic only; the others use the legacy one.
     local crash_store = params.crash_store
     if crash_store then
-        local log_sub = main_conn:subscribe({ 'obs', 'log', '#' }, { queue_len = 64, full = 'drop_oldest' })
+        local sub_opts = { queue_len = 64, full = 'drop_oldest' }
+        local legacy_sub = main_conn:subscribe({ 'obs', 'log', '#' }, sub_opts)
+        local v1_sub = main_conn:subscribe({ 'obs', 'v1', '+', 'log', '#' }, sub_opts)
         scope:spawn(function()
             while true do
-                local msg = fibers.perform(log_sub:recv_op())
+                local _, msg = fibers.perform(op.named_choice({
+                    legacy = legacy_sub:recv_op(),
+                    v1     = v1_sub:recv_op(),
+                }))
                 if not msg then return end
-                crash_store:note_log(msg.topic[3], msg.topic[4], msg.payload)
+                local topic = msg.topic
+                crash_store:note_log(topic[3], topic[#topic], msg.payload)
             end
         end)
+    end
+
+    -- A signal or other cancel of main itself stops the fibers below straight away,
+    -- so this waits outside the scope's cancellation to see it happen. Records are
+    -- first-wins, so a service failure already recorded stays.
+    if crash_store then
+        scope:spawn(function()
+            local _, primary = op.perform_raw(scope:not_ok_op())
+            local signal = tostring(primary):match('signal:%u+')
+            if signal then
+                crash_store:record_signal(signal)
+            else
+                crash_store:record_error(primary)
+            end
+        end)
+    end
+
+    -- Record now, not after unwinding: a service that won't finish cancelling can
+    -- hold everything up for ever, and the process may be killed while it waits.
+    local function boot_failed(name, what, err)
+        if crash_store then
+            crash_store:record_boot_failure({ service = name, what = what, err = err })
+        end
+        fail_boot(main_conn, name, what, err)
     end
 
     local services = {}
@@ -229,18 +260,18 @@ function M.run(scope, params)
 
         local mod, lerr = load_service(service_loader, name)
         if not mod then
-            fail_boot(main_conn, name, 'load_failed', lerr)
+            boot_failed(name, 'load_failed', lerr)
         end
 
         local child, cerr = scope:child()
         if not child then
-            fail_boot(main_conn, name, 'child_scope_failed', cerr)
+            boot_failed(name, 'child_scope_failed', cerr)
         end
 
         local ok_spawn, serr = spawn_service(child, bus, name, mod, env, service_opts[name])
         if not ok_spawn then
             cleanup_child_scope(child, 'spawn_failed')
-            fail_boot(main_conn, name, 'spawn_failed', serr)
+            boot_failed(name, 'spawn_failed', serr)
         end
 
         retain_service_state(main_conn, name, 'running')
@@ -275,9 +306,9 @@ function M.run(scope, params)
         local svc = rec.name
 
         -- Record now, not after the join below: a child stuck in uninterruptible
-        -- sleep can hold the join for ever. A cancelled service isn't a failure of
-        -- its own, for example on SIGTERM, which src/main.lua records as a signal.
-        if crash_store and st ~= 'cancelled' then
+        -- sleep can hold the join for ever, and the process may be killed while it
+        -- waits.
+        if crash_store then
             crash_store:record_failure({ service = svc, status = st, primary = primary })
         end
 

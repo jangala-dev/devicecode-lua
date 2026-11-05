@@ -10,7 +10,8 @@
 -- so all failures are swallowed.
 --
 -- A record is one of:
---   service_failed  a service failed or returned, and main is about to exit
+--   service_failed  a service failed, returned or was cancelled unexpectedly
+--   boot_failed     a service could not be loaded or started
 --   main_error      an error reached the top without an earlier record
 --   signal          a deliberate stop (no log is kept)
 --   unknown_exit    the previous process ended without writing anything, so it
@@ -57,6 +58,45 @@ local function is_sensitive_key(key)
 	return false
 end
 
+--- Where a value starting at `first` ends: at its closing quote if it has one,
+--- honouring backslash escapes, otherwise at the next separator.
+local function value_end(text, first, quote)
+	if quote == '' then
+		local _, last = text:find('^[^%s,"\'}%]]*', first)
+		return last
+	end
+	local i = first
+	while i <= #text do
+		local c = text:sub(i, i)
+		if c == '\\' then
+			i = i + 2
+		elseif c == quote then
+			break
+		else
+			i = i + 1
+		end
+	end
+	return i - 1
+end
+
+--- Mask the value of any key=value or "key":"value" with a sensitive key. Other
+--- values are scanned too, since one can hold another pair.
+local function redact_pairs(text)
+	local out, pos = {}, 1
+	while true do
+		local s, e, key, quote = text:find('([%w_%-%.]+)["\']?%s*[=:]%s*(["\']?)', pos)
+		if not s then break end
+		out[#out + 1] = text:sub(pos, e)
+		pos = e + 1
+		if is_sensitive_key(key) then
+			out[#out + 1] = '[redacted]'
+			pos = value_end(text, pos, quote) + 1
+		end
+	end
+	out[#out + 1] = text:sub(pos)
+	return table.concat(out)
+end
+
 --- Remove secrets and identifiers from free text.
 ---@param text string
 ---@return string
@@ -65,10 +105,7 @@ function M.redact(text)
 	text = text:gsub('://[^/%s@]+@', '://[redacted]@')
 	text = text:gsub('([Tt]hing%s+)%S+', '%1[redacted]')
 	text = text:gsub('([Bb]earer%s+)%S+', '%1[redacted]')
-	text = text:gsub('([%w_%-]+)(%s*[=:]%s*["\']?)([^%s,"\'}]+)', function(key, sep, value)
-		if is_sensitive_key(key) then return key .. sep .. '[redacted]' end
-		return key .. sep .. value
-	end)
+	text = redact_pairs(text)
 	text = text:gsub('%x%x[:%-]%x%x[:%-]%x%x[:%-]%x%x[:%-]%x%x[:%-]%x%x', '[mac]')
 	text = text:gsub('%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x', '[uuid]')
 	text = text:gsub('%d+', function(digits)
@@ -238,6 +275,16 @@ Store.record_failure = guarded(function(self, fields)
 		service = fields.service,
 		status  = fields.status,
 		reason  = tostring(fields.primary),
+	}, table.concat(self.ring, '\n'))
+end)
+
+---@param fields { service: string?, what: string, err: any }
+Store.record_boot_failure = guarded(function(self, fields)
+	record_once(self, {
+		kind    = 'boot_failed',
+		service = fields.service,
+		status  = fields.what,
+		reason  = tostring(fields.err),
 	}, table.concat(self.ring, '\n'))
 end)
 

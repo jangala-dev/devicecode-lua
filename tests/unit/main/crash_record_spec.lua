@@ -200,6 +200,43 @@ function T.secrets_and_identifiers_are_removed()
 	os.remove(path)
 end
 
+function T.secrets_in_json_and_quoted_text_are_removed()
+	local path = temp_path()
+	local store = new_store(path)
+	store:begin_run()
+	store:note_log('http', 'error', { what = 'a', message = '{"password":"hunter2","user_salt":"salty","ok":"kept"}' })
+	store:note_log('http', 'error', { what = 'b', message = 'password="two secret words" next=fine' })
+	store:note_log('http', 'error', { what = 'c', message = "token='single quoted value' next=fine" })
+	store:note_log('http', 'error', { what = 'd', message = [[{"secret":"esc\"aped value","next":"fine"}]] })
+	store:note_log('http', 'error', { what = 'e', err = 'Authorization: Bearer abc.def.ghi' })
+	store:record_failure({ service = 'x', status = 'failed', primary = '{"psk":"wifi pass phrase"} failed' })
+
+	local rec = restarted(path):next_pending(2000)
+	local text = rec.reason .. '\n' .. rec.log
+	for _, secret in ipairs({
+		'hunter2', 'salty', 'two secret', 'secret words', 'single quoted', 'esc', 'aped value',
+		'abc%.def', 'wifi pass', 'pass phrase',
+	}) do
+		assert(not text:match(secret), 'leaked ' .. secret .. ' in: ' .. text)
+	end
+	for _, kept in ipairs({ 'kept', 'next=fine', '"next":"fine"', 'failed' }) do
+		assert(text:find(kept, 1, true), 'lost ' .. kept .. ' from: ' .. text)
+	end
+	os.remove(path)
+end
+
+function T.a_signal_after_a_failure_keeps_the_failure()
+	local path = temp_path()
+	local store = new_store(path)
+	store:begin_run()
+	store:record_failure({ service = 'net', status = 'failed', primary = 'real failure' })
+	store:record_signal('signal:TERM')
+
+	local rec = restarted(path):next_pending(2000)
+	assert(rec.kind == 'service_failed', 'kind: ' .. tostring(rec.kind))
+	os.remove(path)
+end
+
 function T.only_the_first_crashes_in_a_boot_send_full_logs()
 	local path = temp_path()
 	for i = 1, crash_record.FULL_LOG_CRASHES + 2 do failed_run(path, 'crash' .. i) end

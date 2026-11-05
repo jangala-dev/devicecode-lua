@@ -290,12 +290,13 @@ When devicecode exits, the reason would otherwise be lost: logs are in RAM and t
 
 | Kind | Meaning | Log kept |
 | --- | --- | --- |
-| `service_failed` | A service failed or returned, and main is about to exit | Recent log lines |
+| `service_failed` | A service failed, returned or was cancelled unexpectedly | Recent log lines |
+| `boot_failed` | A service could not be loaded or started | Recent log lines |
 | `main_error` | An error reached the top without an earlier record | Recent log lines |
 | `unknown_exit` | The previous process ended without writing anything, so it was killed | `logread` output, if available |
 | `signal` | A deliberate stop, such as a restart by hand | None |
 
-Each record is sent in its own request once config is loaded and the time is synced, using `system.crash.kind`, `service`, `status`, `reason`, `log`, `seq` and `uptime_s`, timestamped when it happened. It stays on file until the cloud accepts it. It doesn't go through a pipeline, so it can't be lost to the start-up race between metrics and config.
+Each record is sent in its own request once config is loaded and the time is synced, using `system.crash.kind`, `service`, `status`, `reason`, `log`, `seq` and `uptime_s`, timestamped when it happened. It's recorded as soon as the failure happens, because a service that won't finish cancelling can hold up the exit for ever. It stays on file until the cloud accepts it, with one attempt every 10 minutes if a send fails. It doesn't go through a pipeline, so it can't be lost to the start-up race between metrics and config.
 
 **Limits, for metered SIMs:** the reason is at most 200 characters and the log at most 2 KB. Only the first 3 crashes in a boot keep a log, at most 5 records wait at once, and once past the first crashes records are sent at most every 10 minutes. `seq` still shows how many there have been.
 

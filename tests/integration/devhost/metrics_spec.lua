@@ -354,7 +354,7 @@ local function with_pending_crash(synced, body)
 			return {
 				put_op = function(_, data)
 					sent[#sent + 1] = data
-					return op.always(true)
+					return op.always(nil) -- as the real channel does when there's room
 				end,
 			}
 		end,

@@ -32,7 +32,9 @@ local HTTP_TIMEOUT = 60
 --- succeeds or the enclosing scope is cancelled.
 ---
 ---@param http_ref table  HTTP SDK ref (services.http.sdk Ref)
----@param data table      { uri: string, auth: string, body: string, on_result: fun(accepted: boolean)? }
+--- With data.one_shot a network failure is reported through on_result, not retried.
+---
+---@param data table      { uri: string, auth: string, body: string, one_shot: boolean?, on_result: fun(accepted: boolean)? }
 ---@param log_fn fun(level: string, payload: any)
 local function send_http(http_ref, data, log_fn)
 	local uri            = data.uri
@@ -60,6 +62,11 @@ local function send_http(http_ref, data, log_fn)
 
 		if which == 'timeout' or not result then
 			local err_msg = which == 'timeout' and 'timeout' or tostring(err)
+			if data.one_shot then
+				log_fn('debug', { what = 'http_one_shot_failed', err = err_msg })
+				if data.on_result then data.on_result(false) end
+				return
+			end
 			log_fn('debug', { what = 'http_retry', retry_in_s = sleep_duration, err = err_msg })
 			sleep.sleep(sleep_duration)
 			sleep_duration = math.min(sleep_duration * 2, 60)

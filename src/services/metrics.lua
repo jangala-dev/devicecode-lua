@@ -247,7 +247,8 @@ local function log_publish(data)
 end
 
 ---@param data table<string, MetricSample>
----@param on_result fun(accepted: boolean)? called with the cloud's answer
+---@param on_result fun(accepted: boolean)? called with the cloud's answer, and the send
+--- isn't retried: the caller paces its own retries
 ---@return boolean queued
 local function http_publish(data, on_result)
 	local senml_list, encode_err = senml.encode_r('', data)
@@ -282,7 +283,9 @@ local function http_publish(data, on_result)
 	local auth  = 'Thing ' .. State.cloud_config.thing_key
 
 	-- Non-blocking enqueue: drop and log if the channel is at capacity.
-	local full = perform(State.http_send_ch:put_op({ uri = uri, auth = auth, body = body, on_result = on_result })
+	local full = perform(State.http_send_ch:put_op({
+		uri = uri, auth = auth, body = body, on_result = on_result, one_shot = on_result ~= nil,
+	})
 		:or_else(function() return true end))
 
 	if full then
