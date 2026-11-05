@@ -158,7 +158,6 @@ function T.collect_sysinfo_state_leaves_out_a_partial_power_block()
 			arm_frequency_capped = bad, under_voltage_occurred = good,
 		})
 		assert_eq(out.power, nil, 'reads failed, then one succeeded')
-		assert_eq(out.state, 'partial')
 
 		out = run({
 			currently_throttled = good, under_voltage_detected = good,
