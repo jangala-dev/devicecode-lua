@@ -99,6 +99,27 @@ function T.publish_sysinfo_metrics_sends_pi_power_flags_under_v0_10_names()
 
 		metrics = run({})
 		assert_eq(metrics.power_undervoltage, nil, 'no value, no metric')
+function T.collect_sysinfo_state_includes_pi_throttle_power()
+	fibers.run(function()
+		local svc = { wall = function() return '2026-07-06 12:00:00' end }
+		local cap = {
+			call_control_op = function(_, method, opts)
+				assert_eq(method, 'get')
+				assert_eq(opts.field, 'throttled')
+				return op.always({ ok = true, reason = {
+					currently_throttled = true, under_voltage_detected = true,
+					arm_frequency_capped = false, under_voltage_occurred = true, raw = 327685,
+				} })
+			end,
+		}
+
+		local out = system._test.collect_sysinfo_state(svc, { ['platform:1'] = cap }, 0.1)
+		assert_true(out.power, 'power expected in stats payload')
+		assert_eq(out.power.currently_throttled, true)
+		assert_eq(out.power.under_voltage_detected, true)
+		assert_eq(out.power.arm_frequency_capped, false)
+		assert_eq(out.power.under_voltage_occurred, true)
+		assert_eq(out.power.raw, 327685)
 	end)
 end
 
