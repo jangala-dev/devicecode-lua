@@ -13,7 +13,25 @@ local test_diag     = require 'tests.support.test_diag'
 
 local mainmod       = require 'devicecode.main'
 
+local crash_record  = require 'devicecode.crash_record'
+
 local T = {}
+
+local function temp_crash_store(path)
+	return crash_record.new({ path = path, boot_id = 'boot-1', read_system_log = function() return '' end })
+end
+
+local function next_process_record(path)
+	local store = temp_crash_store(path)
+	store:begin_run()
+	return store:next_pending(math.huge)
+end
+
+local function new_stack(scope)
+	local bus = busmod.new()
+	local fake_hal = fake_hal_mod.new({ backend = 'fakehal', caps = {}, scripted = {} })
+	return bus, fake_hal, { finalised = false }
+end
 
 local function wait_retained_payload_matching(conn, topic, pred, opts)
 	opts = opts or {}
@@ -87,7 +105,7 @@ local function make_service_loader(fake_hal, linger_box)
 	end
 end
 
-local function spawn_main(scope, bus, fake_hal, linger_box, services_csv)
+local function spawn_main(scope, bus, fake_hal, linger_box, services_csv, crash_store)
 	local child, cerr = scope:child()
 	assert(child ~= nil, tostring(cerr))
 
@@ -98,6 +116,7 @@ local function spawn_main(scope, bus, fake_hal, linger_box, services_csv)
 			bus            = bus,
 			service_loader = make_service_loader(fake_hal, linger_box),
 			exit_grace_period = 0.05,
+			crash_store = crash_store,
 		})
 	end)
 	assert(ok_spawn, tostring(err))
@@ -173,6 +192,55 @@ function T.devhost_main_fails_fast_when_child_service_errors()
 				))
 		end
 	end, { timeout = 1.25 })
+end
+
+function T.devhost_service_failure_is_recorded_for_the_next_process()
+	local path = os.tmpname()
+	os.remove(path)
+
+	runfibers.run(function(scope)
+		local bus, fake_hal, linger_box = new_stack(scope)
+		local store = temp_crash_store(path)
+		store:begin_run()
+
+		local conn = bus:connect()
+		local main_scope = spawn_main(scope, bus, fake_hal, linger_box, 'hal,linger,boom', store)
+		sleep.sleep(0.005)
+		conn:publish({ 'obs', 'log', 'linger', 'warn' }, { what = 'something_odd', detail = 'before the crash' })
+
+		fibers.perform(main_scope:join_op())
+	end, { timeout = 1.25 })
+
+	local rec = next_process_record(path)
+	assert(rec, 'expected a crash record')
+	assert(rec.kind == 'service_failed', 'kind: ' .. tostring(rec.kind))
+	assert(rec.service == 'boom', 'service: ' .. tostring(rec.service))
+	assert(tostring(rec.reason):match('boom exploded'), 'reason: ' .. tostring(rec.reason))
+	assert(tostring(rec.log):match('something_odd'), 'log: ' .. tostring(rec.log))
+	os.remove(path)
+end
+
+-- A signal cancels every service. That must not read as a service failure.
+function T.devhost_signal_is_not_recorded_as_a_service_failure()
+	local path = os.tmpname()
+	os.remove(path)
+
+	runfibers.run(function(scope)
+		local bus, fake_hal, linger_box = new_stack(scope)
+		local store = temp_crash_store(path)
+		store:begin_run()
+
+		local main_scope = spawn_main(scope, bus, fake_hal, linger_box, 'hal,linger', store)
+		sleep.sleep(0.02)
+		main_scope:cancel('signal:TERM')
+		fibers.perform(main_scope:join_op())
+		store:record_signal('signal:TERM') -- as src/main.lua does on the way out
+	end, { timeout = 1.25 })
+
+	local rec = next_process_record(path)
+	assert(rec, 'expected a record')
+	assert(rec.kind == 'signal', 'expected a signal record, got ' .. tostring(rec.kind))
+	os.remove(path)
 end
 
 return T

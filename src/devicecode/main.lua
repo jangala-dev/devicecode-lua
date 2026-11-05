@@ -205,6 +205,20 @@ function M.run(scope, params)
         env  = env,
     })
 
+    -- Keep recent log lines for the crash record. This is here and not in the
+    -- monitor service, because monitor could be the service that fails.
+    local crash_store = params.crash_store
+    if crash_store then
+        local log_sub = main_conn:subscribe({ 'obs', 'log', '#' }, { queue_len = 64, full = 'drop_oldest' })
+        scope:spawn(function()
+            while true do
+                local msg = fibers.perform(log_sub:recv_op())
+                if not msg then return end
+                crash_store:note_log(msg.topic[3], msg.topic[4], msg.payload)
+            end
+        end)
+    end
+
     local services = {}
 
     for i = 1, #service_names do
@@ -257,8 +271,15 @@ function M.run(scope, params)
             return
         end
 
-        local rec, _, _ = fibers.perform(ev)
+        local rec, st, primary = fibers.perform(ev)
         local svc = rec.name
+
+        -- Record now, not after the join below: a child stuck in uninterruptible
+        -- sleep can hold the join for ever. A cancelled service isn't a failure of
+        -- its own, for example on SIGTERM, which src/main.lua records as a signal.
+        if crash_store and st ~= 'cancelled' then
+            crash_store:record_failure({ service = svc, status = st, primary = primary })
+        end
 
         local jst, report, jprimary = fibers.perform(rec.scope:join_op())
 

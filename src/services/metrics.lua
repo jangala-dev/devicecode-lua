@@ -40,6 +40,7 @@ local http_m         = require 'services.metrics.http'
 local conf           = require 'services.metrics.config'
 local types          = require 'services.metrics.types'
 local ui_usage       = require 'services.ui.usage'
+local crash_record   = require 'devicecode.crash_record'
 
 
 local unpack = unpack or rawget(table, 'unpack')
@@ -127,6 +128,8 @@ local State = {
 	cloud_config     = nil,
 	base_time        = nil,
 	fs_cap           = nil,
+	crash_store      = nil,
+	crash_inflight   = false,
 }
 
 -------------------------------------------------------------------------------
@@ -244,20 +247,22 @@ local function log_publish(data)
 end
 
 ---@param data table<string, MetricSample>
-local function http_publish(data)
+---@param on_result fun(accepted: boolean)? called with the cloud's answer
+---@return boolean queued
+local function http_publish(data, on_result)
 	local senml_list, encode_err = senml.encode_r('', data)
 	if encode_err then
 		State.svc:obs_log('error', { what = 'senml_encode_failed', err = tostring(encode_err) })
-		return
+		return false
 	end
-	if #senml_list == 0 then return end
+	if #senml_list == 0 then return false end
 
 	local body = json.encode(senml_list)
 
 	local valid, config_err = conf.validate_http_config(State.cloud_config)
 	if not valid then
 		State.svc:obs_log('error', { what = 'http_publish_skipped', err = tostring(config_err) })
-		return
+		return false
 	end
 
 	local channel_id
@@ -269,7 +274,7 @@ local function http_publish(data)
 	end
 	if channel_id == nil then
 		State.svc:obs_log('error', { what = 'http_publish_failed', err = 'no data channel id found' })
-		return
+		return false
 	end
 
 	local uri   = string.format('%s/http/channels/%s/messages',
@@ -277,11 +282,49 @@ local function http_publish(data)
 	local auth  = 'Thing ' .. State.cloud_config.thing_key
 
 	-- Non-blocking enqueue: drop and log if the channel is at capacity.
-	local full = perform(State.http_send_ch:put_op({ uri = uri, auth = auth, body = body })
+	local full = perform(State.http_send_ch:put_op({ uri = uri, auth = auth, body = body, on_result = on_result })
 		:or_else(function() return true end))
 
 	if full then
 		State.svc:obs_log('error', { what = 'http_queue_full', err = 'dropping publish payload' })
+		return false
+	end
+	return true
+end
+
+--- Send the next crash record from an earlier process, in its own request. It goes
+--- straight to the cloud rather than through a pipeline, so it can't be lost to the
+--- start-up race between metrics and config. It stays on file until accepted.
+local function send_pending_crash()
+	if not State.crash_store or State.crash_inflight then return end
+	if not (State.base_time.synced and State.cloud_config) then return end
+
+	local tnow = now()
+	local rec = State.crash_store:next_pending(tnow)
+	if not rec then return end
+
+	-- rec.mono is from the same boot, so it converts to the time of the crash.
+	local at = math.floor((State.base_time.real + (rec.mono - State.base_time.mono)) * 1000)
+	local data = {}
+	for _, field in ipairs({ 'kind', 'service', 'status', 'reason', 'log', 'seq' }) do
+		if rec[field] ~= nil then
+			data['system.crash.' .. field] = { value = rec[field], time = at }
+		end
+	end
+	data['system.crash.uptime_s'] = { value = rec.mono, time = at }
+
+	State.crash_inflight = true
+	local queued = http_publish(data, function(accepted)
+		State.crash_inflight = false
+		if accepted then
+			State.crash_store:mark_sent(rec.seq, now())
+		else
+			State.crash_store:mark_failed(now())
+		end
+	end)
+	if not queued then
+		State.crash_inflight = false
+		State.crash_store:mark_failed(tnow)
 	end
 end
 
@@ -506,6 +549,7 @@ local function main()
 			State.svc:obs_log('debug', next_s
 				and string.format('config applied, next publish in %.1fs', next_s)
 				or 'config applied, publishing suspended (waiting for NTP sync)')
+			send_pending_crash()
 		elseif which == 'metric' then
 			local msg = a
 			if msg then
@@ -527,6 +571,7 @@ local function main()
 					State.svc:obs_event('ntp_lost', {})
 					State.svc:obs_log('debug', { what = 'ntp_lost' })
 				end
+				send_pending_crash()
 			end
 		elseif which == 'tick' then
 			local visits = State.ui_visits:drain(State.base_time)
@@ -550,6 +595,7 @@ local function main()
 			end
 			publish_all(values)
 			prune_idle_endpoints(now())
+			send_pending_crash()
 		end
 	end
 
@@ -598,6 +644,8 @@ function M.start(conn, opts)
 	State.cloud_config     = nil
 	State.base_time        = types.new.BaseTime(now_real(), now())
 	State.fs_cap           = nil
+	State.crash_store      = opts.crash_store or crash_record.new()
+	State.crash_inflight   = false
 
 	fibers.current_scope():finally(function()
 		local _, primary = fibers.current_scope():status()

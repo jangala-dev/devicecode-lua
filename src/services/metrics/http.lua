@@ -32,7 +32,7 @@ local HTTP_TIMEOUT = 60
 --- succeeds or the enclosing scope is cancelled.
 ---
 ---@param http_ref table  HTTP SDK ref (services.http.sdk Ref)
----@param data table      { uri: string, auth: string, body: string }
+---@param data table      { uri: string, auth: string, body: string, on_result: fun(accepted: boolean)? }
 ---@param log_fn fun(level: string, payload: any)
 local function send_http(http_ref, data, log_fn)
 	local uri            = data.uri
@@ -82,6 +82,8 @@ local function send_http(http_ref, data, log_fn)
 	else
 		log_fn('trace', { what = 'http_publish_ok', status = status })
 	end
+
+	if data.on_result then data.on_result(status == '202') end
 end
 
 --- Start the HTTP publisher fiber in the current scope.

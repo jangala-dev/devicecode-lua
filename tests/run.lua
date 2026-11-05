@@ -26,6 +26,7 @@ local files = {
 	'unit.config.codec_spec',
 	'unit.config.state_spec',
 	'unit.main.service_spec',
+	'unit.main.crash_record_spec',
 	'unit.config.service_spec',
 	'unit.system_spec',
 	'unit.devicecode.service_base_spec',

@@ -12,6 +12,7 @@ local perform      = fibers.perform
 local op           = require 'fibers.op'
 local busmod       = require 'bus'
 local json         = require 'cjson.safe'
+local crash_record = require 'devicecode.crash_record'
 local virtual_time = require 'tests.support.virtual_time'
 local time_harness = require 'tests.support.time_harness'
 local runfibers    = require 'tests.support.run_fibers'
@@ -342,6 +343,124 @@ function T.delta_value_pipeline()
 		stop_scope(svc_scope)
 		clock:restore()
 	end, { timeout = 3.0 })
+end
+
+-- Runs metrics with a stubbed HTTP publisher and a crash record already on file.
+local function with_pending_crash(synced, body)
+	local original_http_mod = package.loaded['services.metrics.http']
+	local sent = {}
+	package.loaded['services.metrics.http'] = {
+		start_http_publisher = function()
+			return {
+				put_op = function(_, data)
+					sent[#sent + 1] = data
+					return op.always(true)
+				end,
+			}
+		end,
+	}
+
+	local path = os.tmpname()
+	os.remove(path)
+	local function new_store(mono)
+		return crash_record.new({
+			path = path, boot_id = 'boot-1',
+			monotonic = function() return mono end,
+			read_system_log = function() return '' end,
+		})
+	end
+	local earlier = new_store(500)
+	earlier:begin_run()
+	earlier:record_failure({ service = 'gsm', status = 'failed', primary = 'gsm.lua:1: boom' })
+
+	local ok_run, run_err = pcall(function()
+		runfibers.run(function(scope)
+			local clock = new_test_clock()
+			scope:finally(function() clock:restore() end)
+			local bus       = make_bus()
+			local test_conn = bus:connect()
+
+			test_conn:retain({ 'cap', 'fs', 'credentials', 'state' }, 'added')
+			start_mock_hal(test_conn, scope)
+			test_conn:retain({ 'state', 'time', 'synced' }, synced)
+			test_conn:retain({ 'cfg', 'metrics' }, {
+				data = {
+					schema = METRICS_SCHEMA, publish_period = 0.1,
+					cloud_url = 'http://localhost:18080',
+					pipelines = { sim = { protocol = 'http', process = {} } },
+				},
+			})
+
+			local store = new_store(600)
+			store:begin_run()
+			local svc_scope = start_metrics(bus, scope, { name = 'metrics', crash_store = store })
+			flush_ticks()
+			clock:advance(0.3)
+			time_harness.flush_ticks(20)
+
+			body(sent, store, clock)
+
+			stop_scope(svc_scope)
+			clock:restore()
+		end, { timeout = 3.0 })
+	end)
+
+	package.loaded['services.metrics.http'] = original_http_mod
+	os.remove(path)
+	if not ok_run then error(run_err, 0) end
+end
+
+local function senml_field(data, name)
+	for _, rec in ipairs(json.decode(data.body)) do
+		if rec.n == 'system.crash.' .. name then return rec end
+	end
+	return nil
+end
+
+function T.crash_record_is_sent_with_the_time_it_happened()
+	with_pending_crash(true, function(sent)
+		assert(#sent >= 1, 'expected the crash record to be sent')
+		local data = sent[1]
+		assert(data.uri == 'http://localhost:18080/http/channels/ch-data/messages', 'uri: ' .. tostring(data.uri))
+		assert(senml_field(data, 'kind').vs == 'service_failed', 'kind')
+		assert(senml_field(data, 'service').vs == 'gsm', 'service')
+		assert(senml_field(data, 'reason').vs == 'gsm.lua:1: boom', 'reason')
+		assert(senml_field(data, 'uptime_s').v == 500, 'uptime')
+		-- The virtual clock started at monotonic 0, realtime 1700000000.
+		local t = senml_field(data, 'reason').t
+		assert(math.abs(t - 1700000500000) < 2000, 'expected the time of the crash, got ' .. tostring(t))
+	end)
+end
+
+function T.crash_record_is_sent_once_when_accepted()
+	with_pending_crash(true, function(sent, store, clock)
+		assert(#sent == 1, 'expected one send, got ' .. #sent)
+		clock:advance(0.3)
+		time_harness.flush_ticks(20)
+		assert(#sent == 1, 'should not resend while waiting for an answer, got ' .. #sent)
+
+		sent[1].on_result(true)
+		assert(store:next_pending(math.huge) == nil, 'accepted record should be gone')
+		clock:advance(0.3)
+		time_harness.flush_ticks(20)
+		assert(#sent == 1, 'should not send again, got ' .. #sent)
+	end)
+end
+
+function T.crash_record_is_kept_when_the_cloud_refuses_it()
+	with_pending_crash(true, function(sent, store, clock)
+		sent[1].on_result(false)
+		assert(store:next_pending(math.huge) ~= nil, 'refused record should stay on file')
+		clock:advance(0.3)
+		time_harness.flush_ticks(20)
+		assert(#sent == 1, 'should wait before retrying, got ' .. #sent)
+	end)
+end
+
+function T.crash_record_waits_for_time_sync()
+	with_pending_crash(false, function(sent)
+		assert(#sent == 0, 'should not send before the clock is synced, got ' .. #sent)
+	end)
 end
 
 -- HTTP pipelines should enqueue a well-formed Mainflux request payload.
