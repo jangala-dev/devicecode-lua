@@ -79,20 +79,22 @@ local function redact_line(line)
 	end
 end
 
---- Remove secrets and identifiers from free text. Callers cut text to size first,
---- because this runs on the scheduler and nothing else runs meanwhile.
+--- Remove secrets and identifiers from one record of free text. Newlines are treated
+--- as spaces, so a sensitive key also hides any continuation lines. Input is bounded
+--- because this runs on the scheduler. Apply size limits to the result, not the input:
+--- recognising a secret needs all of it, and masking can lengthen the text.
 ---@param text string
 ---@return string
 function M.redact(text)
-	text = tostring(text):sub(1, M.MAX_SCAN)
-	text = text:gsub('://[^/%s@]+@', '://[redacted]@')
+	text = tostring(text):sub(1, M.MAX_SCAN):gsub('[\r\n]+', ' ')
+	-- Any URL authority with a password or a port, whether or not the @ is in view.
+	text = text:gsub('://[^/%s]*', function(authority)
+		if authority:find('[:@]', 4) then return '://[redacted]' end
+		return authority
+	end)
 	text = text:gsub('([Tt]hing%s+)%S+', '%1[redacted]')
 	text = text:gsub('([Bb]earer%s+)%S+', '%1[redacted]')
-	local lines = {}
-	for line in (text .. '\n'):gmatch('([^\n]*)\n') do
-		lines[#lines + 1] = redact_line(line)
-	end
-	text = table.concat(lines, '\n')
+	text = redact_line(text)
 	text = text:gsub('%x%x[:%-]%x%x[:%-]%x%x[:%-]%x%x[:%-]%x%x[:%-]%x%x', '[mac]')
 	text = text:gsub('%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x', '[uuid]')
 	text = text:gsub('%d+', function(digits)
@@ -125,15 +127,28 @@ local function format_log_line(mono, service, level, payload)
 			parts[#parts + 1] = k .. '=' .. value
 		end
 	end
-	return M.redact(table.concat(parts, ' '):sub(1, M.MAX_LINE))
+	return M.redact(table.concat(parts, ' ')):sub(1, M.MAX_LINE)
 end
 
---- The newest text that fits, cut at a line boundary where possible.
+--- The newest whole lines that fit.
 local function keep_tail(text, max)
 	if #text <= max then return text end
 	local tail = text:sub(-max)
 	local newline = tail:find('\n', 1, true)
-	return newline and tail:sub(newline + 1) or tail
+	return newline and tail:sub(newline + 1) or ''
+end
+
+--- The lines of the system log worth keeping when a process was killed. The kernel
+--- says why it killed it, and procd what it did next. Other daemons' logs could hold
+--- anything, and multi-line text can't be redacted one line at a time.
+local function kernel_lines(text)
+	local kept = {}
+	for line in keep_tail(tostring(text), M.MAX_SCAN):gmatch('[^\n]+') do
+		if line:find('kern.', 1, true) or line:find('procd', 1, true) then
+			kept[#kept + 1] = M.redact(line):sub(1, M.MAX_LINE)
+		end
+	end
+	return table.concat(kept, '\n')
 end
 
 local function read_boot_id()
@@ -192,7 +207,8 @@ function Store:save(state)
 	if ok then os.rename(tmp, self.path) else os.remove(tmp) end
 end
 
---- Add a record for this run. The first record of a run wins.
+--- Add a record for this run, with log_text already redacted. The first record of a
+--- run wins.
 function Store:add(state, fields, log_text)
 	state.seq = state.seq + 1
 	local rec = {
@@ -201,12 +217,12 @@ function Store:add(state, fields, log_text)
 		service = fields.service,
 		status  = fields.status,
 		mono    = self.monotonic(),
-		reason  = M.redact(tostring(fields.reason or ''):sub(1, M.MAX_REASON)),
+		reason  = M.redact(fields.reason or ''):sub(1, M.MAX_REASON),
 	}
 	if log_text then
 		state.crashes = state.crashes + 1
 		if state.crashes <= M.FULL_LOG_CRASHES and log_text ~= '' then
-			rec.log = keep_tail(M.redact(keep_tail(log_text, M.MAX_SCAN)), M.MAX_LOG)
+			rec.log = keep_tail(log_text, M.MAX_LOG)
 		end
 	end
 	state.pending[#state.pending + 1] = rec
@@ -233,7 +249,7 @@ Store.begin_run = guarded(function(self)
 		self:add(state, {
 			kind   = 'unknown_exit',
 			reason = 'previous process ended without a record',
-		}, self.read_system_log())
+		}, kernel_lines(self.read_system_log()))
 	end
 	state.running  = true
 	state.recorded = false

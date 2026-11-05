@@ -233,6 +233,90 @@ function T.secrets_in_json_quoted_and_nested_text_are_removed()
 	os.remove(path)
 end
 
+function T.secrets_on_continuation_lines_are_removed()
+	local path = temp_path()
+	local store = new_store(path)
+	store:begin_run()
+	store:note_log('x', 'error', { what = 'a', message = 'password="first\ncontinuation1\nlast"' })
+	store:note_log('x', 'error', { what = 'b', message = '{\n  "credentials": {\n    "value": "continuation2"\n  }\n}' })
+	store:record_failure({ service = 'x', status = 'failed', primary = 'psk: "one\ncontinuation3"' })
+
+	local rec = restarted(path):next_pending(2000)
+	local text = rec.reason .. '\n' .. rec.log
+	for _, secret in ipairs({ 'continuation1', 'continuation2', 'continuation3', 'first', 'last' }) do
+		assert(not text:match(secret), 'leaked ' .. secret .. ' in: ' .. text)
+	end
+	os.remove(path)
+end
+
+function T.a_credential_cut_off_by_the_limits_stays_hidden()
+	local path = temp_path()
+	local store = new_store(path)
+	store:begin_run()
+	local long = string.rep('p', 3000)
+	store:note_log('x', 'error', { what = 'a', message = 'GET https://alice:' .. long .. '@host/x' })
+	store:record_failure({ service = 'x', status = 'failed', primary = 'GET https://bob:' .. long .. '@host/x' })
+
+	local rec = restarted(path):next_pending(2000)
+	local text = rec.reason .. '\n' .. rec.log
+	for _, secret in ipairs({ 'alice', 'bob', 'pppp' }) do
+		assert(not text:match(secret), 'leaked ' .. secret .. ' in: ' .. text)
+	end
+	os.remove(path)
+end
+
+function T.limits_hold_after_redaction_lengthens_the_text()
+	local path = temp_path()
+	local store = new_store(path)
+	store:begin_run()
+	local nearly = string.rep('x', crash_record.MAX_REASON - 10) .. ' password='
+	store:note_log('x', 'error', { what = 'a', message = nearly })
+	store:record_failure({ service = 'x', status = 'failed', primary = nearly })
+
+	local rec = restarted(path):next_pending(2000)
+	assert(#rec.reason <= crash_record.MAX_REASON, 'reason length ' .. #rec.reason)
+	for line in rec.log:gmatch('[^\n]+') do
+		assert(#line <= crash_record.MAX_LINE, 'line length ' .. #line)
+	end
+	os.remove(path)
+end
+
+function T.only_kernel_and_procd_lines_come_from_the_system_log()
+	local path = temp_path()
+	new_store(path):begin_run()
+	local store = restarted(path, {
+		read_system_log = function()
+			return table.concat({
+				'daemon.info someapp: connected with secret hunter2 for AA:BB:CC:DD:EE:FF',
+				'daemon.notice other: pretty printed',
+				'  continuation line of something',
+				'daemon.info procd: Instance devicecode::instance1 s in a crash loop',
+				'kern.err kernel: Out of memory: Killed process 1234 (luajit)',
+				'',
+			}, '\n')
+		end,
+	})
+	local rec = store:next_pending(2000)
+	assert(rec.log:match('Out of memory'), 'log: ' .. tostring(rec.log))
+	assert(rec.log:match('procd'), 'log: ' .. tostring(rec.log))
+	assert(not rec.log:match('hunter2'), 'log: ' .. tostring(rec.log))
+	assert(not rec.log:match('continuation'), 'log: ' .. tostring(rec.log))
+	os.remove(path)
+end
+
+function T.a_very_long_system_log_line_is_not_kept_part_way_through()
+	local path = temp_path()
+	new_store(path):begin_run()
+	local store = restarted(path, {
+		read_system_log = function()
+			return 'kern.err kernel: password=' .. string.rep('s', 20000) .. '\n'
+		end,
+	})
+	local rec = store:next_pending(2000)
+	assert(not tostring(rec.log):match('sss'), 'leaked part of a value: ' .. tostring(rec.log):sub(1, 80))
+	os.remove(path)
+end
+
 function T.ordinary_errors_are_left_readable()
 	for _, line in ipairs({
 		"gsm.lua:1685: attempt to index field 'scope' (a nil value)",
