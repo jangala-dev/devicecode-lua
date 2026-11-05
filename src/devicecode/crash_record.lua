@@ -33,7 +33,8 @@ M.MAX_LINE         = 200
 M.RING_LINES       = 20
 M.FULL_LOG_CRASHES = 3   -- crashes per boot that keep a log, for metered SIMs
 M.MAX_PENDING      = 5
-M.SEND_INTERVAL_S  = 600 -- between sends once past the first crashes, and between retries
+M.SEND_INTERVAL_S  = 600 -- between sends once past the first crashes, and the longest wait to retry
+M.RETRY_MIN_S      = 30  -- first wait after a failed send, doubling each time
 M.LOGREAD_TIMEOUT_S = 5
 M.MAX_SCAN         = 8192 -- the most text redact will look at
 
@@ -320,13 +321,16 @@ Store.mark_sent = guarded(function(self, seq, now)
 		end
 	end
 	state.next_send = (seq > M.FULL_LOG_CRASHES) and (now + M.SEND_INTERVAL_S) or 0
+	state.failures = 0
 	self:save(state)
 end)
 
---- The cloud refused the record: keep it and try again later.
+--- The send failed: keep the record and try again later. The first attempt is often made
+--- while the network is still coming up after a restart, so start with a short wait.
 Store.mark_failed = guarded(function(self, now)
 	local state = self:load()
-	state.next_send = now + M.SEND_INTERVAL_S
+	state.failures = (state.failures or 0) + 1
+	state.next_send = now + math.min(M.RETRY_MIN_S * 2 ^ (state.failures - 1), M.SEND_INTERVAL_S)
 	self:save(state)
 end)
 

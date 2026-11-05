@@ -444,8 +444,42 @@ function T.a_failed_send_keeps_the_record_and_retries_later()
 	store:mark_failed(2000)
 
 	assert(store:next_pending(2000) == nil, 'should wait before retrying')
-	local again = store:next_pending(2000 + crash_record.SEND_INTERVAL_S)
+	local again = store:next_pending(2000 + crash_record.RETRY_MIN_S)
 	assert(again and again.seq == rec.seq, 'expected the same record again')
+	os.remove(path)
+end
+
+-- The first send often fails because the network is still coming up, so it shouldn't
+-- cost a long wait. Repeated failures back off to the full interval and stay there.
+function T.failed_sends_back_off_from_a_short_wait_to_the_full_interval()
+	local path = temp_path()
+	failed_run(path)
+	local store = restarted(path)
+	local t = 2000
+	local waits = {}
+	for i = 1, 8 do
+		store:mark_failed(t)
+		local wait = 1
+		while not store:next_pending(t + wait) do wait = wait + 1 end
+		waits[i] = wait
+		t = t + wait
+	end
+	assert(waits[1] == crash_record.RETRY_MIN_S, 'first wait: ' .. waits[1])
+	assert(waits[2] == crash_record.RETRY_MIN_S * 2, 'second wait: ' .. waits[2])
+	assert(waits[8] == crash_record.SEND_INTERVAL_S, 'last wait: ' .. waits[8])
+	os.remove(path)
+end
+
+function T.a_success_resets_the_backoff()
+	local path = temp_path()
+	for _ = 1, 2 do failed_run(path) end
+	local store = restarted(path)
+	for _ = 1, 5 do store:mark_failed(2000) end
+	local rec = assert(store:next_pending(2000 + crash_record.SEND_INTERVAL_S))
+	store:mark_sent(rec.seq, 2000 + crash_record.SEND_INTERVAL_S)
+
+	store:mark_failed(5000)
+	assert(store:next_pending(5000 + crash_record.RETRY_MIN_S), 'expected the short wait again')
 	os.remove(path)
 end
 
