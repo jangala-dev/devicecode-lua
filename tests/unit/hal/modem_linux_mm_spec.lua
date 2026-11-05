@@ -47,11 +47,11 @@ function tests.test_linux_mm_parses_sim_lock_fields_from_modem_json()
 {
   "modem": {
     "3gpp": {
-      "imei": "860195058017887",
+      "imei": "000000000000001",
       "operator-name": "--"
     },
     "generic": {
-      "equipment-identifier": "860195058017887",
+      "equipment-identifier": "000000000000001",
       "device": "/sys/devices/demo",
       "primary-port": "cdc-wdm1",
       "ports": ["cdc-wdm1 (qmi)", "ttyUSB6 (at)", "wwan1 (net)"],
@@ -83,11 +83,11 @@ function tests.test_linux_mm_normalises_absent_unlock_required()
 {
   "modem": {
     "3gpp": {
-      "imei": "868549060377253",
+      "imei": "000000000000002",
       "operator-name": "Demo"
     },
     "generic": {
-      "equipment-identifier": "868549060377253",
+      "equipment-identifier": "000000000000002",
       "ports": [],
       "access-technologies": "lte",
       "drivers": "qmi_wwan",
