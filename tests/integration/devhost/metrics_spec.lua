@@ -352,12 +352,13 @@ local function with_pending_crash(synced, body, opts)
 	local sent = {}
 	package.loaded['services.metrics.http'] = {
 		start_http_publisher = function()
-			return {
-				put_op = function(_, data)
-					sent[#sent + 1] = data
-					return op.always(nil) -- as the real channel does when there's room
-				end,
-			}
+			local channel = {}
+			channel.put_op = function(_, data)
+				data.channel = channel
+				sent[#sent + 1] = data
+				return op.always(nil) -- as the real channel does when there's room
+			end
+			return channel
 		end,
 	}
 
@@ -404,7 +405,7 @@ local function with_pending_crash(synced, body, opts)
 			clock:advance(0.3)
 			time_harness.flush_ticks(20)
 
-			body(sent, store, clock)
+			body(sent, store, clock, test_conn)
 
 			stop_scope(svc_scope)
 			clock:restore()
@@ -507,6 +508,23 @@ function T.crash_send_interval_does_not_wait_for_the_publish_tick()
 		advance_crash_clock(clock, 2)
 		assert(#sent == 5, 'expected the paced send, got ' .. #sent)
 	end, { timeout = 3000, publish_period = 3600, records = 5 })
+end
+
+-- The publisher sends one payload at a time, and retries ordinary telemetry for ever
+-- when the network fails. A crash record behind that wouldn't go out until it got through.
+function T.crash_record_does_not_queue_behind_ordinary_telemetry()
+	with_pending_crash(true, function(sent, _, clock, test_conn)
+		test_conn:publish({ 'obs', 'v1', 'modem', 'metric', 'sim' }, { value = 'x' })
+		advance_crash_clock(clock, 0.3)
+
+		local crash, ordinary
+		for _, data in ipairs(sent) do
+			if data.one_shot then crash = data else ordinary = data end
+		end
+		assert(crash, 'expected a crash send')
+		assert(ordinary, 'expected an ordinary send')
+		assert(crash.channel ~= ordinary.channel, 'expected a crash send to have its own publisher')
+	end)
 end
 
 -- A full /tmp means the wait can't be saved, which mustn't turn into a tight loop.

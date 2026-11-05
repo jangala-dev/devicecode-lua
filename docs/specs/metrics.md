@@ -300,7 +300,7 @@ When devicecode exits, the reason would otherwise be lost: logs are in RAM and t
 
 Each record is sent in its own request once config is loaded and the time is synced, using `system.crash.kind`, `service`, `status`, `reason`, `log`, `seq` and `uptime_s`, timestamped when it happened. It's recorded as soon as the failure happens, because a service that won't finish cancelling can hold up the exit for ever. It stays on file until the cloud accepts it. If a send fails it's tried again after 30 seconds, doubling up to every 10 minutes, because the first attempt is often made while the network is still coming up. It doesn't go through a pipeline, so it can't be lost to the start-up race between metrics and config.
 
-Sends and retries run to their own deadline, not the publish period, so a long publish period can't hold a record back until a reboot clears it. They are always at least 5 seconds apart.
+Sends and retries run to their own deadline, not the publish period, so a long publish period can't hold a record back until a reboot clears it. They also have their own publisher, so they don't queue behind telemetry that's being retried. They are always at least 5 seconds apart.
 
 **Limits, for metered SIMs:** the reason is at most 200 characters and the log at most 2 KB. Only the first 3 crashes in a boot keep a log, at most 5 records wait at once, and once past the first crashes, accepted records go at most every 10 minutes. Failed sends follow the retry timing above, which is faster at first, and a refused or timed-out send can cost the full upload. `seq` still shows how many there have been.
 

@@ -129,6 +129,7 @@ local State = {
 	name             = nil,
 	http_ref         = nil,
 	http_send_ch     = nil,
+	crash_send_ch    = nil,
 	pipelines_map    = {},
 	metric_states    = {},
 	endpoint_to_pipe = {},
@@ -300,7 +301,8 @@ local function http_publish(data, on_result)
 	local auth  = 'Thing ' .. State.cloud_config.thing_key
 
 	-- Non-blocking enqueue: drop and log if the channel is at capacity.
-	local full = perform(State.http_send_ch:put_op({
+	local send_ch = on_result and State.crash_send_ch or State.http_send_ch
+	local full = perform(send_ch:put_op({
 		uri = uri, auth = auth, body = body, on_result = on_result, one_shot = on_result ~= nil,
 	})
 		:or_else(function() return true end))
@@ -710,9 +712,11 @@ function M.start(conn, opts)
 	State.svc              = svc
 	State.name             = name
 	State.http_ref         = http_sdk.new_ref(conn, opts.http_service_id or 'main')
-	State.http_send_ch     = http_m.start_http_publisher(State.http_ref, function(level, payload)
-		svc:obs_log(level, payload)
-	end)
+	local function publisher_log(level, payload) svc:obs_log(level, payload) end
+	State.http_send_ch     = http_m.start_http_publisher(State.http_ref, publisher_log)
+	-- A publisher sends one payload at a time and retries ordinary telemetry for ever
+	-- on a network failure, so crash records can't wait in the same queue.
+	State.crash_send_ch    = http_m.start_http_publisher(State.http_ref, publisher_log)
 	State.pipelines_map    = {}
 	State.metric_states    = {}
 	State.endpoint_to_pipe = {}
