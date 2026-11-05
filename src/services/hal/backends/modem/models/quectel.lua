@@ -139,14 +139,14 @@ local function set_pdn_type(backend, cid, pdp_type)
     local _, err, timed_out = run_pdp_command(backend.identity.at_port, command)
     if err ~= "" and not timed_out then return false, err end
     local contexts, read_err = backend:read_pdp_contexts()
-    if not contexts then return false, read_err end
+    if not contexts then return false, 'pdp_type_change_unverified:' .. read_err end
     for _, context in ipairs(contexts) do
         if context.cid == opts.cid then
             if context.pdp_type == opts.pdp_type then return true, "" end
             return false, 'pdp_type_verification_failed:' .. tostring(opts.cid)
         end
     end
-    return false, 'pdp_context_missing:' .. tostring(opts.cid)
+    return false, 'pdp_type_change_unverified:pdp_context_missing:' .. tostring(opts.cid)
 end
 
 local SIM_POLL_INTERVAL = 5

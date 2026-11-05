@@ -1258,6 +1258,12 @@ local function pdp_error_state(err)
 	return err and err:match('modem_invalid_pdp_state:([%w_-]+)') or nil
 end
 
+---@param err string?
+---@return boolean
+local function pdp_change_unverified(err)
+	return err ~= nil and err:find('pdp_type_change_unverified:', 1, true) ~= nil
+end
+
 ---@param event ModemStateEvent
 ---@param previous_state ModemState?
 ---@return boolean transitioned
@@ -1353,9 +1359,13 @@ function GsmModem:_configure_pdp()
 				what = set_err == "" and 'pdp_type_changed' or 'pdp_type_change_failed',
 				modem = self.name, cid = context.cid, pdp_type = pdp_type, err = set_err,
 			})
-			if set_err == "" then
+			if set_err == "" or pdp_change_unverified(set_err) then
 				self.pdp_restart_needed = true
 				correction_applied = true
+				if set_err ~= "" then
+					change_err = set_err
+					break -- The write may have applied; restart before issuing more PDP commands.
+				end
 			else
 				change_err = set_err
 			end

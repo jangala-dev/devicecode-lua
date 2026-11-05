@@ -287,6 +287,9 @@ function tests.test_pdp_setter_does_not_trust_ok_or_reboot_on_read_failure()
             local ok, err = b:set_pdn_type(1, 'IP')
             eq(ok, false)
             assert(err ~= '')
+            if response == false or #response == 0 then
+                assert(err:find('pdp_type_change_unverified:', 1, true))
+            end
         end)
     end
     with_at(function(_, n)

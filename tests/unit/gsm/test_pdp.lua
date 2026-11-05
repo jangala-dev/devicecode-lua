@@ -204,6 +204,24 @@ function tests.test_pdp_recovery_read_and_verification_failures_do_not_restart()
     end)
 end
 
+function tests.test_pdp_recovery_restarts_when_change_verification_is_unavailable()
+    runfibers.run(function()
+        local m, calls = fixture({ context(1, 'IPV6', true) }, {
+            call = function(method)
+                if method == 'set_pdn_type' then
+                    return reply(false, 'pdp_type_change_unverified:read failed')
+                end
+            end,
+        })
+        local restarted, err = m:_configure_pdp()
+        eq(restarted, true)
+        eq(err, '')
+        eq(count(calls, 'set_pdn_type'), 1)
+        eq(count(calls, 'restart'), 1)
+        eq(m.pdp_restart_needed, false)
+    end)
+end
+
 function tests.test_pdp_recovery_restarts_once_after_partial_verified_changes()
     runfibers.run(function()
         local m, calls = fixture({ context(1, 'IPV6', true), context(2, 'IPV6', true) }, {
