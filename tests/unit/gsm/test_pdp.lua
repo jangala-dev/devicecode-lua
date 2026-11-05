@@ -62,9 +62,10 @@ local function fixture(contexts, overrides)
             return sub
         end,
     }
+    local svc = overrides.svc or { obs_log = function(_, _, payload) logs[#logs + 1] = payload end }
     local m = setmetatable({
-        name = 'primary', cap = cap, cfg = {}, config_pulse = pulse.new(),
-        svc = { obs_log = function(_, _, payload) logs[#logs + 1] = payload end },
+        id = overrides.id or 'modem-1', name = 'primary', cap = cap, cfg = {}, config_pulse = pulse.new(),
+        svc = svc,
     }, gsm._test.GsmModem)
     return m, calls, logs, values, subs
 end
@@ -339,6 +340,33 @@ function tests.test_pdp_restart_unobserved_transition_restores_retry_state()
         eq(m.pdp_restart_needed, true)
         eq(m.pdp_restart_waiting, false)
         eq(subs[1].closed, true)
+    end)
+end
+
+function tests.test_pdp_correction_limit_survives_modem_recreation()
+    runfibers.run(function()
+        local svc = { obs_log = function() end }
+        local contexts = { context(1, 'IPV6', true) }
+        local function correction_fixture()
+            return fixture(contexts, {
+                svc = svc,
+                call = function(method, opts)
+                    if method == 'set_pdn_type' then contexts[1].pdp_type = opts.pdp_type end
+                end,
+            })
+        end
+        local first, first_calls = correction_fixture()
+        eq(first:_configure_pdp(), true)
+        eq(count(first_calls, 'set_pdn_type'), 1)
+        eq(count(first_calls, 'restart'), 1)
+
+        contexts[1].pdp_type = 'IPV6' -- Carrier profile reverted the context after reset.
+        local replacement, replacement_calls = correction_fixture()
+        local restarted, err = replacement:_configure_pdp()
+        eq(restarted, false)
+        eq(err, '')
+        eq(count(replacement_calls, 'set_pdn_type'), 0)
+        eq(count(replacement_calls, 'restart'), 0)
     end)
 end
 

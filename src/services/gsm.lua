@@ -44,6 +44,7 @@ local DEFAULT_SIGNAL_FREQ = 5
 ---@alias GsmPdpType 'IP'|'IPV4V6'|'IPV6'
 ---@type GsmPdpType
 local DEFAULT_PDP_TYPE = 'IP'
+local MAX_PDP_CORRECTIONS = 1
 ---@type table<GsmPdpType, boolean>
 local VALID_PDP_TYPES = { IP = true, IPV4V6 = true, IPV6 = true }
 local APN_SETTLE_TIMEOUT = 3 -- seconds to wait for modem to enter 'connecting' after a failed attempt
@@ -792,6 +793,27 @@ function GsmModem.new(cap, svc)
 	return self
 end
 
+---@return table<string, integer> attempts
+function GsmModem:_pdp_correction_attempts()
+	self.svc.pdp_correction_attempts = self.svc.pdp_correction_attempts or {}
+	return self.svc.pdp_correction_attempts
+end
+
+---@return string key
+function GsmModem:_pdp_correction_key()
+	return tostring(self.id) .. '\0' .. tostring(self.cfg.pdp_type or DEFAULT_PDP_TYPE)
+end
+
+---@return nil
+function GsmModem:_clear_pdp_correction_attempts()
+	local attempts = self.svc.pdp_correction_attempts
+	if type(attempts) ~= 'table' then return end
+	local prefix = tostring(self.id) .. '\0'
+	for key in pairs(attempts) do
+		if key:sub(1, #prefix) == prefix then attempts[key] = nil end
+	end
+end
+
 ---@return nil
 function GsmModem:_signal_config_change()
 	self.config_pulse:signal()
@@ -801,7 +823,11 @@ end
 ---@param name string?
 ---@return nil
 function GsmModem:apply_config(cfg, name)
+	local previous_pdp_type = self.cfg.pdp_type or DEFAULT_PDP_TYPE
 	self.cfg = cfg or {}
+	if previous_pdp_type ~= (self.cfg.pdp_type or DEFAULT_PDP_TYPE) then
+		self:_clear_pdp_correction_attempts()
+	end
 	if name and name ~= "" then
 		self.name = name
 	end
@@ -1285,6 +1311,10 @@ end
 ---@return ModemState? state
 function GsmModem:_configure_pdp()
 	local pdp_type = self.cfg.pdp_type or DEFAULT_PDP_TYPE
+	local correction_key = self:_pdp_correction_key()
+	local correction_attempts = self:_pdp_correction_attempts()
+	local restart_pending = self.pdp_restart_needed == true
+	local correction_applied = false
 	self.svc:obs_log('debug', { what = 'pdp_inspect', modem = self.name, pdp_type = pdp_type })
 	local contexts, err = modem_get_field(self.cap, 'pdp_contexts', REQUEST_TIMEOUT, 0)
 	if err ~= "" then
@@ -1305,6 +1335,14 @@ function GsmModem:_configure_pdp()
 	end
 	for _, context in ipairs(contexts) do
 		if context.active and context.pdp_type ~= pdp_type then
+			if restart_pending then break end
+			if (correction_attempts[correction_key] or 0) >= MAX_PDP_CORRECTIONS then
+				self.svc:obs_log('error', {
+					what = 'pdp_type_persistent_mismatch', modem = self.name, cid = context.cid,
+					requested = pdp_type, observed = context.pdp_type,
+				})
+				return false, ""
+			end
 			local opts, opts_err = cap_sdk.args.new.ModemSetPdnTypeOpts(context.cid, pdp_type)
 			local set_err = opts_err
 			if opts then
@@ -1315,13 +1353,21 @@ function GsmModem:_configure_pdp()
 				what = set_err == "" and 'pdp_type_changed' or 'pdp_type_change_failed',
 				modem = self.name, cid = context.cid, pdp_type = pdp_type, err = set_err,
 			})
-			if set_err == "" then self.pdp_restart_needed = true else change_err = set_err end
+			if set_err == "" then
+				self.pdp_restart_needed = true
+				correction_applied = true
+			else
+				change_err = set_err
+			end
 			local state = pdp_error_state(set_err)
 			if state then
 				if not self.pdp_restart_needed then return false, set_err, state end
 				break -- Stop PDP commands; verified changes still need a reboot.
 			end
 		end
+	end
+	if correction_applied then
+		correction_attempts[correction_key] = (correction_attempts[correction_key] or 0) + 1
 	end
 	if not self.pdp_restart_needed then return false, change_err end
 
@@ -1515,6 +1561,7 @@ function GsmModem:_autoconnect_loop()
 				local sim = sim_payload_from_value(msg.payload, self.sim_lock, self.sim_lock_retries, self.modem_state)
 				self:_accept_sim_state(msg.payload)
 				if sim.present == false then
+					self:_clear_pdp_correction_attempts()
 					self.connected = false
 					connected = false
 				end
