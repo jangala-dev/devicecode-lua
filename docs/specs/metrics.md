@@ -282,7 +282,9 @@ The delta value block always outputs the difference between the last published v
 - **Calculation**: Returns `current_value - last_published_value`
 - **Reset**: On reset, sets `last_val = current_val` (resets to the current value, not zero)
 - **Reset Trigger**: Only resets after a successful publish cycle (when pipeline completes without short-circuit)
-- **Always Publishes**: Does not short-circuit; always returns a delta value
+- **Publishes Every Sample**: Returns a delta for every sample, except the baseline sample below
+- **Restart Baseline**: If the metrics service starts more than 5 minutes into a boot, devicecode has restarted and the kernel counters have kept their values. An endpoint first seen within 10 minutes of that start takes its first sample as the baseline and publishes nothing for it, so the whole counter isn't reported as new traffic. Traffic during the restart goes uncounted. After a fresh boot, and for endpoints first seen later, the first sample counts in full
+- **Config Replacement**: A new config keeps the state of any pipeline whose definition and template are unchanged, so those counters carry on. A pipeline whose logic changed starts again, so its next sample counts as a first sample
 
 ## Timestamping
 

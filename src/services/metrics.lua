@@ -109,6 +109,13 @@ end
 -- Service state
 -------------------------------------------------------------------------------
 
+-- devicecode starts well inside this on a fresh boot, so a later start is a
+-- restart of the process, and the kernel counters have kept their values.
+local RESTART_MIN_UPTIME_S = 300
+-- Endpoints first seen this soon after a restart were already counting before it.
+-- Later ones are new, such as a Wi-Fi session, so their first sample is real traffic.
+local RESTART_BASELINE_WINDOW_S = 600
+
 ---@type ServiceState
 local State = {
 	conn             = nil,
@@ -127,6 +134,8 @@ local State = {
 	cloud_config     = nil,
 	base_time        = nil,
 	fs_cap           = nil,
+	baseline_until   = nil,
+	config_data      = nil,
 }
 
 -------------------------------------------------------------------------------
@@ -383,7 +392,9 @@ local function handle_metric(msg)
 
 	-- Get-or-create per-endpoint processing state.
 	if not State.metric_states[endpoint_str] then
-		State.metric_states[endpoint_str]    = pipe_cfg.pipeline:new_state()
+		State.metric_states[endpoint_str]    = pipe_cfg.pipeline:new_state({
+			baseline_first_sample = State.baseline_until ~= nil and now() <= State.baseline_until,
+		})
 		State.endpoint_to_pipe[endpoint_str] = metric_name
 	end
 	State.endpoint_seen[endpoint_str] = now()
@@ -403,6 +414,31 @@ end
 -------------------------------------------------------------------------------
 -- Config handling
 -------------------------------------------------------------------------------
+
+local function deep_equal(a, b)
+	if a == b then return true end
+	if type(a) ~= 'table' or type(b) ~= 'table' then return false end
+	for k, v in pairs(a) do
+		if not deep_equal(v, b[k]) then return false end
+	end
+	for k in pairs(b) do
+		if a[k] == nil then return false end
+	end
+	return true
+end
+
+--- A pipeline's definition, and the template it uses if any.
+local function pipeline_definition(data, metric_name)
+	local pipeline = data and data.pipelines and data.pipelines[metric_name]
+	local template = pipeline and pipeline.template
+	return pipeline, template and data.templates and data.templates[template]
+end
+
+local function same_pipeline(old_data, new_data, metric_name)
+	local old_pipeline, old_template = pipeline_definition(old_data, metric_name)
+	local new_pipeline, new_template = pipeline_definition(new_data, metric_name)
+	return old_pipeline ~= nil and deep_equal(old_pipeline, new_pipeline) and deep_equal(old_template, new_template)
+end
 
 ---@param payload table?
 ---@return number next_publish_time
@@ -429,10 +465,16 @@ local function handle_config(payload)
 	State.cloud_url = payload.data and payload.data.cloud_url
 	rebuild_cloud_config()
 
-	-- Replace all pipeline state (logic may have changed).
+	-- Replace state only for pipelines whose logic has changed. Counters on the rest
+	-- have lost nothing, whatever else in the config changed.
+	for endpoint_str, metric_name in pairs(State.endpoint_to_pipe) do
+		if not same_pipeline(State.config_data, payload.data, metric_name) then
+			State.metric_states[endpoint_str]    = nil
+			State.endpoint_to_pipe[endpoint_str] = nil
+		end
+	end
+	State.config_data      = payload.data
 	State.pipelines_map    = new_pipelines_map
-	State.metric_states    = {}
-	State.endpoint_to_pipe = {}
 	State.publish_period   = new_publish_period
 
 	if State.base_time.synced and State.publish_period then
@@ -599,6 +641,9 @@ function M.start(conn, opts)
 	State.cloud_config     = nil
 	State.base_time        = types.new.BaseTime(now_real(), now())
 	State.fs_cap           = nil
+	State.config_data      = nil
+	-- Monotonic time is time since boot, so this tells a restart from a fresh boot.
+	State.baseline_until   = (now() >= RESTART_MIN_UPTIME_S) and (now() + RESTART_BASELINE_WINDOW_S) or nil
 
 	fibers.current_scope():finally(function()
 		local _, primary = fibers.current_scope():status()

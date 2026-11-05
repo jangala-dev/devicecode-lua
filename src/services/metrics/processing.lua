@@ -13,7 +13,9 @@
 --   block:reset(state)              -> nil
 --
 -- ProcessPipeline wraps a list of blocks and exposes the same interface:
---   pipeline:new_state()            -> state_table  {full_run, blocks={...}}
+--   pipeline:new_state(opts?)       -> state_table  {full_run, blocks={...}}
+--     opts.baseline_first_sample: a pipeline with a DeltaValue block takes the first
+--     sample as its baseline and publishes nothing for it.
 --   pipeline:run(value, state)      -> value, short_circuit, error
 --   pipeline:reset(state)           -> nil   (only resets when full_run == true)
 --   pipeline:force_reset(state)     -> nil   (reset unconditionally)
@@ -239,12 +241,42 @@ function ProcessPipeline:add(block)
     table.insert(self.process_blocks, block)
 end
 
+local function has_counter(pipeline)
+    for _, block in ipairs(pipeline.process_blocks) do
+        if getmetatable(block) == DeltaValue then return true end
+    end
+    return false
+end
+
+--- Measure this pipeline's counter from `value`. Only blocks up to the DeltaValue
+--- see the raw counter; any after it compare deltas, so they stay as they are.
+local function seed_counter(pipeline, state, value)
+    for i, block in ipairs(pipeline.process_blocks) do
+        local mt = getmetatable(block)
+        if mt == DeltaValue or mt == DiffTrigger then
+            local block_state = state.blocks[i]
+            block_state.last_val = value
+            block_state.curr_val = value
+            block_state.empty = false
+        end
+        if mt == DeltaValue then break end
+    end
+end
+
 --- Create a fresh state table for this pipeline (and all its blocks).
+---
+--- baseline_first_sample is for a devicecode restart: the kernel counter has kept
+--- its value, so measuring from initial_val would report the whole counter as new
+--- traffic.
+---@param opts? { baseline_first_sample: boolean? }
 ---@return table
-function ProcessPipeline:new_state()
+function ProcessPipeline:new_state(opts)
     local state = { full_run = false, blocks = {} }
     for i, block in ipairs(self.process_blocks) do
         state.blocks[i] = block:new_state()
+    end
+    if opts and opts.baseline_first_sample and has_counter(self) then
+        state.baseline_pending = true
     end
     return state
 end
@@ -257,6 +289,14 @@ end
 ---@return boolean short_circuit
 ---@return string? error
 function ProcessPipeline:run(value, state)
+    -- Taken here, ahead of the blocks: a trigger could reject the first sample
+    -- (a percent change from a counter at zero), and the next would then be lost.
+    if state.baseline_pending and type(value) == 'number' then
+        state.baseline_pending = nil
+        seed_counter(self, state, value)
+        return nil, true, nil
+    end
+
     local val   = value
     local short = false
     local err   = nil
