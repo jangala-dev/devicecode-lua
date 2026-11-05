@@ -690,7 +690,8 @@
       "apn_store": {
         "kind": "control-store",
         "id": "gsm",
-        "key": "custom-apns-v1"
+        "key": "custom-apns-v1",
+        "import_v09_user_cfg": true
       }
     }
   },
