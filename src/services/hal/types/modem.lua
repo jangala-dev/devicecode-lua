@@ -563,6 +563,7 @@ end
 ---@field pdp_type string
 ---@field apn string
 ---@field pdp_addr string
+---@field definition_tail string Complete context definition following the PDP type.
 ---@field active boolean?
 
 ---@class ModemPdpActivation

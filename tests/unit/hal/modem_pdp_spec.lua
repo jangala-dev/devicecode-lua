@@ -35,8 +35,8 @@ local function with_at(responder, body, timeout)
     at.send_op = saved
     assert(ok, err)
 end
-local function context_line(cid, pdp_type)
-    return ('+CGDCONT: %d,"%s","","",0,0'):format(cid, pdp_type)
+local function context_line(cid, pdp_type, tail)
+    return ('+CGDCONT: %d,"%s"%s'):format(cid, pdp_type, tail or ',"","",0,0')
 end
 
 ---@param plugin string
@@ -242,38 +242,45 @@ function tests.test_pdp_type_options_reject_invalid_cids_and_command_injection()
     end)
 end
 
-function tests.test_pdp_setter_verifies_ok_response_and_clears_apn()
+function tests.test_pdp_setter_changes_only_type_and_preserves_all_context_settings()
+    local tail = ',"private.apn","10.0.0.1",1,1,0,2,1,1'
     with_at(function(command, n)
         if n == 1 then
-            eq(command, 'AT+CGDCONT=3,"IP",""')
+            eq(command, 'AT+CGDCONT?')
+            return op.always({ context_line(3, 'IPV4V6', tail) })
+        end
+        if n == 2 then
+            eq(command, 'AT+CGDCONT=3,"IP"' .. tail)
             return op.always({})
         end
         eq(command, 'AT+CGDCONT?')
-        return op.always({ context_line(1, 'IPV6'), context_line(3, 'IP') })
+        return op.always({ context_line(1, 'IPV6'), context_line(3, 'IP', tail) })
     end, function(b, commands)
         local ok, err = b:set_pdn_type(3, 'ip')
         eq(ok, true)
         eq(err, '')
-        eq(#commands, 2)
+        eq(#commands, 3)
     end)
 end
 
 function tests.test_pdp_setter_verifies_silent_timeout()
     with_at(function(_, n)
-        if n == 1 then return sleep.sleep_op(math.huge) end
+        if n == 1 then return op.always({ context_line(1, 'IPV6') }) end
+        if n == 2 then return sleep.sleep_op(math.huge) end
         return op.always({ context_line(1, 'IP') })
     end, function(b, commands)
         local ok, err = b:set_pdn_type(1, 'IP')
         eq(ok, true)
         eq(err, '')
-        eq(#commands, 2)
+        eq(#commands, 3)
     end, 5)
 end
 
 function tests.test_pdp_setter_does_not_trust_ok_or_reboot_on_read_failure()
     for _, response in ipairs({ { context_line(1, 'IPV6') }, {}, false }) do
         with_at(function(_, n)
-            if n == 1 then return op.always({}) end
+            if n == 1 then return op.always({ context_line(1, 'IPV6') }) end
+            if n == 2 then return op.always({}) end
             if response == false then return op.always(nil, 'read failed') end
             return op.always(response)
         end, function(b)
@@ -282,11 +289,14 @@ function tests.test_pdp_setter_does_not_trust_ok_or_reboot_on_read_failure()
             assert(err ~= '')
         end)
     end
-    with_at(function() return op.always({}, 'error') end, function(b, commands)
+    with_at(function(_, n)
+        if n == 1 then return op.always({ context_line(1, 'IPV6') }) end
+        return op.always({}, 'error')
+    end, function(b, commands)
         local ok, err = b:set_pdn_type(1, 'IP')
         eq(ok, false)
         eq(err, 'error')
-        eq(#commands, 1)
+        eq(#commands, 2)
     end)
 end
 

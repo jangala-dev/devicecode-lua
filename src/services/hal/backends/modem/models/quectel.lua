@@ -20,13 +20,21 @@ local function parse_pdp_contexts(lines)
         if line:match('^%+CGDCONT:') then
             local cid, pdp_type, apn, pdp_addr, trailing = line:match(
                 '^%+CGDCONT:%s*(%d+)%s*,%s*"([^"]+)"%s*,%s*"([^"]*)"%s*,%s*"([^"]*)"(.*)$')
+            local definition_tail = line:match('^%+CGDCONT:%s*%d+%s*,%s*"[^"]+"(.*)$')
             cid = tonumber(cid)
             if not cid or cid <= 0 or seen[cid]
+                or not definition_tail or definition_tail:find('[\r\n]')
                 or not (trailing:match('^%s*$') or trailing:match('^%s*,')) then
                 return nil, 'malformed_pdp_context:' .. line
             end
             seen[cid] = true
-            contexts[#contexts + 1] = { cid = cid, pdp_type = pdp_type, apn = apn, pdp_addr = pdp_addr }
+            contexts[#contexts + 1] = {
+                cid = cid,
+                pdp_type = pdp_type,
+                apn = apn,
+                pdp_addr = pdp_addr,
+                definition_tail = definition_tail,
+            }
         end
     end
     return contexts, ""
@@ -119,7 +127,15 @@ end
 local function set_pdn_type(backend, cid, pdp_type)
     local opts, validation_err = capability_args.new.ModemSetPdnTypeOpts(cid, pdp_type)
     if not opts then return false, validation_err end
-    local command = string.format('AT+CGDCONT=%d,"%s",""', opts.cid, opts.pdp_type)
+    local before, read_before_err = backend:read_pdp_contexts()
+    if not before then return false, read_before_err end
+    local existing
+    for _, context in ipairs(before) do
+        if context.cid == opts.cid then existing = context; break end
+    end
+    if not existing then return false, 'pdp_context_missing:' .. tostring(opts.cid) end
+    local command = string.format(
+        'AT+CGDCONT=%d,"%s"%s', opts.cid, opts.pdp_type, existing.definition_tail)
     local _, err, timed_out = run_pdp_command(backend.identity.at_port, command)
     if err ~= "" and not timed_out then return false, err end
     local contexts, read_err = backend:read_pdp_contexts()
