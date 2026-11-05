@@ -172,6 +172,8 @@ local files = {
 	'integration.devhost.metrics_spec',
 	"unit.gsm.test_apn_model",
 	"unit.gsm.test_apn_store_control_store",
+	"unit.gsm.test_apn_legacy_import",
+	"unit.gsm.test_apn_legacy_import_service",
 	"unit.gsm.test_apn",
 	"unit.gsm.test_state",
 	"unit.net.test_architecture",

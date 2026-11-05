@@ -33,11 +33,14 @@ local apns = require "services.gsm.apn"
 local gsm_topics = require 'services.gsm.topics'
 local apn_model = require 'services.gsm.apn_model'
 local apn_store_control = require 'services.gsm.apn_store_control_store'
+local apn_legacy_import = require 'services.gsm.apn_legacy_import'
 local tablex = require 'shared.table'
 
 local copy = tablex.deep_copy
 
 local REQUEST_TIMEOUT = 10
+local APN_IMPORT_READ_TIMEOUT = 5
+local APN_IMPORT_MAX_RETRY_S = 60
 local DEFAULT_RETRY_TIMEOUT = 20
 local DEFAULT_METRICS_INTERVAL = 120
 local DEFAULT_SIGNAL_FREQ = 5
@@ -1372,6 +1375,8 @@ function GsmService.start(conn, opts)
 	local apn_store = nil
 	local apn_store_loaded = false
 	local apn_store_retry_delay_s = 1.0
+	local apn_import_pending = true
+	local apn_import_retry_delay_s = 0
 
 	-- Transitional APN bridge. GSM is still on its pre-modern service
 	-- architecture; keep this surface deliberately small until GSM is migrated.
@@ -1500,6 +1505,52 @@ function GsmService.start(conn, opts)
 		return nil, lerr or 'apn_store_load_failed'
 	end
 
+	-- One-time import of APNs saved by the v0.9 UI. It runs in the main loop's choice so
+	-- it never holds up GSM or the modems, and modems retry their APNs once it lands.
+	local function read_v09_user_cfg_op()
+		local read_opts, opts_err = cap_sdk.args.new.FilesystemReadOpts(apn_legacy_import.FILENAME)
+		if not read_opts then return op.always(nil, opts_err or 'invalid_filesystem_read_opts') end
+		return cap_sdk.new_cap_ref(conn, 'fs', 'credentials')
+			:call_control_op('read', read_opts, { timeout = APN_IMPORT_READ_TIMEOUT })
+	end
+
+	local function apn_import_op()
+		return fibers.run_scope_op(function ()
+			if apn_import_retry_delay_s > 0 then
+				perform(sleep.sleep_op(apn_import_retry_delay_s))
+			end
+			return perform(apn_legacy_import.run_op(apn_store, read_v09_user_cfg_op, function ()
+				return apn_import_pending
+			end))
+		end):wrap(function (st, rep, result, ierr)
+			if st ~= 'ok' then return nil, tostring(result or ierr or rep or 'apn_import_failed') end
+			return result, ierr
+		end)
+	end
+
+	local function handle_apn_import_result(result, ierr)
+		if not result then
+			apn_import_retry_delay_s = math.min(math.max(apn_import_retry_delay_s * 2, 1.0), APN_IMPORT_MAX_RETRY_S)
+			svc:obs_log('debug', { what = 'apn_v09_import_retry', err = tostring(ierr) })
+			return
+		end
+		apn_import_pending = false
+		local status = result.status
+		if status == 'imported' then
+			svc:obs_log('info', { what = 'apn_v09_import_done', imported = result.imported, skipped = result.skipped })
+			handle_apn_store_load_result(result.records)
+		elseif status == 'exists' then
+			-- An earlier attempt can save and then lose the main loop's choice.
+			if #custom_apns == 0 and #result.records > 0 then
+				handle_apn_store_load_result(result.records)
+			end
+		elseif status == 'malformed' then
+			svc:obs_log('warn', { what = 'apn_v09_import_malformed_file' })
+		elseif (result.skipped or 0) > 0 then
+			svc:obs_log('warn', { what = 'apn_v09_import_no_valid_records', skipped = result.skipped })
+		end
+	end
+
 	local function replace_custom_apns(records)
 		if not apn_store then return nil, 'apn_store_unavailable' end
 		if not apn_store_loaded then return nil, 'apn_store_not_ready' end
@@ -1512,6 +1563,7 @@ function GsmService.start(conn, opts)
 		end
 		custom_apns = saved
 		svc.custom_apns = custom_apns
+		apn_import_pending = false
 		publish_apn_state({ state = 'ready', ready = true })
 		signal_all_modems()
 		return copy(custom_apns), nil
@@ -1679,6 +1731,9 @@ function GsmService.start(conn, opts)
 		if apn_store and not apn_store_loaded then
 			choices.apn_store_retry = apn_store_retry_op()
 		end
+		if apn_store and apn_store_loaded and apn_import_pending then
+			choices.apn_import = apn_import_op()
+		end
 
 		local modem_fault_ops = {}
 		for id, modem in pairs(modems) do
@@ -1693,7 +1748,7 @@ function GsmService.start(conn, opts)
 
 		local which, msg, err = perform(op.named_choice(choices))
 
-		if not msg and which ~= 'apn_store_retry' then
+		if not msg and which ~= 'apn_store_retry' and which ~= 'apn_import' then
 			svc:obs_log('debug', { what = 'subscription_closed', err = tostring(err) })
 			return
 		end
@@ -1715,6 +1770,8 @@ function GsmService.start(conn, opts)
 					{ what = 'modem_scope_faulted', modem = tostring(msg.id), err = tostring(msg.primary) })
 				modem:stop()
 			end
+		elseif which == 'apn_import' then
+			handle_apn_import_result(msg, err)
 		elseif which == 'apn_store_retry' then
 			local _, retry_err = handle_apn_store_load_result(msg, err)
 			if retry_err then
