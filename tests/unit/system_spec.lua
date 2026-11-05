@@ -134,4 +134,39 @@ function T.collect_sysinfo_state_includes_pi_power_flags()
 	end)
 end
 
+-- The UI reads a missing flag as false, so a partial block could show a throttled box
+-- as fine. Only a complete set of flags is published.
+function T.collect_sysinfo_state_leaves_out_a_partial_power_block()
+	fibers.run(function()
+		local svc = { wall = function() return '2026-07-06 12:00:00' end }
+		local function run(replies)
+			local cap = {
+				call_control_op = function(_, _, opts)
+					return op.always(replies[opts.field] or { ok = true, reason = nil })
+				end,
+			}
+			return system._test.collect_sysinfo_state(svc, { ['platform:1'] = cap }, 0.1)
+		end
+		local good = { ok = true, reason = true }
+		local bad = { ok = false, reason = 'read failed' }
+
+		local out = run({ under_voltage_occurred = good })
+		assert_eq(out.power, nil, 'one flag read, others unknown')
+
+		out = run({
+			currently_throttled = bad, under_voltage_detected = bad,
+			arm_frequency_capped = bad, under_voltage_occurred = good,
+		})
+		assert_eq(out.power, nil, 'reads failed, then one succeeded')
+		assert_eq(out.state, 'partial')
+
+		out = run({
+			currently_throttled = good, under_voltage_detected = good,
+			arm_frequency_capped = good, under_voltage_occurred = { ok = true, reason = false },
+		})
+		assert_eq(out.power.currently_throttled, true)
+		assert_eq(out.power.under_voltage_occurred, false, 'false is a real value')
+	end)
+end
+
 return T

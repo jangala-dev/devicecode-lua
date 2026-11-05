@@ -264,6 +264,7 @@ local function collect_sysinfo_state(svc, cap_refs, max_age)
         at = svc:wall(),
         missing = {},
     }
+    local power = {}
 
     local function missing(key, err)
         out.missing[#out.missing + 1] = { key = key, err = tostring(err or 'unavailable') }
@@ -289,13 +290,21 @@ local function collect_sysinfo_state(svc, cap_refs, max_age)
                 elseif m.metric_key == 'temp' then
                     out.thermal = out.thermal or {}
                     out.thermal[THERMAL_ZONE0_ID] = { temp_c = tonumber(value) or value }
-                elseif m.class == 'platform' and value ~= nil then
-                    out.power = out.power or {}
-                    out.power[m.field] = value
+                elseif m.class == 'platform' then
+                    power[m.field] = value
                 end
             end
         end
     end
+
+    -- The UI reads a missing flag as false, so only publish a complete set.
+    for _, m in ipairs(SYSINFO_METRICS) do
+        if m.class == 'platform' and power[m.field] == nil then
+            power = nil
+            break
+        end
+    end
+    out.power = power
 
     if #out.missing == 0 then out.missing = nil end
     if out.cpu == nil and out.memory == nil and out.thermal == nil then out.state = 'unavailable' end
