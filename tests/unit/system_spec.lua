@@ -4,6 +4,8 @@ local fibers = require 'fibers'
 local op = require 'fibers.op'
 
 local sleep = require 'fibers.sleep'
+local runtime = require 'fibers.runtime'
+local virtual_time = require 'tests.support.virtual_time'
 
 local system = require 'services.system'
 
@@ -173,10 +175,40 @@ end
 
 function T.uptime_backstop_needs_a_configured_reboot()
 	local has = system._test.has_reboot_alarm
-	assert_eq(has({ alarms = { { payload = { type = 'reboot' } } } }), true)
-	assert_eq(has({ alarms = { { payload = { type = 'shutdown' } } } }), false)
-	assert_eq(has({ alarms = {} }), false)
+	assert_eq(has({ { payload = { type = 'reboot' } } }), true)
+	assert_eq(has({ { payload = { name = 'no type means reboot' } } }), true, 'handle_alarm defaults to reboot')
+	assert_eq(has({ {} }), true, 'no payload also means reboot')
+	assert_eq(has({ { payload = { type = 'shutdown' } } }), false)
 	assert_eq(has({}), false)
+end
+
+function T.uptime_backstop_fires_at_48_hours_only_when_it_should()
+	local backstop = system._test.uptime_backstop_op
+	assert_true(backstop(false, {}) == nil, 'no reboot alarm, no backstop')
+	assert_true(backstop(true, { power_pending = true }) == nil, 'already rebooting, no backstop')
+
+	fibers.run(function()
+		local clock = virtual_time.install({ monotonic = 47 * 3600, realtime = 1700000000 })
+		fibers.current_scope():finally(function() clock:restore() end)
+
+		local function fires()
+			local which = fibers.perform(op.named_choice({
+				backstop = backstop(true, {}),
+				now = op.always(true),
+			}))
+			return which == 'backstop'
+		end
+		runtime.yield()
+		assert_true(not fires(), 'should not fire before 48 hours')
+
+		clock:set_monotonic(48 * 3600 + 1)
+		runtime.yield()
+		local which = fibers.perform(op.named_choice({
+			backstop = backstop(true, {}),
+			timeout = sleep.sleep_op(0.05),
+		}))
+		assert_eq(which, 'backstop', 'should fire past 48 hours')
+	end)
 end
 
 -- Runs handle_alarm with a stand-in capability, and records what happened.
@@ -189,11 +221,16 @@ local function run_handle_alarm(get_power_cap, attempts_wanted)
 		obs_event = function() end,
 	}
 	local result = { logs = logs, retained = retained }
-	fibers.run(function()
-		system._test.handle_alarm(svc, get_power_cap, { payload = { name = 'daily reboot', type = 'reboot' } }, {
-			grace_s = 0.01, retry_s = 0.01,
-		})
+	fibers.run(function(scope)
+		local child = assert(scope:child())
+		assert(child:spawn(function()
+			system._test.handle_alarm(svc, get_power_cap, { payload = { name = 'daily reboot', type = 'reboot' } }, {
+				grace_s = 0.01, retry_s = 0.01, recheck_s = 0.04,
+			})
+		end))
 		sleep.sleep(attempts_wanted * 0.05)
+		child:cancel('test done') -- the retries run for as long as the process does
+		fibers.perform(child:join_op())
 	end)
 	return result
 end
@@ -211,8 +248,27 @@ function T.reboot_looks_up_the_power_capability_when_it_fires()
 		if lookups < 3 then return nil end
 		return cap
 	end, 4)
-	assert_eq(calls, 1, 'expected one reboot command once the capability appeared')
-	assert_eq(lookups, 3, 'expected the capability to be looked up until it appeared')
+	assert_true(calls >= 1, 'expected a reboot command once the capability appeared')
+	assert_true(lookups >= 3, 'expected the capability to be looked up until it appeared')
+end
+
+-- The power driver acknowledges before it runs the OS command, so an accepted command
+-- proves nothing. If the box is still here afterwards, it needs to try again.
+function T.an_accepted_reboot_that_has_no_effect_is_tried_again()
+	local calls = 0
+	local cap = {
+		call_control_op = function()
+			calls = calls + 1
+			return op.always({ ok = true })
+		end,
+	}
+	local result = run_handle_alarm(function() return cap end, 4)
+	assert_true(calls >= 2, 'expected another attempt while the box is still running, got ' .. calls)
+	local no_effect = false
+	for _, log in ipairs(result.logs) do
+		if log.what == 'power_command_no_effect' then no_effect = true end
+	end
+	assert_true(no_effect, 'expected the lack of effect to be logged')
 end
 
 function T.a_failed_reboot_is_tried_again()
@@ -225,7 +281,7 @@ function T.a_failed_reboot_is_tried_again()
 		end,
 	}
 	local result = run_handle_alarm(function() return cap end, 4)
-	assert_eq(calls, 3, 'expected the command to be retried until it worked')
+	assert_true(calls >= 3, 'expected the command to be retried until it worked, got ' .. calls)
 	local failures = 0
 	for _, log in ipairs(result.logs) do
 		if log.what == 'power_command_failed' then failures = failures + 1 end

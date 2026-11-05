@@ -530,6 +530,7 @@ end
 
 local SHUTDOWN_GRACE = 10          -- seconds services have to shut down
 local POWER_RETRY_S  = 300         -- between attempts at a failed power command
+local POWER_RECHECK_S = 600        -- how long an accepted power command gets to take effect
 -- A box reboots daily, so reaching this means the daily alarm isn't working: most likely
 -- the clock has never synced, because the box booted with no internet.
 local MAX_UPTIME_S   = 48 * 60 * 60
@@ -540,17 +541,25 @@ local function usb_verb_for_config(hw_revision, cfg)
     return cfg.usb3_enabled and 'enable' or 'disable'
 end
 
-local function has_reboot_alarm(cfg)
-    for _, alarm_cfg in ipairs(cfg.alarms or {}) do
-        if alarm_cfg.payload and alarm_cfg.payload.type == 'reboot' then return true end
+--- Whether any accepted alarm reboots. No type means reboot, as in handle_alarm.
+local function has_reboot_alarm(accepted_alarms)
+    for _, alarm in ipairs(accepted_alarms) do
+        local payload = type(alarm.payload) == 'table' and alarm.payload or {}
+        if (payload.type or 'reboot') == 'reboot' then return true end
     end
     return false
+end
+
+--- Monotonic time is time since boot, so this fires once uptime passes MAX_UPTIME_S.
+local function uptime_backstop_op(reboot_configured, power_state)
+    if not reboot_configured or power_state.power_pending then return nil end
+    return sleep.sleep_until_op(MAX_UPTIME_S)
 end
 
 ---@param svc ServiceBase
 ---@param get_power_cap fun(): CapabilityReference?
 ---@param alarm SystemAlarm
----@param opts? { grace_s: number?, retry_s: number?, state: table? }
+---@param opts? { grace_s: number?, retry_s: number?, recheck_s: number?, state: table? }
 local function handle_alarm(svc, get_power_cap, alarm, opts)
     opts = opts or {}
     local state      = opts.state or {}
@@ -571,8 +580,9 @@ local function handle_alarm(svc, get_power_cap, alarm, opts)
         deadline = fibers.now() + (opts.grace_s or SHUTDOWN_GRACE),
     })
 
-    -- After the grace period, issue the power command via the capability. Keep trying
-    -- until it works: the capability may not be up yet, and tomorrow is a long time to wait.
+    -- After the grace period, issue the power command via the capability. Keep trying for
+    -- as long as this process is running: the capability may not be up yet, and the driver
+    -- answers before it runs the OS command, so even an accepted command proves nothing.
     local ok, spawn_err = fibers.current_scope():spawn(function()
         perform(sleep.sleep_op(opts.grace_s or SHUTDOWN_GRACE))
         while true do
@@ -583,9 +593,13 @@ local function handle_alarm(svc, get_power_cap, alarm, opts)
                 local _
                 _, err = cap_rpc(power_cap, alarm_type, cap_sdk.args.new.PowerActionOpts())
             end
-            if err == "" then return end
-            svc:obs_log('error', { what = 'power_command_failed', type = alarm_type, err = err })
-            perform(sleep.sleep_op(opts.retry_s or POWER_RETRY_S))
+            if err == "" then
+                perform(sleep.sleep_op(opts.recheck_s or POWER_RECHECK_S))
+                svc:obs_log('error', { what = 'power_command_no_effect', type = alarm_type })
+            else
+                svc:obs_log('error', { what = 'power_command_failed', type = alarm_type, err = err })
+                perform(sleep.sleep_op(opts.retry_s or POWER_RETRY_S))
+            end
         end
     end)
     if not ok then
@@ -657,9 +671,7 @@ local function system_main(svc, report_period_ch)
             time  = time_sub:recv_op(),
             alarm = alarm_mgr:next_alarm_op(),
         }
-        if reboot_configured and not power_state.power_pending then
-            choices.backstop = sleep.sleep_until_op(MAX_UPTIME_S) -- monotonic time is time since boot
-        end
+        choices.backstop = uptime_backstop_op(reboot_configured, power_state)
 
         local which, msg = perform(op.named_choice(choices))
 
@@ -691,7 +703,6 @@ local function system_main(svc, report_period_ch)
                 end
 
                 -- Reload alarms.
-                reboot_configured = has_reboot_alarm(cfg)
                 alarm_mgr:delete_all()
                 if type(cfg.alarms) == 'table' then
                     for _, alarm_cfg in ipairs(cfg.alarms) do
@@ -701,6 +712,7 @@ local function system_main(svc, report_period_ch)
                         end
                     end
                 end
+                reboot_configured = has_reboot_alarm(alarm_mgr.alarms)
             end
         elseif which == 'time' then
             local is_synced = (msg.payload == true)
@@ -769,6 +781,7 @@ SystemService._test = {
     publish_sysinfo_state = publish_sysinfo_state,
     usb_verb_for_config = usb_verb_for_config,
     has_reboot_alarm = has_reboot_alarm,
+    uptime_backstop_op = uptime_backstop_op,
     handle_alarm = handle_alarm,
 }
 

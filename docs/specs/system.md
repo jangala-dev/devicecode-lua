@@ -109,7 +109,7 @@ When an alarm with `type = 'shutdown'` or `type = 'reboot'` fires:
 4. Subscribe to `{'+', 'health'}` and track all services that are not yet `'disabled'`.
 5. Wait for all tracked services to reach `'disabled'` state, or until the deadline scope expires.
 6. For any service that did not shut down in time, subscribe to `{service, 'health', 'fibers', '+'}` and log which fibers are stuck.
-7. Call the `power` capability RPC (`shutdown` or `reboot`) with `{ reason = alarm.payload.name }`, looking the capability up at this point. If it's unavailable or the call fails, log it and try again every 5 minutes.
+7. Call the `power` capability RPC (`shutdown` or `reboot`) with `{ reason = alarm.payload.name }`, looking the capability up at this point. If it's unavailable or the call fails, log it and try again every 5 minutes. The power driver answers before it runs the OS command, so if the process is still running 10 minutes after an accepted command, log that and try again.
 
 The shutdown scope is independent of the service scope, since the service scope will itself be cancelled by the broadcast shutdown signal.
 
