@@ -144,7 +144,9 @@ end
 local function kernel_lines(text)
 	local kept = {}
 	for line in keep_tail(tostring(text), M.MAX_SCAN):gmatch('[^\n]+') do
-		if line:find('kern.', 1, true) or line:find('procd', 1, true) then
+		-- The first facility.level on the line, then the process that logged it.
+		local facility, process = line:match('(%a+)%.%a+%s+([^%s:%[]+)')
+		if facility == 'kern' or process == 'procd' then
 			kept[#kept + 1] = M.redact(line):sub(1, M.MAX_LINE)
 		end
 	end

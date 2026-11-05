@@ -304,6 +304,30 @@ function T.only_kernel_and_procd_lines_come_from_the_system_log()
 	os.remove(path)
 end
 
+function T.system_log_lines_are_chosen_by_their_source_not_their_contents()
+	local path = temp_path()
+	new_store(path):begin_run()
+	local store = restarted(path, {
+		read_system_log = function()
+			return table.concat({
+				'Thu Nov  5 10:00:00 2026 daemon.info dnsmasq-dhcp[123]: DHCPACK(br) 10.0.0.2 customer-procd-laptop',
+				'Thu Nov  5 10:00:01 2026 daemon.info someapp[9]: saw kern.err in client-laptop-name',
+				'Thu Nov  5 10:00:02 2026 daemon.info hostapd: procd: client-phone-name joined',
+				'Thu Nov  5 10:00:03 2026 kern.err kernel: [ 12.3] Out of memory: Killed process 1234 (luajit)',
+				'Thu Nov  5 10:00:04 2026 daemon.info procd: Instance devicecode::instance1 s in a crash loop',
+				'',
+			}, '\n')
+		end,
+	})
+	local rec = store:next_pending(2000)
+	assert(rec.log:match('Out of memory'), 'log: ' .. tostring(rec.log))
+	assert(rec.log:match('crash loop'), 'log: ' .. tostring(rec.log))
+	for _, name in ipairs({ 'customer', 'laptop', 'phone' }) do
+		assert(not rec.log:match(name), 'leaked ' .. name .. ' in: ' .. rec.log)
+	end
+	os.remove(path)
+end
+
 function T.a_very_long_system_log_line_is_not_kept_part_way_through()
 	local path = temp_path()
 	new_store(path):begin_run()
