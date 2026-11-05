@@ -344,6 +344,70 @@ function T.delta_value_pipeline()
 	end, { timeout = 3.0 })
 end
 
+-- Telemetry is how we'd see a box that has lost NTP, so losing sync must not stop it.
+function T.publishing_continues_after_sync_is_lost()
+	runfibers.run(function(scope)
+		local clock = new_test_clock()
+		scope:finally(function() clock:restore() end)
+		local bus       = make_bus()
+		local test_conn = bus:connect()
+
+		test_conn:retain({ 'cap', 'fs', 'credentials', 'state' }, 'added')
+		start_mock_hal(test_conn, scope)
+		test_conn:retain({ 'state', 'time', 'synced' }, true)
+
+		local result_sub = test_conn:subscribe(
+			{ 'obs', 'v1', 'metrics', 'output', '#' },
+			{ queue_len = 10, full = 'drop_oldest' })
+
+		test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('sim', 0.1, {}))
+		local svc_scope = start_metrics(bus, scope)
+		flush_ticks()
+
+		test_conn:publish({ 'obs', 'v1', 'modem', 'metric', 'sim' }, { value = 'before' })
+		local first = recv_metric(clock, result_sub, 0.4)
+		assert(first and first.payload.value == 'before', 'expected a publish while synced')
+
+		test_conn:retain({ 'state', 'time', 'synced' }, false)
+		flush_ticks()
+
+		test_conn:publish({ 'obs', 'v1', 'modem', 'metric', 'sim' }, { value = 'after' })
+		local second = recv_metric(clock, result_sub, 0.4)
+		assert(second and second.payload.value == 'after', 'expected publishing to carry on after losing sync')
+		assert(second.payload.time > first.payload.time, 'expected timestamps to keep moving forward')
+
+		stop_scope(svc_scope)
+		clock:restore()
+	end, { timeout = 3.0 })
+end
+
+function T.nothing_publishes_before_the_first_sync()
+	runfibers.run(function(scope)
+		local clock = new_test_clock()
+		scope:finally(function() clock:restore() end)
+		local bus       = make_bus()
+		local test_conn = bus:connect()
+
+		test_conn:retain({ 'cap', 'fs', 'credentials', 'state' }, 'added')
+		start_mock_hal(test_conn, scope)
+		test_conn:retain({ 'state', 'time', 'synced' }, false)
+
+		local result_sub = test_conn:subscribe(
+			{ 'obs', 'v1', 'metrics', 'output', '#' },
+			{ queue_len = 10, full = 'drop_oldest' })
+
+		test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('sim', 0.1, {}))
+		local svc_scope = start_metrics(bus, scope)
+		flush_ticks()
+
+		test_conn:publish({ 'obs', 'v1', 'modem', 'metric', 'sim' }, { value = 'x' })
+		assert(recv_metric(clock, result_sub, 0.4) == nil, 'timestamps would be wrong before the first sync')
+
+		stop_scope(svc_scope)
+		clock:restore()
+	end, { timeout = 3.0 })
+end
+
 -- HTTP pipelines should enqueue a well-formed Mainflux request payload.
 function T.http_pipeline_enqueues_request_payload()
 	-- Save originals so we can restore after the test.
