@@ -34,6 +34,8 @@ combinations rather than an independent list of generations. `set_modes` accepts
 `capability_args.new.ModemSetModesOpts(preferred, allowed)`; a concrete preferred
 generation must also appear in the nonempty allowed list. `none` means no explicit
 preference. Successful writes invalidate mode, network, signal, and traffic caches.
+The modes group has `does_emit = false`: emitter passes neither fetch nor publish
+these fields. Explicit `get` requests fetch them on demand and share the group cache.
 
 Commands are sent over a command queue held by the driver. A command is a table of:
 ```

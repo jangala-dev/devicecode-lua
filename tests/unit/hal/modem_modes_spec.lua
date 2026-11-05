@@ -5,6 +5,7 @@ local driver = require 'services.hal.drivers.modem'
 local channel = require 'fibers.channel'
 local exec = require 'fibers.io.exec'
 local op = require 'fibers.op'
+local sleep = require 'fibers.sleep'
 local runfibers = require 'tests.support.run_fibers'
 local T = {}
 
@@ -99,6 +100,48 @@ function T.driver_exposes_modes_and_invalidates_cached_read_after_write()
         assert(modem:set_modes(args.new.ModemSetModesOpts('4g', { '4g' })))
         ok, result = modem:get(args.new.ModemGetOpts('current_modes', math.huge))
         assert(ok and result.preferred == '4g' and reads == 2)
+    end)
+end
+
+function T.emitter_never_fetches_or_publishes_modes_but_explicit_gets_do()
+    runfibers.run(function(scope)
+        local modem = assert(driver.new('7', { debug = function() end, error = function() end }))
+        local current = { preferred = 'none', allowed = { '4g' } }
+        local reads, emitted = 0, {}
+        modem.backend = { read_modes = function()
+            reads = reads + 1
+            return { current_modes = current, supported_modes = { current } }, ''
+        end }
+        local get_group = modem._get_group
+        modem._get_group = function(self, group, timescale)
+            if group == 'modes' then return get_group(self, group, timescale) end
+            return { imei = 'test', values = {} }, '', {}
+        end
+        modem._emit_meta = function(_, field, value) emitted[field] = value; return true end
+        modem._emit_state = function() return true end
+        scope:spawn(function() modem:emitter() end)
+
+        local function emit_pass()
+            emitted = {}
+            modem.state_pulse:signal()
+            sleep.sleep(0.15)
+            assert(emitted.imei == 'test', 'emitter must have completed a pass')
+            assert(emitted.supported_modes == nil and emitted.current_modes == nil)
+        end
+        emit_pass()
+        assert(reads == 0, 'unconfigured modems must not fetch modes during emission')
+        local ok, supported = modem:get(args.new.ModemGetOpts('supported_modes', math.huge))
+        assert(ok and #supported == 1 and reads == 1)
+        local actual
+        ok, actual = modem:get(args.new.ModemGetOpts('current_modes', math.huge))
+        assert(ok and actual == current and reads == 1, 'explicit gets should share the modes cache')
+        emit_pass()
+        assert(reads == 1, 'emission must not refresh or publish previously requested modes')
+        modem:invalidate_groups { 'modes' }
+        emit_pass()
+        assert(reads == 1, 'invalidated modes must remain unfetched until requested')
+        ok, actual = modem:get(args.new.ModemGetOpts('current_modes', math.huge))
+        assert(ok and actual == current and reads == 2)
     end)
 end
 
