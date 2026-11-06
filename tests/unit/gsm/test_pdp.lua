@@ -12,6 +12,9 @@ local quectel = require 'services.hal.backends.modem.models.quectel'
 local tests = {}
 local function eq(a, b) assert(a == b, 'expected ' .. tostring(b) .. ', got ' .. tostring(a)) end
 local function reply(ok, reason) return op.always({ ok = ok, reason = reason or '' }) end
+local function correction(outcome, dispatched, err)
+    return reply(true, { outcome = outcome, dispatched = dispatched, err = err or '' })
+end
 local function context(cid, pdp_type, active) return { cid = cid, pdp_type = pdp_type, active = active } end
 local function fixture(contexts, overrides)
     overrides = overrides or {}
@@ -26,7 +29,7 @@ local function fixture(contexts, overrides)
                 if response then return response end
             end
             if method == 'get' then return reply(true, values[opts.field]) end
-            if method == 'set_pdn_type' then return reply(true) end
+            if method == 'set_pdn_type' then return correction('applied', true) end
             if method == 'restart' then
                 for _, sub in ipairs(subs) do
                     if sub.field == 'card' and not sub.closed then
@@ -171,7 +174,6 @@ function tests.test_pdp_configuration_changes_active_mismatched_contexts_and_res
         eq(calls[3].opts.cid, 3)
         eq(calls[2].opts.pdp_type, 'IP')
         eq(count(calls, 'restart'), 1)
-        eq(m.pdp_restart_needed, false)
         eq(m.pdp_restart_waiting, false)
         eq(subs[1].closed, true)
     end)
@@ -195,7 +197,12 @@ function tests.test_pdp_recovery_read_and_verification_failures_do_not_restart()
         for _, failure_method in ipairs({ 'get', 'set_pdn_type' }) do
             local m, calls = fixture({ context(1, 'IPV6', true) }, {
                 call = function(method)
-                    if method == failure_method then return reply(false, 'AT failed') end
+                    if method == failure_method then
+                        if method == 'set_pdn_type' then
+                            return correction('rejected', true, 'AT failed')
+                        end
+                        return reply(false, 'AT failed')
+                    end
                 end,
             })
             eq(m:_configure_pdp(), false)
@@ -209,7 +216,7 @@ function tests.test_pdp_recovery_restarts_when_change_verification_is_unavailabl
         local m, calls = fixture({ context(1, 'IPV6', true) }, {
             call = function(method)
                 if method == 'set_pdn_type' then
-                    return reply(false, 'pdp_type_change_unverified:read failed')
+                    return correction('uncertain', true, 'pdp_type_change_unverified:read failed')
                 end
             end,
         })
@@ -218,7 +225,6 @@ function tests.test_pdp_recovery_restarts_when_change_verification_is_unavailabl
         eq(err, '')
         eq(count(calls, 'set_pdn_type'), 1)
         eq(count(calls, 'restart'), 1)
-        eq(m.pdp_restart_needed, false)
     end)
 end
 
@@ -226,7 +232,9 @@ function tests.test_pdp_recovery_restarts_once_after_partial_verified_changes()
     runfibers.run(function()
         local m, calls = fixture({ context(1, 'IPV6', true), context(2, 'IPV6', true) }, {
             call = function(method, opts)
-                if method == 'set_pdn_type' and opts.cid == 1 then return reply(false, 'verification failed') end
+                if method == 'set_pdn_type' and opts.cid == 1 then
+                    return correction('rejected', true, 'verification failed')
+                end
             end,
         })
         eq(m:_configure_pdp(), true)
@@ -243,7 +251,7 @@ function tests.test_pdp_recovery_stops_commands_on_state_error_and_restarts_veri
         }, {
             call = function(method, opts)
                 if method == 'set_pdn_type' and opts.cid == 2 then
-                    return reply(false, 'modem_invalid_pdp_state:connecting')
+                    return correction('rejected', false, 'modem_invalid_pdp_state:connecting')
                 end
             end,
         })
@@ -251,8 +259,7 @@ function tests.test_pdp_recovery_stops_commands_on_state_error_and_restarts_veri
         eq(restarted, true)
         eq(err, '')
         eq(state, 'disabled')
-        eq(m.pdp_restart_needed, false)
-        eq(count(calls, 'set_pdn_type'), 2)
+        eq(count(calls, 'set_pdn_type'), 3)
         eq(count(calls, 'restart'), 1)
     end)
 end
@@ -279,18 +286,22 @@ end
 ---@return nil
 function tests.test_pdp_recovery_retries_required_restart_even_when_inspection_is_state_rejected()
     runfibers.run(function()
-        local m, calls = fixture({}, {
+        local restart_failed = false
+        local m, calls = fixture({ context(1, 'IPV6', true) }, {
             call = function(method, opts)
-                if method == 'get' and opts.field == 'pdp_contexts' then
+                if method == 'restart' and not restart_failed then
+                    restart_failed = true
+                    return reply(false, 'reset failed')
+                end
+                if restart_failed and method == 'get' and opts.field == 'pdp_contexts' then
                     return reply(false, 'modem_invalid_pdp_state:connecting')
                 end
             end,
         })
-        m.pdp_restart_needed = true -- A prior cycle verified a change but its restart failed.
+        eq(m:_configure_pdp(), false)
         eq(m:_configure_pdp(), true)
-        eq(count(calls, 'set_pdn_type'), 0)
-        eq(count(calls, 'restart'), 1)
-        eq(m.pdp_restart_needed, false)
+        eq(count(calls, 'set_pdn_type'), 1)
+        eq(count(calls, 'restart'), 2)
     end)
 end
 
@@ -299,14 +310,16 @@ function tests.test_pdp_recovery_does_not_restart_after_state_rejection_without_
     runfibers.run(function()
         local m, calls = fixture({ context(1, 'IPV6', true), context(2, 'IPV6', true) }, {
             call = function(method)
-                if method == 'set_pdn_type' then return reply(false, 'modem_invalid_pdp_state:connecting') end
+                if method == 'set_pdn_type' then
+                    return correction('rejected', false, 'modem_invalid_pdp_state:connecting')
+                end
             end,
         })
         local restarted, err, state = m:_configure_pdp()
         eq(restarted, false)
         eq(err, 'modem_invalid_pdp_state:connecting')
         eq(state, 'connecting')
-        eq(count(calls, 'set_pdn_type'), 1)
+        eq(count(calls, 'set_pdn_type'), 2)
         eq(count(calls, 'restart'), 0)
     end)
 end
@@ -336,8 +349,8 @@ function tests.test_pdp_restart_failure_preserves_verified_change_and_closes_sub
         })
         local restarted, err = m:_configure_pdp()
         eq(restarted, false)
-        eq(err, 'reset failed')
-        eq(m.pdp_restart_needed, true)
+        eq(err, 'pdp_operation_failed')
+        assert(m.svc.pdp_enforcement.modems['modem-1'].types.IP.fallback.active_episode)
         eq(subs[1].closed, true)
     end)
 end
@@ -355,8 +368,8 @@ function tests.test_pdp_restart_unobserved_transition_restores_retry_state()
         local restarted, err = m:_configure_pdp()
         eq(restarted, false)
         eq(err, 'state subscription interrupted')
-        eq(m.pdp_restart_needed, true)
         eq(m.pdp_restart_waiting, false)
+        assert(m.svc.pdp_enforcement.modems['modem-1'].types.IP.fallback.active_episode)
         eq(subs[1].closed, true)
     end)
 end
@@ -380,11 +393,17 @@ function tests.test_pdp_correction_limit_survives_modem_recreation()
 
         contexts[1].pdp_type = 'IPV6' -- Carrier profile reverted the context after reset.
         local replacement, replacement_calls = correction_fixture()
-        local restarted, err = replacement:_configure_pdp()
+        eq(replacement:_configure_pdp(), true)
+        eq(count(replacement_calls, 'set_pdn_type'), 1)
+        eq(count(replacement_calls, 'restart'), 1)
+
+        contexts[1].pdp_type = 'IPV6'
+        local third, third_calls = correction_fixture()
+        local restarted, err = third:_configure_pdp()
         eq(restarted, false)
         eq(err, '')
-        eq(count(replacement_calls, 'set_pdn_type'), 0)
-        eq(count(replacement_calls, 'restart'), 0)
+        eq(count(third_calls, 'set_pdn_type'), 0)
+        eq(count(third_calls, 'restart'), 0)
     end)
 end
 
@@ -572,6 +591,9 @@ function tests.test_pdp_disabled_check_prevents_enable_on_read_or_write_failure(
                 call = function(method)
                     if method == fail_method then
                         m.config_pulse:close()
+                        if method == 'set_pdn_type' then
+                            return correction('rejected', true, 'AT failed')
+                        end
                         return reply(false, 'AT failed')
                     end
                 end,
@@ -657,6 +679,9 @@ function tests.test_pdp_disabled_check_retries_read_write_and_restart_failures_b
                         if method == fail_method and not failed
                             and (method ~= 'get' or opts.field == 'pdp_contexts') then
                             failed, retry_pending = true, true
+                            if method == 'set_pdn_type' then
+                                return correction('rejected', false, 'temporary failure')
+                            end
                             return reply(false, 'temporary failure')
                         end
                         if method == 'set_pdn_type' then contexts[1].pdp_type = opts.pdp_type end
@@ -734,6 +759,280 @@ function tests.test_pdp_disabled_check_allows_unsupported_modems_to_enable()
         eq(count(calls, 'enable'), 1)
         eq(count(calls, 'connect'), 1)
         eq(count(calls, 'restart'), 0)
+    end)
+end
+
+local function find_log(logs, what, budget_kind)
+    for _, record in ipairs(logs) do
+        if record.what == what and (not budget_kind or record.budget_kind == budget_kind) then
+            return record
+        end
+    end
+end
+
+local function assert_logs_private(logs, secrets)
+    local function visit(value)
+        if type(value) == 'table' then
+            for key, child in pairs(value) do visit(key); visit(child) end
+        else
+            local text = tostring(value)
+            for _, secret in ipairs(secrets) do
+                assert(not text:find(secret, 1, true), 'private PDP value reached logs')
+            end
+        end
+    end
+    visit(logs)
+end
+
+function tests.test_pdp_inspection_failures_are_scope_wide_monotonic_and_fail_open_at_two()
+    runfibers.run(function()
+        local reads = 0
+        local m, calls, logs = fixture({}, { call = function(method, opts)
+            if method == 'get' and opts.field == 'pdp_contexts' then
+                reads = reads + 1
+                if reads ~= 2 then
+                    return reply(false, 'malformed_pdp_context:+CGDCONT: 1,"IP","private.apn","secret-iccid"')
+                end
+                return reply(true, {})
+            end
+        end })
+        eq(select(2, m:_configure_pdp()), 'pdp_operation_failed')
+        eq(select(2, m:_configure_pdp()), '') -- Success does not reset the failed-inspection count.
+        local restarted, err = m:_configure_pdp()
+        eq(restarted, false)
+        eq(err, '')
+        eq(count(calls, 'set_pdn_type'), 0)
+        local terminal = assert(find_log(logs, 'pdp_enforcement_exhausted', 'inspection'))
+        eq(terminal.absorption, 'scope')
+        eq(terminal.count, 2)
+        eq(terminal.limit, 2)
+        eq(terminal.effective_type, 'IP')
+        eq(terminal.enable_proceeding, true)
+        assert_logs_private(logs, { 'private.apn', 'secret-iccid' })
+    end)
+end
+
+function tests.test_pdp_scope_persists_across_sim_absence_and_config_apply_but_types_are_independent()
+    runfibers.run(function()
+        local m, _, logs = fixture({}, { call = function(method, opts)
+            if method == 'get' and opts.field == 'pdp_contexts' then return reply(false, 'read failed') end
+        end })
+        eq(select(2, m:_configure_pdp()), 'pdp_operation_failed')
+        m:_accept_sim_state(false)
+        m:apply_config({ pdp_type = 'IP', autoconnect = true })
+        eq(select(2, m:_configure_pdp()), '')
+        assert(find_log(logs, 'pdp_enforcement_exhausted', 'inspection'))
+
+        m:apply_config({ pdp_type = 'IPV6', autoconnect = true })
+        eq(select(2, m:_configure_pdp()), 'pdp_operation_failed')
+        local type_state = m.svc.pdp_enforcement.modems['modem-1'].types
+        eq(type_state.IP.fallback.inspection_failures, 2)
+        eq(type_state.IPV6.fallback.inspection_failures, 1)
+    end)
+end
+
+function tests.test_pdp_inspection_exhaustion_enables_in_the_same_disabled_pass()
+    local saved_sleep_op = sleep.sleep_op
+    local ok, err = safe.pcall(function()
+        runfibers.run(function()
+            local reads = 0
+            local m, calls, logs
+            m, calls, logs = fixture({}, { call = function(method, opts, subs)
+                if method == 'get' and opts.field == 'pdp_contexts' then
+                    reads = reads + 1
+                    return reply(false, 'read failed')
+                elseif method == 'enable' then
+                    assert(find_log(logs, 'pdp_enforcement_exhausted', 'inspection'))
+                    subs[1].queue:put({ payload = { from = 'enabling', to = 'registered' } })
+                elseif method == 'connect' then
+                    subs[1].queue:put({ payload = { from = 'connecting', to = 'connected' } })
+                    return reply(true)
+                end
+            end })
+            sleep.sleep_op = function(seconds)
+                if seconds == 20 and reads == 1 then return op.always() end
+                return saved_sleep_op(seconds)
+            end
+            prepare_autoconnect(m)
+            m:_autoconnect_loop()
+            eq(reads, 2)
+            eq(count(calls, 'enable'), 1)
+            eq(count(calls, 'connect'), 1)
+        end)
+    end)
+    sleep.sleep_op = saved_sleep_op
+    assert(ok, err)
+end
+
+function tests.test_pdp_result_precedence_continues_rejections_and_applied_but_stops_on_uncertain()
+    runfibers.run(function()
+        local contexts = {
+            context(1, 'IPV6', true), context(2, 'IPV6', true), context(3, 'IPV6', true),
+            context(4, 'IPV6', true), context(5, 'IPV6', true),
+        }
+        local m, calls = fixture(contexts, { call = function(method, opts)
+            if method ~= 'set_pdn_type' then return end
+            if opts.cid == 1 then return correction('rejected', false, 'pre-dispatch') end
+            if opts.cid == 2 then return correction('rejected', true, 'modem rejected') end
+            if opts.cid == 3 then return correction('applied', true) end
+            if opts.cid == 4 then return correction('uncertain', true, 'reply lost') end
+            error('uncertain result must stop later siblings')
+        end })
+        eq(m:_configure_pdp(), true)
+        eq(count(calls, 'set_pdn_type'), 4)
+        eq(count(calls, 'restart'), 1)
+        local scope_state = m.svc.pdp_enforcement.modems['modem-1'].types.IP.fallback
+        local episode = scope_state.history[#scope_state.history]
+        assert(episode.cids['3'] and episode.cids['4'])
+        assert(not episode.cids['1'] and not episode.cids['2'])
+    end)
+end
+
+function tests.test_pdp_second_rejection_services_prior_episode_then_fails_open()
+    runfibers.run(function()
+        local m, calls, logs, values = fixture({ context(2, 'IPV6', true) }, {
+            call = function(method, opts)
+                if method == 'set_pdn_type' and opts.cid == 2 then
+                    return correction('rejected', opts.cid == 2, 'persistent mismatch')
+                end
+                if method == 'set_pdn_type' then return correction('applied', true) end
+            end,
+        })
+        eq(select(2, m:_configure_pdp()), 'pdp_operation_failed')
+        values.pdp_contexts = {
+            context(1, 'IPV6', true), context(2, 'IPV6', true), context(3, 'IPV6', true),
+        }
+        local restarted, err = m:_configure_pdp()
+        eq(restarted, false)
+        eq(err, '')
+        eq(count(calls, 'set_pdn_type'), 3)
+        eq(count(calls, 'restart'), 1)
+        local terminal = assert(find_log(logs, 'pdp_enforcement_exhausted', 'correction'))
+        eq(terminal.cid, 2)
+        eq(terminal.absorption, 'cid')
+        eq(terminal.outcome, 'rejected')
+        eq(terminal.dispatched, true)
+        local scope_state = m.svc.pdp_enforcement.modems['modem-1'].types.IP.fallback
+        eq(scope_state.history[#scope_state.history].state, 'completed_unverified_fail_open')
+    end)
+end
+
+function tests.test_pdp_exhausted_cid_is_skipped_while_new_cid_is_corrected()
+    runfibers.run(function()
+        local m, calls, _, values = fixture({ context(1, 'IPV6', true) }, {
+            call = function(method, opts)
+                if method == 'set_pdn_type' and opts.cid == 1 then
+                    return correction('rejected', true, 'persistent mismatch')
+                end
+            end,
+        })
+        eq(select(2, m:_configure_pdp()), 'pdp_operation_failed')
+        eq(select(2, m:_configure_pdp()), '')
+        values.pdp_contexts = { context(1, 'IPV6', true), context(2, 'IPV6', true) }
+        eq(m:_configure_pdp(), true)
+        eq(count(calls, 'set_pdn_type'), 3)
+        eq(calls[#calls - 1].opts.cid, 2)
+        eq(count(calls, 'restart'), 1)
+    end)
+end
+
+function tests.test_pdp_restart_reservations_exhaust_episode_only_and_allow_new_cids()
+    runfibers.run(function()
+        local restart_calls = 0
+        local m, calls, logs, values = fixture({ context(1, 'IPV6', true) }, {
+            call = function(method)
+                if method == 'restart' then
+                    restart_calls = restart_calls + 1
+                    if restart_calls <= 2 then return reply(false, 'reset failed') end
+                end
+            end,
+        })
+        eq(select(2, m:_configure_pdp()), 'pdp_operation_failed')
+        local restarted, err = m:_configure_pdp()
+        eq(restarted, false)
+        eq(err, '')
+        local terminal = assert(find_log(logs, 'pdp_enforcement_exhausted', 'restart'))
+        eq(terminal.absorption, 'episode_cids')
+        eq(terminal.cids, '1')
+        eq(terminal.count, 2)
+        values.pdp_contexts = { context(1, 'IPV6', true), context(2, 'IPV6', true) }
+        eq(m:_configure_pdp(), true)
+        eq(count(calls, 'set_pdn_type'), 2)
+        eq(count(calls, 'restart'), 3)
+    end)
+end
+
+function tests.test_pdp_fallback_scope_merges_atomically_into_iccid_without_logging_it()
+    runfibers.run(function()
+        local reads = 0
+        local private_iccid = '8901000000000000001'
+        local next_iccid = '8901000000000000002'
+        local m
+        local logs
+        m, _, logs = fixture({}, { call = function(method, opts)
+            if method == 'get' and opts.field == 'pdp_contexts' then
+                reads = reads + 1
+                if reads == 1 then m:_queue_pdp_iccid(private_iccid) end
+                return reply(false, 'read failed for ' .. private_iccid)
+            end
+        end })
+        eq(select(2, m:_configure_pdp()), 'pdp_operation_failed')
+        local type_state = m.svc.pdp_enforcement.modems['modem-1'].types.IP
+        eq(type_state.fallback.tombstone, true)
+        eq(type_state.iccids[private_iccid].inspection_failures, 1)
+        eq(select(2, m:_configure_pdp()), '')
+        m:_queue_pdp_iccid(next_iccid)
+        eq(select(2, m:_configure_pdp()), 'pdp_operation_failed')
+        eq(type_state.iccids[next_iccid].inspection_failures, 1)
+        assert_logs_private(logs, { private_iccid, next_iccid })
+    end)
+end
+
+function tests.test_pdp_owner_replacement_reconciles_rpc_started_once_and_blocks_stale_logs()
+    runfibers.run(function()
+        local logs, replacement, replacement_calls = {}, nil, nil
+        local svc = { obs_log = function(_, _, payload) logs[#logs + 1] = payload end }
+        local old, old_calls = fixture({ context(1, 'IPV6', true) }, {
+            svc = svc,
+            call = function(method)
+                if method == 'set_pdn_type' then
+                    replacement, replacement_calls = fixture({ context(1, 'IPV6', true) }, { svc = svc })
+                    replacement:_claim_pdp_owner()
+                    return correction('applied', true)
+                end
+            end,
+        })
+        local restarted, err = old:_configure_pdp()
+        eq(restarted, false)
+        eq(err, 'pdp_owner_stale')
+        eq(count(old_calls, 'restart'), 0)
+        assert(not find_log(logs, 'pdp_type_changed'))
+        local scope_state = svc.pdp_enforcement.modems['modem-1'].types.IP.fallback
+        eq(scope_state.cids['1'].last_result.outcome, 'uncertain')
+        local generation = replacement.pdp_owner_generation
+        replacement:_claim_pdp_owner()
+        eq(replacement.pdp_owner_generation, generation)
+        eq(replacement:_configure_pdp(), true)
+        eq(count(replacement_calls, 'set_pdn_type'), 0)
+        eq(count(replacement_calls, 'restart'), 1)
+    end)
+end
+
+function tests.test_pdp_owner_replacement_reconciles_reserved_correction_as_not_dispatched()
+    runfibers.run(function()
+        local svc = { obs_log = function() end }
+        local old = fixture({}, { svc = svc })
+        local scope_state = assert(old:_begin_pdp_operation('IP'))
+        scope_state.cids['7'] = {
+            corrections = 1,
+            inflight = { owner_generation = old.pdp_owner_generation, stage = 'reserved' },
+        }
+        local replacement = fixture({}, { svc = svc })
+        replacement:_claim_pdp_owner()
+        local record = scope_state.cids['7']
+        eq(record.last_result.outcome, 'rejected')
+        eq(record.last_result.dispatched, false)
+        eq(scope_state.active_episode, nil)
     end)
 end
 

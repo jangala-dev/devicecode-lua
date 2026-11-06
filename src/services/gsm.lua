@@ -44,7 +44,9 @@ local DEFAULT_SIGNAL_FREQ = 5
 ---@alias GsmPdpType 'IP'|'IPV4V6'|'IPV6'
 ---@type GsmPdpType
 local DEFAULT_PDP_TYPE = 'IP'
-local MAX_PDP_CORRECTIONS = 1
+local MAX_PDP_INSPECTION_FAILURES = 2
+local MAX_PDP_CORRECTIONS = 2
+local MAX_PDP_RESTARTS = 2
 ---@type table<GsmPdpType, boolean>
 local VALID_PDP_TYPES = { IP = true, IPV4V6 = true, IPV6 = true }
 local APN_SETTLE_TIMEOUT = 3 -- seconds to wait for modem to enter 'connecting' after a failed attempt
@@ -789,28 +791,206 @@ function GsmModem.new(cap, svc)
 	self.scope = nil
 	self.config_pulse = pulse.new()
 	self.svc = svc
+	self.pdp_operation_active = false
+	self.pdp_pending_iccid = nil
 	self.domain = retained_domain.new(self.conn, { prefix = { 'state', 'gsm' } })
 	return self
 end
 
----@return table<string, integer> attempts
-function GsmModem:_pdp_correction_attempts()
-	self.svc.pdp_correction_attempts = self.svc.pdp_correction_attempts or {}
-	return self.svc.pdp_correction_attempts
+local function new_pdp_scope()
+	return { inspection_failures = 0, cids = {}, active_episode = nil, next_episode = 0, history = {} }
 end
 
----@return string key
-function GsmModem:_pdp_correction_key()
-	return tostring(self.id) .. '\0' .. tostring(self.cfg.pdp_type or DEFAULT_PDP_TYPE)
+local function pdp_cid_record(scope_state, cid)
+	local key = tostring(cid)
+	local record = scope_state.cids[key]
+	if not record then
+		record = { corrections = 0, exhausted = false, blocked = false }
+		scope_state.cids[key] = record
+	end
+	return record
 end
 
----@return nil
-function GsmModem:_clear_pdp_correction_attempts()
-	local attempts = self.svc.pdp_correction_attempts
-	if type(attempts) ~= 'table' then return end
-	local prefix = tostring(self.id) .. '\0'
-	for key in pairs(attempts) do
-		if key:sub(1, #prefix) == prefix then attempts[key] = nil end
+local function merge_pdp_scopes(target, source)
+	if target == source then return target end
+	target.inspection_failures = math.max(target.inspection_failures or 0, source.inspection_failures or 0)
+	target.next_episode = math.max(target.next_episode or 0, source.next_episode or 0)
+	for cid, incoming in pairs(source.cids or {}) do
+		local current = target.cids[cid]
+		if not current then
+			target.cids[cid] = incoming
+		else
+			current.corrections = math.max(current.corrections or 0, incoming.corrections or 0)
+			current.exhausted = current.exhausted or incoming.exhausted
+			current.blocked = current.blocked or incoming.blocked
+			current.inflight = current.inflight or incoming.inflight
+		end
+	end
+	if source.active_episode then
+		if not target.active_episode then
+			target.active_episode = source.active_episode
+		else
+			local episode = target.active_episode
+			local incoming = source.active_episode
+			episode.restart_count = math.max(episode.restart_count or 0, incoming.restart_count or 0)
+			for cid in pairs(incoming.cids or {}) do episode.cids[cid] = true end
+			episode.pending_fail_open = episode.pending_fail_open or incoming.pending_fail_open
+			episode.restart_inflight = episode.restart_inflight or incoming.restart_inflight
+		end
+	end
+	for _, episode in ipairs(source.history or {}) do target.history[#target.history + 1] = episode end
+	return target
+end
+
+function GsmModem:_pdp_ledger()
+	local ledger = self.svc.pdp_enforcement
+	if not ledger then
+		ledger = { owners = {}, modems = {} }
+		self.svc.pdp_enforcement = ledger
+	end
+	return ledger
+end
+
+function GsmModem:_pdp_owner_active(generation)
+	local owner = self:_pdp_ledger().owners[tostring(self.id)]
+	return owner ~= nil and owner.owner == self and owner.generation == (generation or self.pdp_owner_generation)
+end
+
+local function ensure_pdp_episode(scope_state)
+	if not scope_state.active_episode then
+		scope_state.next_episode = (scope_state.next_episode or 0) + 1
+		scope_state.active_episode = {
+			id = scope_state.next_episode, cids = {}, restart_count = 0, state = 'pending',
+		}
+	end
+	return scope_state.active_episode
+end
+
+function GsmModem:_reconcile_pdp_reservations(modem_state)
+	local function reconcile_scope(scope_state)
+		for cid, record in pairs(scope_state.cids or {}) do
+			local inflight = record.inflight
+			if inflight then
+				if inflight.stage == 'rpc_started' then
+					local episode = ensure_pdp_episode(scope_state)
+					episode.cids[cid] = true
+					record.last_result = { outcome = 'uncertain', dispatched = true,
+						err = 'owner_replaced_after_correction_started' }
+				else
+					record.last_result = { outcome = 'rejected', dispatched = false,
+						err = 'owner_replaced_before_correction_started' }
+				end
+				record.inflight = nil
+			end
+		end
+		local episode = scope_state.active_episode
+		if episode and episode.restart_inflight then episode.restart_inflight = nil end
+	end
+	for _, type_state in pairs(modem_state.types or {}) do
+		if type_state.fallback and not type_state.fallback.tombstone then reconcile_scope(type_state.fallback) end
+		for _, scope_state in pairs(type_state.iccids or {}) do reconcile_scope(scope_state) end
+	end
+end
+
+function GsmModem:_claim_pdp_owner()
+	if self:_pdp_owner_active() then return self.pdp_owner_generation end
+	if self.pdp_owner_generation then return self.pdp_owner_generation end
+	local ledger = self:_pdp_ledger()
+	local modem_id = tostring(self.id)
+	local modem_state = ledger.modems[modem_id]
+	if not modem_state then
+		modem_state = { types = {} }
+		ledger.modems[modem_id] = modem_state
+	end
+	local previous = ledger.owners[modem_id]
+	local generation = (previous and previous.generation or 0) + 1
+	ledger.owners[modem_id] = { owner = self, generation = generation }
+	self.pdp_owner_generation = generation
+	self:_reconcile_pdp_reservations(modem_state)
+	return generation
+end
+
+function GsmModem:_replace_pdp_owner()
+	local ledger = self:_pdp_ledger()
+	local modem_id = tostring(self.id)
+	local modem_state = ledger.modems[modem_id] or { types = {} }
+	ledger.modems[modem_id] = modem_state
+	local previous = ledger.owners[modem_id]
+	local generation = (previous and previous.generation or self.pdp_owner_generation or 0) + 1
+	ledger.owners[modem_id] = { owner = self, generation = generation }
+	self.pdp_owner_generation = generation
+	self.pdp_operation_active = false
+	self:_reconcile_pdp_reservations(modem_state)
+	return generation
+end
+
+function GsmModem:_queue_pdp_iccid(iccid)
+	if type(iccid) ~= 'string' or iccid == '' then return end
+	if self.pdp_operation_active then
+		self.pdp_pending_iccid = iccid
+	else
+		self.pdp_iccid = iccid
+		self:_pdp_scope(self.cfg.pdp_type or DEFAULT_PDP_TYPE)
+	end
+end
+
+function GsmModem:_pdp_scope(pdp_type)
+	local ledger = self:_pdp_ledger()
+	local modem_id = tostring(self.id)
+	local modem_state = ledger.modems[modem_id]
+	if not modem_state then
+		modem_state = { types = {} }
+		ledger.modems[modem_id] = modem_state
+	end
+	local type_state = modem_state.types[pdp_type]
+	if not type_state then
+		type_state = { iccids = {} }
+		modem_state.types[pdp_type] = type_state
+	end
+	local iccid = self.pdp_iccid
+	if type(iccid) == 'string' and iccid ~= '' then
+		local scope_state = type_state.iccids[iccid]
+		if not scope_state then scope_state = new_pdp_scope() end
+		if type_state.fallback and not type_state.fallback.tombstone then
+			scope_state = merge_pdp_scopes(scope_state, type_state.fallback)
+			type_state.fallback = { tombstone = true, target = iccid }
+		end
+		type_state.iccids[iccid] = scope_state
+		return scope_state
+	end
+	if type_state.fallback and type_state.fallback.tombstone then
+		return type_state.iccids[type_state.fallback.target]
+	end
+	if not type_state.fallback then type_state.fallback = new_pdp_scope() end
+	return type_state.fallback
+end
+
+function GsmModem:_begin_pdp_operation(pdp_type)
+	local generation
+	if self.pdp_operation_active and self:_pdp_owner_active() then
+		generation = self:_replace_pdp_owner()
+	else
+		generation = self:_claim_pdp_owner()
+	end
+	if not self:_pdp_owner_active(generation) then return nil, generation end
+	local observed_iccid = self.info_values and self.info_values.iccid
+	if type(observed_iccid) == 'string' and observed_iccid ~= '' then self.pdp_iccid = observed_iccid end
+	if self.pdp_pending_iccid then
+		self.pdp_iccid = self.pdp_pending_iccid
+		self.pdp_pending_iccid = nil
+	end
+	self.pdp_operation_active = true
+	return self:_pdp_scope(pdp_type), generation
+end
+
+function GsmModem:_finish_pdp_operation(generation, pdp_type)
+	if not self:_pdp_owner_active(generation) then return end
+	self.pdp_operation_active = false
+	if self.pdp_pending_iccid then
+		self.pdp_iccid = self.pdp_pending_iccid
+		self.pdp_pending_iccid = nil
+		-- Scope lookup performs the atomic fallback merge without yielding.
+		self:_pdp_scope(pdp_type)
 	end
 end
 
@@ -823,11 +1003,7 @@ end
 ---@param name string?
 ---@return nil
 function GsmModem:apply_config(cfg, name)
-	local previous_pdp_type = self.cfg.pdp_type or DEFAULT_PDP_TYPE
 	self.cfg = cfg or {}
-	if previous_pdp_type ~= (self.cfg.pdp_type or DEFAULT_PDP_TYPE) then
-		self:_clear_pdp_correction_attempts()
-	end
 	if name and name ~= "" then
 		self.name = name
 	end
@@ -1041,6 +1217,7 @@ function GsmModem:_accept_info_snapshot(snapshot)
 
 	self.info_values = values
 	self.info_observed_at = observed_at
+	self:_queue_pdp_iccid(values.iccid)
 
 	local info = self.info_values
 	self.device = normalize_optional_string(info.device) or ''
@@ -1258,10 +1435,25 @@ local function pdp_error_state(err)
 	return err and err:match('modem_invalid_pdp_state:([%w_-]+)') or nil
 end
 
----@param err string?
----@return boolean
-local function pdp_change_unverified(err)
-	return err ~= nil and err:find('pdp_type_change_unverified:', 1, true) ~= nil
+local function pdp_safe_error(err)
+	err = tostring(err or '')
+	local state = pdp_error_state(err)
+	if state then return 'modem_invalid_pdp_state:' .. state end
+	if err:find('pdp_not_supported', 1, true) then return 'pdp_not_supported' end
+	local expected = err:match('unexpected_pdp_response:expected_([%w_-]+)')
+	if expected then return 'unexpected_pdp_response:expected_' .. expected end
+	for _, prefix in ipairs({ 'pdp_active_context_missing:', 'pdp_context_missing:',
+		'pdp_type_verification_failed:' }) do
+		local cid = err:match(prefix:gsub('([^%w])', '%%%1') .. '(%d+)')
+		if cid then return prefix .. cid end
+	end
+	if err:find('pdp_type_change_unverified:', 1, true) then return 'pdp_type_change_unverified' end
+	for _, known in ipairs({ 'pdp_command_timeout', 'missing_pdp_response',
+		'pdp_restart_state_timeout', 'state subscription interrupted', 'cancelled',
+		'pdp_correction_rejected', 'pdp_owner_stale' }) do
+		if err:find(known, 1, true) then return known end
+	end
+	return 'pdp_operation_failed'
 end
 
 ---@param event ModemStateEvent
@@ -1278,18 +1470,25 @@ end
 ---@return any restarted_or_error Boolean on success; otherwise the scope's unconstrained failure value.
 ---@return string? error Present when status is ok.
 ---@return ModemState? next_state
-function GsmModem:_restart_after_pdp()
+function GsmModem:_restart_after_pdp(scope_state, episode, generation)
 	return fibers.run_scope(function(scope)
 		local state_sub = self.cap:get_state_sub('card', { queue_len = 16, full = 'drop_oldest' })
 		scope:finally(function() state_sub:unsubscribe() end)
 		local retained = state_sub:recv()
+		if not self:_pdp_owner_active(generation) then return false, 'pdp_owner_stale' end
 		self.pdp_restart_from = retained and retained.payload and retained.payload.to or self.current_state
+		episode.restart_count = (episode.restart_count or 0) + 1
+		episode.restart_inflight = { owner_generation = generation, stage = 'reserved' }
+		episode.restart_inflight.stage = 'rpc_started'
 		local _, err = call_modem_rpc(self.cap, 'restart', {}, REQUEST_TIMEOUT)
+		if not self:_pdp_owner_active(generation) then return false, 'pdp_owner_stale' end
+		episode.restart_inflight = nil
+		local safe_err = err == '' and '' or pdp_safe_error(err)
 		self.svc:obs_log(err == "" and 'info' or 'warn', {
-			what = 'pdp_restart', modem = self.name, err = err,
+			what = 'pdp_restart', modem = self.name, err = safe_err,
+			count = episode.restart_count, limit = MAX_PDP_RESTARTS,
 		})
-		if err ~= "" then return false, err end
-		self.pdp_restart_needed = false
+		if err ~= "" then return false, safe_err end
 		self.pdp_restart_waiting = true
 		local deadline = fibers.now() + DEFAULT_RETRY_TIMEOUT
 		while true do
@@ -1299,10 +1498,10 @@ function GsmModem:_restart_after_pdp()
 			}))
 			if which == 'timeout' or not msg then
 				self.pdp_restart_waiting = false
-				self.pdp_restart_needed = true
 				if which == 'timeout' then return false, 'pdp_restart_state_timeout' end
 				return false, 'state subscription interrupted'
 			end
+			if not self:_pdp_owner_active(generation) then return false, 'pdp_owner_stale' end
 			local state = msg.payload and msg.payload.to
 			if msg.payload and pdp_restart_transition(msg.payload, self.pdp_restart_from) then
 				self.pdp_restart_waiting = false
@@ -1312,81 +1511,210 @@ function GsmModem:_restart_after_pdp()
 	end)
 end
 
+local function sorted_episode_cids(episode)
+	local cids = {}
+	for cid in pairs(episode and episode.cids or {}) do cids[#cids + 1] = tonumber(cid) or cid end
+	table.sort(cids, function(a, b) return tonumber(a) < tonumber(b) end)
+	return cids
+end
+
+function GsmModem:_pdp_terminal_log(kind, absorption, pdp_type, count_value, fields, generation)
+	if not self:_pdp_owner_active(generation) then return false end
+	local payload = {
+		what = 'pdp_enforcement_exhausted', budget_kind = kind, absorption = absorption,
+		modem = self.name, effective_type = pdp_type, count = count_value,
+		limit = kind == 'inspection' and MAX_PDP_INSPECTION_FAILURES
+			or kind == 'correction' and MAX_PDP_CORRECTIONS or MAX_PDP_RESTARTS,
+		enable_proceeding = true,
+	}
+	for key, value in pairs(fields or {}) do payload[key] = value end
+	self.svc:obs_log('error', payload)
+	return true
+end
+
+local function archive_pdp_episode(scope_state, episode, state)
+	episode.state = state
+	episode.restart_inflight = nil
+	scope_state.history[#scope_state.history + 1] = episode
+	if scope_state.active_episode == episode then scope_state.active_episode = nil end
+end
+
+function GsmModem:_log_pending_pdp_fail_open(scope_state, episode, pdp_type, generation)
+	local pending = episode.pending_fail_open
+	if not pending then return end
+	self:_pdp_terminal_log('correction', 'cid', pdp_type, pending.count, {
+		cid = pending.cid, outcome = pending.result.outcome,
+		dispatched = pending.result.dispatched,
+	}, generation)
+	episode.pending_fail_open = nil
+end
+
+function GsmModem:_service_pdp_episode(scope_state, pdp_type, generation)
+	local episode = scope_state.active_episode
+	if not episode then return false, '', nil, false end
+	if (episode.restart_count or 0) >= MAX_PDP_RESTARTS then
+		local cids = sorted_episode_cids(episode)
+		for _, cid in ipairs(cids) do pdp_cid_record(scope_state, cid).blocked = true end
+		self:_pdp_terminal_log('restart', 'episode_cids', pdp_type, episode.restart_count, {
+			cids = table.concat(cids, ','),
+		}, generation)
+		self:_log_pending_pdp_fail_open(scope_state, episode, pdp_type, generation)
+		archive_pdp_episode(scope_state, episode, 'restart_exhausted')
+		return false, '', nil, true
+	end
+	local status, _, restarted, restart_err, next_state =
+		self:_restart_after_pdp(scope_state, episode, generation)
+	if status ~= 'ok' then
+		if not self:_pdp_owner_active(generation) then return false, 'pdp_owner_stale' end
+		return false, tostring(restarted or 'pdp_restart_failed')
+	end
+	if not self:_pdp_owner_active(generation) then return false, 'pdp_owner_stale' end
+	if restarted then
+		if episode.pending_fail_open then
+			self:_log_pending_pdp_fail_open(scope_state, episode, pdp_type, generation)
+			archive_pdp_episode(scope_state, episode, 'completed_unverified_fail_open')
+			return false, '', next_state, true
+		end
+		archive_pdp_episode(scope_state, episode, 'completed_restart_requires_inspection')
+		return true, '', next_state, false
+	end
+	if (episode.restart_count or 0) >= MAX_PDP_RESTARTS then
+		local cids = sorted_episode_cids(episode)
+		for _, cid in ipairs(cids) do pdp_cid_record(scope_state, cid).blocked = true end
+		self:_pdp_terminal_log('restart', 'episode_cids', pdp_type, episode.restart_count, {
+			cids = table.concat(cids, ','),
+		}, generation)
+		self:_log_pending_pdp_fail_open(scope_state, episode, pdp_type, generation)
+		archive_pdp_episode(scope_state, episode, 'restart_exhausted')
+		return false, '', next_state, true
+	end
+	return false, restart_err or 'pdp_restart_failed', next_state, false
+end
+
+function GsmModem:_invoke_pdp_correction(scope_state, context, pdp_type, generation)
+	local record = pdp_cid_record(scope_state, context.cid)
+	record.corrections = (record.corrections or 0) + 1
+	record.inflight = { owner_generation = generation, stage = 'reserved' }
+	local opts, opts_err = cap_sdk.args.new.ModemSetPdnTypeOpts(context.cid, pdp_type)
+	local result
+	if not opts then
+		result = { outcome = 'rejected', dispatched = false, err = opts_err or 'invalid options' }
+	else
+		record.inflight.stage = 'rpc_started'
+		local rpc_result, rpc_err = call_modem_rpc(self.cap, 'set_pdn_type', opts, REQUEST_TIMEOUT)
+		if not self:_pdp_owner_active(generation) then return nil, record end
+		if rpc_err ~= '' then
+			result = { outcome = 'uncertain', dispatched = true, err = pdp_safe_error(rpc_err) }
+		elseif type(rpc_result) == 'table'
+			and (rpc_result.outcome == 'rejected' or rpc_result.outcome == 'applied'
+				or rpc_result.outcome == 'uncertain')
+			and type(rpc_result.dispatched) == 'boolean'
+			and type(rpc_result.err) == 'string'
+			and (rpc_result.outcome == 'rejected' or rpc_result.dispatched) then
+			result = { outcome = rpc_result.outcome, dispatched = rpc_result.dispatched,
+				err = rpc_result.err == '' and '' or pdp_safe_error(rpc_result.err) }
+		else
+			result = { outcome = 'uncertain', dispatched = true, err = 'invalid PDP correction reply' }
+		end
+	end
+	record.inflight = nil
+	record.last_result = result
+	return result, record
+end
+
 ---@return boolean restarted
 ---@return string error
 ---@return ModemState? state
 function GsmModem:_configure_pdp()
 	local pdp_type = self.cfg.pdp_type or DEFAULT_PDP_TYPE
-	local correction_key = self:_pdp_correction_key()
-	local correction_attempts = self:_pdp_correction_attempts()
-	local restart_pending = self.pdp_restart_needed == true
-	local correction_applied = false
+	local scope_state, generation = self:_begin_pdp_operation(pdp_type)
+	if not scope_state then return false, 'pdp_owner_stale' end
+	local function done(restarted, err, state)
+		self:_finish_pdp_operation(generation, pdp_type)
+		return restarted, err, state
+	end
+	if scope_state.active_episode then
+		local restarted, episode_err, next_state = self:_service_pdp_episode(scope_state, pdp_type, generation)
+		if restarted or episode_err ~= '' or not self:_pdp_owner_active(generation) then
+			return done(restarted, episode_err ~= '' and episode_err or 'pdp_owner_stale', next_state)
+		end
+		-- Exhaustion and completed_unverified_fail_open both enable immediately.
+		return done(false, '', next_state)
+	end
 	self.svc:obs_log('debug', { what = 'pdp_inspect', modem = self.name, pdp_type = pdp_type })
 	local contexts, err = modem_get_field(self.cap, 'pdp_contexts', REQUEST_TIMEOUT, 0)
+	if not self:_pdp_owner_active(generation) then return done(false, 'pdp_owner_stale') end
 	if err ~= "" then
-		self.svc:obs_log('warn', { what = 'pdp_inspect_failed', modem = self.name, err = err })
-		if not self.pdp_restart_needed then return false, err, pdp_error_state(err) end
-		contexts = {}
-	end
-	local change_err = ""
-	table.sort(contexts, function(a, b) return a.cid < b.cid end)
-	if err == "" then
-		local inspected = {}
-		for _, context in ipairs(contexts) do
-			inspected[#inspected + 1] = ('%d:%s:%s'):format(
-				context.cid, context.pdp_type, context.active and 'active' or 'inactive')
+		local safe_err = pdp_safe_error(err)
+		self.svc:obs_log('warn', { what = 'pdp_inspect_failed', modem = self.name, err = safe_err })
+		if err:find('pdp_not_supported', 1, true) then return done(false, 'pdp_not_supported') end
+		scope_state.inspection_failures = (scope_state.inspection_failures or 0) + 1
+		if scope_state.inspection_failures >= MAX_PDP_INSPECTION_FAILURES then
+			self:_pdp_terminal_log('inspection', 'scope', pdp_type,
+				scope_state.inspection_failures, {}, generation)
+			return done(false, '', pdp_error_state(err))
 		end
-		self.svc:obs_log('info', { what = 'pdp_contexts_checked', modem = self.name,
-			pdp_type = pdp_type, contexts = #inspected > 0 and table.concat(inspected, ',') or 'none' })
+		return done(false, safe_err, pdp_error_state(err))
 	end
+	table.sort(contexts, function(a, b) return a.cid < b.cid end)
+	local inspected = {}
+	for _, context in ipairs(contexts) do
+		inspected[#inspected + 1] = ('%d:%s:%s'):format(
+			context.cid, context.pdp_type, context.active and 'active' or 'inactive')
+	end
+	self.svc:obs_log('info', { what = 'pdp_contexts_checked', modem = self.name,
+		pdp_type = pdp_type, contexts = #inspected > 0 and table.concat(inspected, ',') or 'none' })
+	local change_err, change_state = '', nil
 	for _, context in ipairs(contexts) do
 		if context.active and context.pdp_type ~= pdp_type then
-			if restart_pending then break end
-			if (correction_attempts[correction_key] or 0) >= MAX_PDP_CORRECTIONS then
-				self.svc:obs_log('error', {
-					what = 'pdp_type_persistent_mismatch', modem = self.name, cid = context.cid,
-					requested = pdp_type, observed = context.pdp_type,
+			local record = pdp_cid_record(scope_state, context.cid)
+			if not record.exhausted and not record.blocked
+				and record.corrections >= MAX_PDP_CORRECTIONS then
+				record.exhausted = true
+				local last = record.last_result or { outcome = 'rejected', dispatched = false }
+				self:_pdp_terminal_log('correction', 'cid', pdp_type, record.corrections, {
+					cid = context.cid, outcome = last.outcome, dispatched = last.dispatched,
+				}, generation)
+				return done(false, '')
+			elseif not record.exhausted and not record.blocked then
+				local result
+				result, record = self:_invoke_pdp_correction(scope_state, context, pdp_type, generation)
+				if not result then return done(false, 'pdp_owner_stale') end
+				self.svc:obs_log(result.outcome == 'applied' and 'info' or 'warn', {
+					what = result.outcome == 'applied' and 'pdp_type_changed' or 'pdp_type_change_failed',
+					modem = self.name, cid = context.cid, pdp_type = pdp_type,
+					outcome = result.outcome, dispatched = result.dispatched, err = result.err,
 				})
-				return false, ""
-			end
-			local opts, opts_err = cap_sdk.args.new.ModemSetPdnTypeOpts(context.cid, pdp_type)
-			local set_err = opts_err
-			if opts then
-				local _, rpc_err = call_modem_rpc(self.cap, 'set_pdn_type', opts, REQUEST_TIMEOUT)
-				set_err = rpc_err
-			end
-			self.svc:obs_log(set_err == "" and 'info' or 'warn', {
-				what = set_err == "" and 'pdp_type_changed' or 'pdp_type_change_failed',
-				modem = self.name, cid = context.cid, pdp_type = pdp_type, err = set_err,
-			})
-			if set_err == "" or pdp_change_unverified(set_err) then
-				self.pdp_restart_needed = true
-				correction_applied = true
-				if set_err ~= "" then
-					change_err = set_err
-					break -- The write may have applied; restart before issuing more PDP commands.
+				if result.outcome == 'applied' or result.outcome == 'uncertain' then
+					local episode = ensure_pdp_episode(scope_state)
+					episode.cids[tostring(context.cid)] = true
 				end
-			else
-				change_err = set_err
-			end
-			local state = pdp_error_state(set_err)
-			if state then
-				if not self.pdp_restart_needed then return false, set_err, state end
-				break -- Stop PDP commands; verified changes still need a reboot.
+				if result.outcome == 'rejected' then
+					change_err = result.err ~= '' and result.err or 'pdp_correction_rejected'
+					change_state = pdp_error_state(result.err)
+				end
+				if result.outcome == 'rejected' and record.corrections >= MAX_PDP_CORRECTIONS then
+					record.exhausted = true
+					if scope_state.active_episode then
+						scope_state.active_episode.pending_fail_open = {
+							cid = context.cid, count = record.corrections, result = result,
+						}
+					else
+						self:_pdp_terminal_log('correction', 'cid', pdp_type, record.corrections, {
+							cid = context.cid, outcome = result.outcome, dispatched = result.dispatched,
+						}, generation)
+						return done(false, '')
+					end
+					break
+				elseif result.outcome == 'uncertain' then
+					break
+				end
 			end
 		end
 	end
-	if correction_applied then
-		correction_attempts[correction_key] = (correction_attempts[correction_key] or 0) + 1
-	end
-	if not self.pdp_restart_needed then return false, change_err end
-
-	-- Apply verified changes before enabling; restart is allowed from any state.
-	local status, _, restarted, restart_err, next_state = self:_restart_after_pdp()
-	if status ~= 'ok' then return false, tostring(restarted or 'pdp_restart_failed') end
-	---@cast restarted boolean
-	---@cast restart_err string
-	return restarted, restart_err, next_state
+	if not scope_state.active_episode then return done(false, change_err, change_state) end
+	local restarted, episode_err, next_state = self:_service_pdp_episode(scope_state, pdp_type, generation)
+	return done(restarted, episode_err, next_state)
 end
 
 ---@return table<string, string|number|boolean>? apn
@@ -1571,7 +1899,6 @@ function GsmModem:_autoconnect_loop()
 				local sim = sim_payload_from_value(msg.payload, self.sim_lock, self.sim_lock_retries, self.modem_state)
 				self:_accept_sim_state(msg.payload)
 				if sim.present == false then
-					self:_clear_pdp_correction_attempts()
 					self.connected = false
 					connected = false
 				end
@@ -1600,7 +1927,8 @@ function GsmModem:_autoconnect_loop()
 				err = pdp_err
 				if restarted then
 					retry_timeout = 0 -- Re-read configuration on the next disabled pass.
-				elseif pdp_err == "" and current_state == 'disabled' and self.cfg.autoconnect then
+				elseif pdp_err == "" and current_state == 'disabled' and self.cfg.autoconnect
+					and self:_pdp_owner_active() then
 					local _, enable_err = call_modem_rpc(self.cap, 'enable', {}, REQUEST_TIMEOUT)
 					err = enable_err
 				end
