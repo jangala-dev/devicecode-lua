@@ -1,10 +1,14 @@
 local linux_mm = require 'services.hal.backends.modem.providers.linux_mm.impl'
+local exec = require 'fibers.io.exec'
+local op = require 'fibers.op'
+local json = require 'cjson.safe'
+local safe = require 'coxpcall'
+local runfibers = require 'tests.support.run_fibers'
 
 local tests = {}
 
 function tests.test_absent_state_monitor_reports_command_closed()
 	local fibers = require 'fibers'
-	local runfibers = require 'tests.support.run_fibers'
 	local Backend = linux_mm._test.ModemBackend
 
 	runfibers.run(function()
@@ -17,7 +21,6 @@ end
 
 function tests.test_stopped_state_monitor_reports_command_closed()
 	local fibers = require 'fibers'
-	local runfibers = require 'tests.support.run_fibers'
 	local Backend = linux_mm._test.ModemBackend
 
 	runfibers.run(function()
@@ -42,16 +45,47 @@ local function eq(a, b, msg)
 end
 local function ok(v, msg) if not v then fail(msg or 'expected truthy') end end
 
+---@return nil
+function tests.test_linux_mm_constructor_prefers_secondary_at_port_with_primary_fallback()
+	local saved = exec.command
+	local success, err = safe.pcall(function()
+		for _, secondary in ipairs({ true, false }) do
+			local ports = { 'cdc-wdm1 (qmi)', 'ttyUSB6 (at)', 'wwan1 (net)' }
+			if secondary then ports[#ports + 1] = 'ttyUSB7 (at)' end
+			local output = assert(json.encode({ modem = { generic = {
+				['equipment-identifier'] = '000000000000001',
+				device = '/sys/devices/demo', ports = ports,
+			} } }))
+			exec.command = function(args)
+				eq(args[1], 'mmcli')
+				eq(args[2], '-J')
+				eq(args[3], '-m')
+				eq(args[4], '1')
+				return { combined_output_op = function()
+					return op.always(output, 'exited', 0)
+				end }
+			end
+			runfibers.run(function()
+				local identity = linux_mm.new('1').identity
+				eq(identity.at_port, secondary and '/dev/ttyUSB7' or '/dev/ttyUSB6')
+				eq(identity.mode_port, '/dev/cdc-wdm1')
+				eq(identity.net_port, 'wwan1')
+			end)
+		end
+	end)
+	exec.command = saved
+	assert(success, err)
+end
 function tests.test_linux_mm_parses_sim_lock_fields_from_modem_json()
 	local info, err = linux_mm._test.parse_modem_info_json([[
 {
   "modem": {
     "3gpp": {
-      "imei": "860195058017887",
+      "imei": "000000000000001",
       "operator-name": "--"
     },
     "generic": {
-      "equipment-identifier": "860195058017887",
+      "equipment-identifier": "000000000000001",
       "device": "/sys/devices/demo",
       "primary-port": "cdc-wdm1",
       "ports": ["cdc-wdm1 (qmi)", "ttyUSB6 (at)", "wwan1 (net)"],
@@ -83,11 +117,11 @@ function tests.test_linux_mm_normalises_absent_unlock_required()
 {
   "modem": {
     "3gpp": {
-      "imei": "868549060377253",
+      "imei": "000000000000002",
       "operator-name": "Demo"
     },
     "generic": {
-      "equipment-identifier": "868549060377253",
+      "equipment-identifier": "000000000000002",
       "ports": [],
       "access-technologies": "lte",
       "drivers": "qmi_wwan",

@@ -55,9 +55,10 @@ function tests.test_modem_default_groups_emit_existing_fields()
             count = count + 1
             if count == 6 then m.state_pulse:close() end
             return { imei = 'test', device = 'test-device', sim = 'test-sim',
-                operator = 'test-operator', values = { lte = { rssi = -80 } }, rx_bytes = 123 }, ''
+                operator = 'test-operator', values = { lte = { rssi = -80 } }, rx_bytes = 123 }, '', {}
         end
         m._emit_meta = function(_, field, value) emitted[field] = value; return true end
+        m._emit_state = function() return true end
         m.state_pulse:signal()
         m:emitter()
         eq(count, 6)
@@ -83,12 +84,13 @@ function tests.test_modem_non_emitting_group_remains_requestable()
                 count = count + 1
                 if group == 'network' then network_reads = network_reads + 1 end
                 if count == 6 then m.state_pulse:close() end
-                return { operator = 'test-operator', imei = 'test', values = {} }, ''
+                return { operator = 'test-operator', imei = 'test', values = {} }, '', {}
             end
             local got, operator = m:get(assert(args.new.ModemGetOpts('operator')))
             eq(got, true)
             eq(operator, 'test-operator')
             m._emit_meta = function(_, field, value) emitted[field] = value; return true end
+            m._emit_state = function() return true end
             m.state_pulse:signal()
             m:emitter()
             eq(count, 6)
