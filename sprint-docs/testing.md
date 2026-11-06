@@ -28,13 +28,28 @@ Failure hooks can collect extra diagnostics and perform test-specific rollback.
 The shared runner does not choose when to deploy, reset devices or restore config.
 Keep assertions and config transformations in the individual test.
 
-Create `devicecode.new(box)` to manage a runtime. `prepare()` snapshots the
-bootstrap and persistent config; `backup()` saves the runtime before mutation.
+Create `devicecode.new(box)` to manage a runtime. `prepare()` conclusively
+snapshots the bootstrap and persistent config before dependency installation;
+SSH, timeout and permission failures are fatal and are not treated as an absent
+persistent file. `backup()` validates a remote archive, downloads it into the
+private artifact directory and atomically commits the local recovery copy before
+mutation is allowed.
 `build(label, config)` optionally replaces only the staged config. `deploy()`
 stops the service and unpacks the archive, while `write_config()` updates both
 config locations. `restore_runtime()` restores the snapshot and leaves the
 service stopped so the caller can recover devices before restarting it.
 `restore_persistent()` also restores the absence of an originally missing file.
+Runtime rollback replaces the deployed tree from the committed backup instead
+of overlaying it, so files introduced by a failed deployment are removed.
+Configuration uploads use a sibling temporary file and same-filesystem rename;
+an interrupted upload cannot truncate the active configuration.
+
+Preparation may run `opkg update` and install missing test dependencies. Those
+package and package-list changes are intentionally non-transactional and persist
+after the test; runtime rollback does not remove packages. Each session removes
+its exact `/tmp/devicecode-<artifact-id>` workspace during cleanup when the box
+remains reachable. An unreachable box can retain that directory and the cleanup
+failure is reported.
 
 `modem.new(box)` is optional for modem tests. It keeps selection policy in the
 caller, waits by stable IMEI across changing mmcli IDs, and accepts a list of AT

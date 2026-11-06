@@ -1,6 +1,6 @@
-local posix = require 'posix'
 local signals = require 'posix.signal'
 local stat = require 'posix.sys.stat'
+local unistd = require 'posix.unistd'
 local auth = require 'onbox.support.auth'
 local fiber_runtime = require 'onbox.support.fiber_runtime'
 local process = require 'onbox.support.process'
@@ -83,9 +83,9 @@ function M.parse_args(argv, repo, here, options)
     args.runtime = args.runtime:gsub('/+$', '')
     assert(args.runtime:sub(1, 1) == '/' and args.runtime ~= '' and args.runtime ~= '/root'
         and args.runtime ~= '/tmp', 'Runtime must name the application directory')
-    if args.artifacts:sub(1, 1) ~= '/' then args.artifacts = posix.getcwd() .. '/' .. args.artifacts end
+    if args.artifacts:sub(1, 1) ~= '/' then args.artifacts = unistd.getcwd() .. '/' .. args.artifacts end
     if args.password_file and args.password_file:sub(1, 1) ~= '/' then
-        args.password_file = posix.getcwd() .. '/' .. args.password_file
+        args.password_file = unistd.getcwd() .. '/' .. args.password_file
     end
     return args
 end
@@ -125,7 +125,21 @@ function M.new(args, password, filters)
     local self = setmetatable({ args = args, artifacts = args.artifacts, cleanups = {},
         remote = '/tmp/devicecode-' .. assert(args.artifacts:match('([^/]+)$')) }, Session)
     self.process = process.new(args.artifacts, self)
+    self.recovery_process = process.new(args.artifacts, self)
+    args.recovery_process = self.recovery_process
+    args.on_remote_workspace = function(path)
+        assert(type(path) == 'string' and path:sub(1, 1) == '/' and not path:find('[\r\n]'),
+            'Invalid remote workspace')
+        self.remote_cleanup_registered = self.remote_cleanup_registered or {}
+        if self.remote_cleanup_registered[path] then return end
+        self.remote_cleanup_registered[path] = true
+        self:defer(function()
+            self.ssh:run('rm -rf ' .. process.quote(path), { timeout = 30 })
+        end)
+    end
     self.ssh = ssh.new(args, self.process, password)
+    args.recovery_process = nil
+    args.on_remote_workspace = nil
     self.logs = logs.new(self.ssh, self.process, self.remote, filters)
     self:defer(function() self.ssh:close() end)
     return self
@@ -176,7 +190,7 @@ end
 function Session:run(body, hooks)
     hooks = hooks or {}
     local previous = {}
-    for _, sig in ipairs({ signals.SIGINT, signals.SIGTERM }) do
+    for _, sig in ipairs({ signals.SIGHUP, signals.SIGINT, signals.SIGTERM }) do
         previous[sig] = signals.signal(sig, function() self.interrupted = true end)
     end
     local ran, code_or_err = pcall(function()
@@ -227,6 +241,11 @@ function Session:run(body, hooks)
                 if not cleaned then ok = false; io.stderr:write('Cleanup failed: ', tostring(cleanup_err), '\n') end
             end
             self.cleanups = {}
+            local recovery_stopped, recovery_err = pcall(function() self.recovery_process:stop_all() end)
+            if not recovery_stopped then
+                ok = false
+                io.stderr:write('Could not stop recovery processes: ', tostring(recovery_err), '\n')
+            end
             process.set_run_state(nil)
             self.interrupt_notification = nil
             if ok then print((hooks.success_message or 'PASS') .. '. Logs and results: ' .. self.artifacts) end

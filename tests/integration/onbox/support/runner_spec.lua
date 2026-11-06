@@ -1,6 +1,12 @@
-local posix = require 'posix'
+local bit = require 'bit'
+local dirent = require 'posix.dirent'
 local errno = require 'posix.errno'
+local fcntl = require 'posix.fcntl'
 local signals = require 'posix.signal'
+local stat = require 'posix.sys.stat'
+local stdlib = require 'posix.stdlib'
+local unistd = require 'posix.unistd'
+local wait = require 'posix.sys.wait'
 local auth = require 'onbox.support.auth'
 local runner = require 'onbox.support.runner'
 local process = require 'onbox.support.process'
@@ -12,7 +18,8 @@ local util = require 'onbox.support.util'
 local quote = process.quote
 
 local tests = {}
-local here = assert(posix.realpath(arg[0])):match('^(.*)/[^/]+$')
+local module_source = assert(debug.getinfo(1, 'S').source:match('^@(.+)$'))
+local here = assert(stdlib.realpath(module_source)):match('^(.*)/[^/]+$')
 local repo = assert(here:match('^(.*)/tests/integration/onbox/support$'))
 
 ---@param actual any
@@ -33,20 +40,20 @@ end
 ---@param path string
 ---@return nil
 local function remove_tree(path)
-    local info = posix.stat(path)
+    local info = stat.stat(path)
     if not info then return end
-    if info.type == 'directory' then
-        for name in posix.files(path) do
+    if stat.S_ISDIR(info.st_mode) ~= 0 then
+        for name in dirent.files(path) do
             if name ~= '.' and name ~= '..' then remove_tree(path .. '/' .. name) end
         end
-        assert(posix.rmdir(path))
+        assert(unistd.rmdir(path))
     else assert(os.remove(path)) end
 end
 
 ---@param body fun(box: OnboxSession, temp: string): nil
 ---@return nil
 local function with_session(body)
-    local temp = assert(posix.mkdtemp('/tmp/onbox-support-XXXXXX'))
+    local temp = assert(stdlib.mkdtemp('/tmp/onbox-support-XXXXXX'))
     local args = runner.parse_args({ '--ssh-key-auth', '--artifacts', temp .. "/space and ' quote" }, repo, here)
     local box = runner.new(args)
     box.remote = temp .. '/remote'
@@ -87,9 +94,9 @@ function tests.local_commands_preserve_stdin_stderr_exit_status_and_timeout()
         equal(result.stdout, 'hello')
         equal(result.stderr, 'error')
         equal(result.code, 7)
-        local source = box.artifacts .. '/input'
-        util.write(source, 'input data')
-        result = box.process:run('cat', { input_path = source })
+        local input_source = box.artifacts .. '/input'
+        util.write(input_source, 'input data')
+        result = box.process:run('cat', { input_path = input_source })
         equal(result.stdout, 'input data')
         equal(result.code, 0)
         equal(box.process:run('sleep 10', { timeout = 0.1 }).code, 124)
@@ -97,7 +104,7 @@ function tests.local_commands_preserve_stdin_stderr_exit_status_and_timeout()
         rejects(function() box.process:run('true') end, 'Interrupted')
         box.recovering = true
         equal(box.process:run('true').code, 0)
-        equal(posix.stat(box.artifacts).mode:sub(-9), 'rwx------')
+        equal(bit.band(stat.stat(box.artifacts).st_mode, 511), 448)
     end)
 end
 
@@ -108,10 +115,10 @@ function tests.fiber_process_launches_short_commands_and_preserves_terminal_stat
             equal(box.process:run('true').code, 0)
             equal(box.process:run('exit 7').code, 7)
         end
-        local stdout = assert(posix.stat(box.artifacts .. '/command.stdout'))
-        local stderr = assert(posix.stat(box.artifacts .. '/command.stderr'))
-        equal(stdout.mode:sub(-9), 'rw-------')
-        equal(stderr.mode:sub(-9), 'rw-------')
+        local stdout = assert(stat.stat(box.artifacts .. '/command.stdout'))
+        local stderr = assert(stat.stat(box.artifacts .. '/command.stderr'))
+        equal(bit.band(stdout.st_mode, 511), 384)
+        equal(bit.band(stderr.st_mode, 511), 384)
 
         local input = box.artifacts .. '/large-input'
         util.write(input, string.rep('large early-exit input\n', 131072))
@@ -140,14 +147,14 @@ function tests.foreground_runs_serialize_without_blocking_background_start()
                 first_done:signal()
             end))
             local deadline = process.now() + 2
-            while not posix.stat(first_started) and process.now() < deadline do f.sleep.sleep(0.01) end
-            assert(posix.stat(first_started), 'First foreground command did not start')
+            while not stat.stat(first_started) and process.now() < deadline do f.sleep.sleep(0.01) end
+            assert(stat.stat(first_started), 'First foreground command did not start')
             assert(f.fibers.spawn(function()
                 second = box.process:run('touch ' .. quote(second_started) .. '; printf second', { timeout = 0.05 })
                 second_done:signal()
             end))
             f.sleep.sleep(0.1)
-            assert(not posix.stat(second_started), 'Queued foreground command launched before gate release')
+            assert(not stat.stat(second_started), 'Queued foreground command launched before gate release')
 
             local background_pid = box.process:start('printf background; sleep 30', background_log)
             deadline = process.now() + 2
@@ -188,7 +195,7 @@ function tests.foreground_runs_serialize_without_blocking_background_start()
             f.fibers.perform(fiber_runtime.oneshot_op(queued_done))
             equal(queued_ok, false)
             assert(tostring(queued_err):find('Interrupted', 1, true))
-            assert(not posix.stat(queued_marker), 'Interrupted queued command was launched')
+            assert(not stat.stat(queued_marker), 'Interrupted queued command was launched')
             box.process:_release_foreground()
             equal(box.process.foreground_busy, false)
             equal(#box.process.foreground_waiters, 0)
@@ -204,8 +211,8 @@ function tests.global_launch_gate_forwards_grant_when_granted_waiter_is_interrup
         local f = fiber_runtime.get()
         f.fibers.run(function()
             local second_dir, third_dir = box.artifacts .. '/grant-second', box.artifacts .. '/grant-third'
-            assert(posix.mkdir(second_dir, 'rwx------'))
-            assert(posix.mkdir(third_dir, 'rwx------'))
+            assert(stat.mkdir(second_dir, 448))
+            assert(stat.mkdir(third_dir, 448))
             local interrupted_reads = 0
             local second_state = setmetatable({ interrupt_notification = f.oneshot.new() }, {
                 __index = function(_, key)
@@ -251,9 +258,86 @@ function tests.global_launch_gate_forwards_grant_when_granted_waiter_is_interrup
             box.process._read_handoff = read_handoff
             equal(second_ok, false)
             assert(tostring(second_err):find('Interrupted', 1, true))
-            assert(not posix.stat(second_dir .. '/unexpected-launch'))
+            assert(not stat.stat(second_dir .. '/unexpected-launch'))
             equal(third.code, 0)
             equal(first.code, 0)
+        end)
+    end)
+end
+
+---@return nil
+function tests.scope_cancellation_removes_queued_foreground_waiter()
+    with_session(function(box)
+        local f = fiber_runtime.get()
+        f.fibers.run(function()
+            box.process.foreground_busy = true
+            local ready, done = f.oneshot.new(), f.oneshot.new()
+            local child_scope, child_status
+            assert(f.fibers.spawn(function()
+                child_status = f.fibers.perform(f.fibers.run_scope_op(function(scope)
+                    child_scope = scope
+                    ready:signal()
+                    box.process:run('true')
+                end))
+                done:signal()
+            end))
+            f.fibers.perform(fiber_runtime.oneshot_op(ready))
+            f.sleep.sleep(0)
+            child_scope:cancel('injected scope cancellation')
+            f.fibers.perform(fiber_runtime.oneshot_op(done))
+            equal(child_status, 'cancelled')
+            box.process:_release_foreground()
+            equal(box.process.foreground_busy, false)
+            equal(#box.process.foreground_waiters, 0)
+            box.recovering = true
+            equal(box.process:run('true').code, 0)
+        end)
+    end)
+end
+
+---@return nil
+function tests.scope_cancellation_removes_queued_global_launch_waiter()
+    with_session(function(box)
+        local f = fiber_runtime.get()
+        f.fibers.run(function()
+            local second_artifacts = box.artifacts .. '/global-cancelled-process'
+            assert(stat.mkdir(second_artifacts, 448))
+            local second_process = process.new(second_artifacts, {})
+            local handoff_seen, first_done = f.oneshot.new(), f.oneshot.new()
+            local child_ready, child_done = f.oneshot.new(), f.oneshot.new()
+            local allow_handoff = false
+            local read_handoff = box.process._read_handoff
+            box.process._read_handoff = function(self, handle)
+                local pgid = read_handoff(self, handle)
+                if pgid and not allow_handoff then handoff_seen:signal(); return nil end
+                return pgid
+            end
+            local first, child_scope, child_status
+            assert(f.fibers.spawn(function()
+                first = box.process:run('true')
+                first_done:signal()
+            end))
+            f.fibers.perform(fiber_runtime.oneshot_op(handoff_seen))
+            assert(f.fibers.spawn(function()
+                child_status = f.fibers.perform(f.fibers.run_scope_op(function(scope)
+                    child_scope = scope
+                    child_ready:signal()
+                    second_process:run('touch ' .. quote(second_artifacts .. '/unexpected-launch'))
+                end))
+                child_done:signal()
+            end))
+            f.fibers.perform(fiber_runtime.oneshot_op(child_ready))
+            f.sleep.sleep(0)
+            child_scope:cancel('injected global gate cancellation')
+            f.fibers.perform(fiber_runtime.oneshot_op(child_done))
+            equal(child_status, 'cancelled')
+            assert(not stat.stat(second_artifacts .. '/unexpected-launch'))
+            allow_handoff = true
+            f.fibers.perform(fiber_runtime.oneshot_op(first_done))
+            box.process._read_handoff = read_handoff
+            equal(first.code, 0)
+            box.recovering = true
+            equal(box.recovery_process:run('true').code, 0)
         end)
     end)
 end
@@ -285,7 +369,7 @@ function tests.credential_lease_serializes_launches_across_process_instances()
         local f = fiber_runtime.get()
         f.fibers.run(function()
             local second_artifacts = box.artifacts .. '/second-process'
-            assert(posix.mkdir(second_artifacts, 'rwx------'))
+            assert(stat.mkdir(second_artifacts, 448))
             local second_process = process.new(second_artifacts, {})
             local handoff_seen, first_done, second_done = f.oneshot.new(), f.oneshot.new(), f.oneshot.new()
             local allow_handoff = false
@@ -301,9 +385,9 @@ function tests.credential_lease_serializes_launches_across_process_instances()
             assert(f.fibers.spawn(function()
                 first_ok, first_result = pcall(auth.with_password_fd, secret, function(supplied_fd, supplied_lease)
                     fd, lease = supplied_fd, supplied_lease
-                    pipe_link = assert(posix.readlink('/proc/self/fd/' .. fd))
+                    pipe_link = assert(unistd.readlink('/proc/self/fd/' .. fd))
                     assert(not auth.lease_is_inheritable(lease))
-                    return box.process:run('sleep 0.2; IFS= read -r onbox_secret <&' .. fd
+                    return box.process:run('sleep 0.2; IFS= read -r onbox_secret < /proc/self/fd/' .. fd
                         .. '; test "$onbox_secret" = ' .. quote(secret), { inherit_fds = { lease } })
                 end)
                 first_done:signal()
@@ -319,14 +403,16 @@ function tests.credential_lease_serializes_launches_across_process_instances()
                 second_done:signal()
             end))
             f.sleep.sleep(0.05)
-            assert(not posix.stat(second_marker), 'Second Process launched while credential inheritance was enabled')
+            assert(not stat.stat(second_marker), 'Second Process launched while credential inheritance was enabled')
             allow_handoff = true
             f.fibers.perform(fiber_runtime.oneshot_op(first_done))
             f.fibers.perform(fiber_runtime.oneshot_op(second_done))
             box.process._read_handoff = original_handoff
             assert(first_ok, first_result)
-            equal(first_result.code, 0)
-            equal(second_result.code, 0)
+            assert(first_result.code == 0, 'Credential command failed (' .. tostring(first_result.code)
+                .. '): ' .. tostring(first_result.stderr))
+            assert(second_result.code == 0, 'Following command failed (' .. tostring(second_result.code)
+                .. '): ' .. tostring(second_result.stderr))
             equal(second_result.stdout, 'clean')
             assert(not pcall(auth.lease_fd, lease), 'Credential lease was not retired after handoff')
         end)
@@ -340,10 +426,9 @@ function tests.concurrent_inline_requests_are_unique_and_leave_no_residue()
         local f = fiber_runtime.get()
         f.fibers.run(function()
             local done = { f.oneshot.new(), f.oneshot.new() }
-            local results = {}
             for i, data in ipairs({ string.rep('first-', 20000), string.rep('second-', 20000) }) do
                 assert(f.fibers.spawn(function()
-                    results[i] = box.ssh:run('cat > ' .. quote(temp .. '/request-' .. i), { data = data })
+                    assert(box.ssh:run('cat > ' .. quote(temp .. '/request-' .. i), { data = data }))
                     done[i]:signal()
                 end))
             end
@@ -357,7 +442,7 @@ function tests.concurrent_inline_requests_are_unique_and_leave_no_residue()
         equal(util.read(caller_input), 'caller owned')
         equal(util.read(temp .. '/caller-output'), 'caller owned')
         rejects(function() box.ssh:run('exit 9', { data = 'failed request' }) end, 'Remote command failed (9)')
-        for name in posix.files(box.artifacts) do
+        for name in dirent.files(box.artifacts) do
             assert(not name:match('^%.request%-'), 'Private request workspace was not removed: ' .. name)
         end
     end)
@@ -393,7 +478,7 @@ function tests.output_setup_failure_releases_gate_and_removes_workspace()
             rejects(function() box.process:run('true', { log_path = box.artifacts }) end, '')
             equal(box.process:run('true').code, 0)
         end)
-        for name in posix.files(box.artifacts) do
+        for name in dirent.files(box.artifacts) do
             assert(not name:match('^%.process%-'), 'Process setup workspace was not removed: ' .. name)
         end
     end)
@@ -403,11 +488,37 @@ end
 function tests.upload_creates_parent_directories_without_a_devicecode_runtime()
     with_session(function(box, temp)
         box.ssh.command = 'sh -c'
-        local source, destination = temp .. '/source', temp .. '/nested/path/destination'
-        util.write(source, 'uploaded over stdin')
-        box.ssh:upload(source, destination)
+        local upload_source, destination = temp .. '/source', temp .. '/nested/path/destination'
+        util.write(upload_source, 'uploaded over stdin')
+        box.ssh:upload(upload_source, destination)
         equal(util.read(destination), 'uploaded over stdin')
-        equal(posix.stat(destination).mode:sub(-9), 'rw-------')
+        equal(bit.band(stat.stat(destination).st_mode, 511), 384)
+    end)
+end
+
+---@return nil
+function tests.recovery_ssh_uses_independent_process_manager_after_normal_manager_poisoning()
+    with_session(function(box)
+        box.ssh.command = 'sh -c'
+        box.process:_poison('injected normal manager failure')
+        rejects(function() box.ssh:run('true') end, 'Process manager is poisoned')
+        box.recovering = true
+        equal(box.ssh:run('printf recovered').stdout, 'recovered')
+        equal(box.recovery_process.poison, nil)
+    end)
+end
+
+---@return nil
+function tests.remote_workspace_cleanup_uses_exact_registered_path()
+    with_session(function(box, temp)
+        box.ssh.command = 'sh -c'
+        box.remote = temp .. '/devicecode-session'
+        assert(process.execute('mkdir -p ' .. quote(box.remote)) == 0)
+        util.write(box.remote .. '/artifact', 'temporary')
+        box.ssh:workspace_created(box.remote)
+        box.logs.stop = function() end
+        equal(box:run(function() end), 0)
+        equal(stat.stat(box.remote), nil)
     end)
 end
 
@@ -420,8 +531,8 @@ function tests.phase_captures_and_stops_logs_without_preparing_a_devicecode_runt
             .. "trap 'kill \"$child\" 2>/dev/null; wait \"$child\" 2>/dev/null; exit 0' TERM\n"
             .. "sleep 30 & child=$!\nwait \"$child\"\n")
         util.write(bin .. '/logger', '#!/bin/sh\nexit 0\n')
-        assert(posix.chmod(bin .. '/logread', 'rwx------'))
-        assert(posix.chmod(bin .. '/logger', 'rwx------'))
+        assert(stat.chmod(bin .. '/logread', 448))
+        assert(stat.chmod(bin .. '/logger', 448))
         box.ssh.command = 'env PATH=' .. quote(bin) .. ':"$PATH" sh -c'
         local body_ok, body_err = pcall(function()
             box:phase('example', function()
@@ -501,6 +612,33 @@ function tests.success_runs_cleanup_without_invoking_rollback()
 end
 
 ---@return nil
+function tests.hup_int_and_term_enter_controlled_rollback_path()
+    for _, target in ipairs({ signals.SIGHUP, signals.SIGINT, signals.SIGTERM }) do
+        with_session(function(box)
+            local signal = signals.signal
+            local installed
+            signals.signal = function(sig, handler, flags)
+                if sig == target and type(handler) == 'function' and not installed then installed = handler end
+                return signal(sig, handler, flags)
+            end
+            box.logs.stop = function() end
+            local rolled_back = false
+            local ok, result = pcall(function()
+                return box:run(function()
+                    assert(installed, 'Signal handler was not installed')
+                    installed()
+                    process.pause(1)
+                end, { rollback = function() rolled_back = true end })
+            end)
+            signals.signal = signal
+            assert(ok, result)
+            equal(result, 1)
+            equal(rolled_back, true)
+        end)
+    end
+end
+
+---@return nil
 function tests.interrupted_phase_still_stops_remote_capture_and_preserves_original_error()
     with_session(function(box)
         local remote_stopped, local_stopped = false, false
@@ -530,7 +668,7 @@ function tests.devicecode_preserves_configuration_and_restores_persistent_file_p
             box.args.service = temp .. '/service'
             util.write(runtime .. '/main.lua', '-- original runtime\n')
             util.write(box.args.service, '#!/bin/sh\nexit 0\n')
-            assert(posix.chmod(box.args.service, 'rwx------'))
+            assert(stat.chmod(box.args.service, 448))
             local config = { hal = { data = { filesystem = { { name = 'config', root = config_root } } } },
                 unrelated = { data = { value = 'preserved' } } }
             util.write(runtime .. '/configs/example.json', util.encode(config))
@@ -553,16 +691,135 @@ function tests.devicecode_preserves_configuration_and_restores_persistent_file_p
             equal(app.original.unrelated.data.value, 'preserved')
             equal(app.persistent_existed, existed)
             app:backup()
+            assert(app.backup_ready)
+            assert(stat.stat(app.backup_path))
             app:write_config({ changed = true })
-            assert(posix.stat(config_root .. '/example.json'))
+            assert(stat.stat(config_root .. '/example.json'))
             util.write(runtime .. '/main.lua', '-- changed runtime\n')
+            util.write(runtime .. '/deployment-only.lua', '-- must be removed\n')
             app:restore_runtime()
             equal(util.read(runtime .. '/main.lua'), '-- original runtime\n')
+            equal(stat.stat(runtime .. '/deployment-only.lua'), nil)
             if existed then equal(util.read(config_root .. '/example.json'), '{"original":"persistent"}')
-            else equal(posix.stat(config_root .. '/example.json'), nil) end
+            else equal(stat.stat(config_root .. '/example.json'), nil) end
             equal(util.decode(util.read(runtime .. '/configs/example.json')).unrelated.data.value, 'preserved')
         end)
     end
+end
+
+---@return nil
+function tests.devicecode_snapshot_errors_abort_before_dependency_or_remote_mutation()
+    for _, failure in ipairs({
+        { code = 255, detail = 'injected SSH failure' },
+        { code = 124, detail = 'injected timeout' },
+        { code = 45, detail = 'injected non-file configuration path' },
+    }) do
+        with_session(function(box)
+            box.args.target = 'example'
+            local calls = {}
+            local bootstrap = util.encode({ hal = { data = { filesystem = {
+                { name = 'config', root = '/tmp/onbox-persistent' },
+            } } } })
+            box.ssh.run = function(_, command)
+                calls[#calls + 1] = command
+                if command:find('/configs/example.json', 1, true)
+                    and not command:find('if test -f', 1, true) then
+                    return { code = 0, stdout = bootstrap, stderr = '' }
+                end
+                if command:find('if test -f', 1, true) then
+                    return { code = failure.code, stdout = '', stderr = failure.detail }
+                end
+                return { code = 0, stdout = '', stderr = '' }
+            end
+            rejects(function() devicecode.new(box):prepare() end,
+                'Cannot snapshot persistent configuration (exit ' .. failure.code .. ')')
+            for _, command in ipairs(calls) do
+                assert(not command:find('opkg', 1, true), 'Dependency mutation ran after snapshot failure')
+                assert(not command:find('mkdir -p ' .. quote(box.remote), 1, true),
+                    'Remote workspace was created before snapshots completed')
+            end
+        end)
+    end
+end
+
+---@return nil
+function tests.devicecode_backup_faults_never_commit_or_enable_mutation()
+    for _, mode in ipairs({ 'partial', 'corrupt' }) do
+        with_session(function(box)
+            local workspace_registered = false
+            box.ssh.run = function(_, command)
+                if command:find('mkdir -p', 1, true) then return { code = 0, stdout = '', stderr = '' } end
+                if command:find('tar -czf', 1, true) then return { code = 0, stdout = '', stderr = '' } end
+                error('Unexpected remote command: ' .. command)
+            end
+            box.ssh.workspace_created = function(_, path)
+                equal(path, box.remote)
+                workspace_registered = true
+            end
+            box.ssh.download = function(_, _, destination)
+                util.write(destination, mode == 'corrupt' and 'not a tar archive' or 'partial archive')
+                if mode == 'partial' then error('injected partial download') end
+            end
+            local app = devicecode.new(box)
+            rejects(function() app:backup() end,
+                mode == 'partial' and 'injected partial download' or 'Downloaded runtime backup is invalid')
+            equal(workspace_registered, true)
+            equal(app.backup_ready, false)
+            equal(stat.stat(box.artifacts .. '/original-runtime.tar.gz.partial'), nil)
+            equal(stat.stat(box.artifacts .. '/original-runtime.tar.gz'), nil)
+        end)
+    end
+end
+
+---@return nil
+function tests.devicecode_registers_remote_workspace_before_archive_creation()
+    with_session(function(box)
+        local registered = false
+        box.ssh.run = function(_, command)
+            if command:find('mkdir -p', 1, true) then return { code = 0, stdout = '', stderr = '' } end
+            equal(registered, true)
+            error('injected remote tar failure')
+        end
+        box.ssh.workspace_created = function(_, path)
+            equal(path, box.remote)
+            registered = true
+        end
+        rejects(function() devicecode.new(box):backup() end, 'injected remote tar failure')
+        equal(registered, true)
+    end)
+end
+
+---@return nil
+function tests.remote_workspace_is_registered_before_mkdir_acknowledgement()
+    with_session(function(box)
+        local registered = {}
+        box.ssh.workspace_created = function(_, path) registered[path] = true end
+        box.ssh.run = function(_, command)
+            if command:find('mkdir -p', 1, true) then
+                equal(registered[box.remote], true)
+                error('injected lost mkdir acknowledgement')
+            end
+            error('Unexpected command: ' .. command)
+        end
+        rejects(function() devicecode.new(box):backup() end, 'injected lost mkdir acknowledgement')
+
+        local log_remote = box.logs.remote
+        box.ssh.run = function(_, command)
+            equal(registered[log_remote], true)
+            assert(command:find('mkdir -p', 1, true))
+            error('injected lost log mkdir acknowledgement')
+        end
+        rejects(function() box.logs:start('lost-ack') end, 'injected lost log mkdir acknowledgement')
+    end)
+end
+
+---@return nil
+function tests.devicecode_refuses_deployment_without_committed_backup()
+    with_session(function(box)
+        local app = devicecode.new(box)
+        rejects(function() app:deploy() end, 'committed local runtime backup')
+        rejects(function() app:write_config({}) end, 'committed local runtime backup')
+    end)
 end
 
 ---@return nil
@@ -576,7 +833,7 @@ case "$1" in
     install)
         printf '#!/bin/sh\nexit 0\n' > ]] .. quote(bin .. '/onbox-required-command') .. '\n'
             .. 'chmod +x ' .. quote(bin .. '/onbox-required-command') .. '\n;;\nesac\n')
-        assert(posix.chmod(bin .. '/opkg', 'rwx------'))
+        assert(stat.chmod(bin .. '/opkg', 448))
         box.ssh.run = function(_, command, opts)
             return box.process:run('export PATH=' .. quote(bin) .. ':"$PATH";\n' .. command, opts)
         end
@@ -584,7 +841,7 @@ case "$1" in
         app:ensure_dependencies({ commands = { ['onbox-required-command'] = 'onbox-package' } })
         local actions = util.read(log)
         assert(actions:find('update\ninstall onbox-package', 1, true))
-        assert(posix.stat(bin .. '/onbox-required-command'))
+        assert(stat.stat(bin .. '/onbox-required-command'))
         os.remove(bin .. '/onbox-required-command')
         util.write(bin .. '/opkg', '#!/bin/sh\nexit 0\n')
         rejects(function()
@@ -636,7 +893,7 @@ function tests.at_probe_uploads_once_and_resumes_modemmanager_with_a_watchdog()
     local uploads, commands = 0, {}
     local box = { args = { runtime = '/root/example' }, remote = '/tmp/example', ssh = {
         upload = function(_, path, destination)
-            assert(posix.stat(path), 'Shared AT probe is missing')
+            assert(stat.stat(path), 'Shared AT probe is missing')
             equal(destination, '/tmp/example/at_probe.lua')
             uploads = uploads + 1
         end,
@@ -670,21 +927,21 @@ end
 
 ---@return nil
 function tests.containment_classifier_distinguishes_live_zombie_and_inconclusive()
-    local reader, writer = assert(posix.pipe())
-    local pid = assert(posix.fork())
+    local reader, writer = assert(unistd.pipe())
+    local pid = assert(unistd.fork())
     if pid == 0 then
         local child_ok = pcall(function()
-            posix.close(reader)
-            assert(posix.setpid('s'))
-            assert(posix.write(writer, 'R') == 1)
-            posix.close(writer)
+            unistd.close(reader)
+            assert(unistd.setpid('s'))
+            assert(unistd.write(writer, 'R') == 1)
+            unistd.close(writer)
             require('posix.time').nanosleep({ tv_sec = 30, tv_nsec = 0 })
         end)
-        posix._exit(child_ok and 0 or 1)
+        unistd._exit(child_ok and 0 or 1)
     end
-    posix.close(writer)
+    unistd.close(writer)
     local ok, err = pcall(function()
-        equal(posix.read(reader, 1), 'R')
+        equal(unistd.read(reader, 1), 'R')
         equal(process.classify_group(pid), 'LIVE')
         assert(signals.kill(pid, signals.SIGKILL or 9))
         local deadline = process.now() + 2
@@ -704,27 +961,27 @@ function tests.containment_classifier_distinguishes_live_zombie_and_inconclusive
         equal(status, 'ZOMBIES_ONLY')
         equal(zombies[1], pid)
     end)
-    posix.close(reader)
+    unistd.close(reader)
     pcall(signals.kill, pid, signals.SIGKILL or 9)
-    pcall(posix.wait, pid)
+    pcall(wait.wait, pid)
     assert(ok, err)
 
-    local files, open, stat_fn = posix.files, posix.open, posix.stat
-    posix.files = function()
+    local files, open, stat_fn = dirent.files, fcntl.open, stat.stat
+    dirent.files = function()
         local emitted = false
         return function() if not emitted then emitted = true; return '424242' end end
     end
-    posix.open = function() return nil, 'injected permission failure', errno.EACCES end
-    posix.stat = function() return {} end
+    fcntl.open = function() return nil, 'injected permission failure', errno.EACCES end
+    stat.stat = function() return {} end
     local classified, status = pcall(process.classify_group, 424242)
-    posix.files, posix.open, posix.stat = files, open, stat_fn
+    dirent.files, fcntl.open, stat.stat = files, open, stat_fn
     assert(classified, status)
     equal(status, 'INCONCLUSIVE')
 end
 
 ---@return nil
 function tests.delayed_stop_identity_mismatch_retains_owner_and_sends_no_signal()
-    local pid = assert(posix.getpid().pid)
+    local pid = assert(unistd.getpid())
     local identity = process.parse_proc_stat(util.read('/proc/' .. pid .. '/stat'))
     identity.starttime = identity.starttime + 1
     local owned = process.new('/tmp', {})
@@ -742,7 +999,7 @@ end
 
 ---@return nil
 function tests.foreground_identity_mismatch_sends_no_group_signal()
-    local pid = assert(posix.getpid().pid)
+    local pid = assert(unistd.getpid())
     local identity = process.parse_proc_stat(util.read('/proc/' .. pid .. '/stat'))
     identity.starttime = identity.starttime + 1
     local owned = process.new('/tmp', {})
@@ -834,8 +1091,8 @@ function tests.workspace_removal_failure_is_reported_retained_and_retried()
     with_session(function(box)
         local f = fiber_runtime.get()
         f.fibers.run(function()
-            local rmdir, injected = posix.rmdir, false
-            posix.rmdir = function(path)
+            local rmdir, injected = unistd.rmdir, false
+            unistd.rmdir = function(path)
                 if not injected and path:find('/.process-', 1, true) then
                     injected = true
                     return nil, 'injected workspace removal failure', errno.EACCES
@@ -843,16 +1100,16 @@ function tests.workspace_removal_failure_is_reported_retained_and_retried()
                 return rmdir(path)
             end
             local ok, err = pcall(box.process.run, box.process, 'true')
-            posix.rmdir = rmdir
+            unistd.rmdir = rmdir
             assert(not ok and tostring(err):find('injected workspace removal failure', 1, true))
             local handle = next(box.process.active)
             assert(handle, 'Handle ownership was released after workspace cleanup failed')
             assert(handle.workspace_cleanup_errors and #handle.workspace_cleanup_errors > 0,
                 'Workspace cleanup error was not retained')
-            assert(posix.stat(handle.workspace), 'Failed workspace residue was not tracked on disk')
+            assert(stat.stat(handle.workspace), 'Failed workspace residue was not tracked on disk')
             box.process:stop_all()
             equal(next(box.process.active), nil)
-            equal(posix.stat(handle.workspace), nil)
+            equal(stat.stat(handle.workspace), nil)
         end)
     end)
 end
@@ -862,7 +1119,7 @@ function tests.input_setup_is_transactional_before_launch_and_leaves_no_resource
     with_session(function(box)
         local function fd_count()
             local count = 0
-            for name in posix.files('/proc/self/fd') do
+            for name in dirent.files('/proc/self/fd') do
                 if name:match('^[0-9]+$') then count = count + 1 end
             end
             return count
@@ -874,23 +1131,23 @@ function tests.input_setup_is_transactional_before_launch_and_leaves_no_resource
         rejects(function()
             box.process:run('touch ' .. quote(marker), { input_path = box.artifacts .. '/missing' })
         end, 'No such')
-        assert(not posix.stat(marker), 'Child launched for missing input')
+        assert(not stat.stat(marker), 'Child launched for missing input')
         equal(util.read(output), 'unchanged')
         equal(next(box.process.active), nil)
 
         local unreadable = box.artifacts .. '/unreadable-input'
         util.write(unreadable, 'secret')
-        assert(posix.chmod(unreadable, '---------'))
+        assert(stat.chmod(unreadable, 0))
         rejects(function() box.process:run('touch ' .. quote(marker), { input_path = unreadable }) end,
             'Permission denied')
-        assert(posix.chmod(unreadable, 'rw-------'))
-        assert(not posix.stat(marker), 'Child launched for unreadable input')
+        assert(stat.chmod(unreadable, 384))
+        assert(not stat.stat(marker), 'Child launched for unreadable input')
 
         local empty = box.artifacts .. '/empty-input'
         util.write(empty, '')
         equal(box.process:run('true', { input_path = empty }).code, 0)
         equal(fd_count(), before)
-        for name in posix.files(box.artifacts) do
+        for name in dirent.files(box.artifacts) do
             assert(not name:match('^%.process%-'), 'Input setup left a process workspace: ' .. name)
         end
     end)
@@ -901,10 +1158,10 @@ function tests.fifo_input_without_writer_is_rejected_without_blocking_or_launchi
     with_session(function(box)
         local fifo = box.artifacts .. '/input.fifo'
         local marker = box.artifacts .. '/unexpected-fifo-launch'
-        assert(posix.mkfifo(fifo, 'rw-------'))
+        assert(stat.mkfifo(fifo, 384))
         local function fd_count()
             local count = 0
-            for name in posix.files('/proc/self/fd') do
+            for name in dirent.files('/proc/self/fd') do
                 if name:match('^[0-9]+$') then count = count + 1 end
             end
             return count
@@ -914,7 +1171,7 @@ function tests.fifo_input_without_writer_is_rejected_without_blocking_or_launchi
             box.process:run('touch ' .. quote(marker), { input_path = fifo })
         end, 'Unsupported process input type')
         assert(process.now() - started < 0.5, 'FIFO validation blocked without a writer')
-        assert(not posix.stat(marker), 'Child launched for unsupported FIFO input')
+        assert(not stat.stat(marker), 'Child launched for unsupported FIFO input')
         equal(fd_count(), before)
         equal(next(box.process.active), nil)
     end)
@@ -946,6 +1203,64 @@ function tests.legacy_start_reads_exact_preopened_inode_after_path_replacement()
 end
 
 ---@return nil
+function tests.legacy_start_setup_and_handoff_failures_release_all_ownership()
+    with_session(function(box)
+        local function fd_count()
+            local count = 0
+            for name in dirent.files('/proc/self/fd') do
+                if name:match('^[0-9]+$') then count = count + 1 end
+            end
+            return count
+        end
+        local function verify_failure(expected, install, restore)
+            local before = fd_count()
+            install()
+            local ok, err = pcall(box.process.start, box.process, 'sleep 30',
+                box.artifacts .. '/injected-legacy.log')
+            restore()
+            assert(not ok and tostring(err):find(expected, 1, true),
+                'Expected injected failure containing: ' .. expected .. ', got: ' .. tostring(err))
+            equal(fd_count(), before)
+            equal(next(box.process.legacy), nil)
+            local pid = box.process:start('sleep 30', box.artifacts .. '/recovery-legacy.log')
+            box.process:stop(pid)
+        end
+
+        local mkdtemp = stdlib.mkdtemp
+        verify_failure('injected mkdtemp failure', function()
+            stdlib.mkdtemp = function(template)
+                if template:find('/.legacy-', 1, true) then error('injected mkdtemp failure') end
+                return mkdtemp(template)
+            end
+        end, function() stdlib.mkdtemp = mkdtemp end)
+
+        local chmod = stat.chmod
+        verify_failure('injected chmod failure', function()
+            stat.chmod = function(path, mode)
+                if path:find('/.legacy-', 1, true) then return nil, 'injected chmod failure' end
+                return chmod(path, mode)
+            end
+        end, function() stat.chmod = chmod end)
+
+        verify_failure('Cannot start background process', function()
+            stdlib.mkdtemp = function(template)
+                local workspace = assert(mkdtemp(template))
+                assert(stat.mkdir(workspace .. '/ready', 448))
+                return workspace
+            end
+        end, function() stdlib.mkdtemp = mkdtemp end)
+
+        local write = util.write
+        verify_failure('injected release marker failure', function()
+            util.write = function(path, content)
+                if path:match('/release$') then error('injected release marker failure') end
+                return write(path, content)
+            end
+        end, function() util.write = write end)
+    end)
+end
+
+---@return nil
 function tests.input_read_failure_obeys_first_publication_without_stream_leaks()
     with_session(function(box)
         local f = fiber_runtime.get()
@@ -961,12 +1276,12 @@ function tests.input_read_failure_obeys_first_publication_without_stream_leaks()
             end
             function stream:close()
                 closes = closes + 1
-                if self.fd then posix.close(self.fd); self.fd = nil end
+                if self.fd then unistd.close(self.fd); self.fd = nil end
                 return true
             end
             function stream:terminate()
                 self.terminated = true
-                if self.fd then posix.close(self.fd); self.fd = nil end
+                if self.fd then unistd.close(self.fd); self.fd = nil end
             end
             f.file.fdopen = function(fd, mode, filename)
                 if filename == input_path and mode == 'r' then stream.fd = fd; return stream end
@@ -993,7 +1308,7 @@ end
 function tests.zzz_post_spawn_lease_retirement_failure_is_owned_and_contained()
     with_session(function(box)
         local start_error, negative_signals = nil, 0
-        auth.with_password_fd('injected credential', function(fd, lease)
+        auth.with_password_fd('injected credential', function(_, lease)
             local close_lease, parse_stat, kill = auth.close_lease, process.parse_proc_stat, signals.kill
             local injected = false
             auth.close_lease = function(value)
