@@ -382,9 +382,10 @@ function tests.test_pdp_driver_emits_existing_groups_without_fetching_pdp()
             count = count + 1
             if count == 6 then m.state_pulse:close() end
             return { imei = 'test', device = 'test-device', sim = 'test-sim',
-                operator = 'test-operator', values = { lte = { rssi = -80 } }, rx_bytes = 123 }, ''
+                operator = 'test-operator', values = { lte = { rssi = -80 } }, rx_bytes = 123 }, '', {}
         end
         m._emit_meta = function(_, field, value) emitted[field] = value; return true end
+        m._emit_state = function() return true end
         m.state_pulse:signal()
         m:emitter()
         eq(count, 6)
@@ -409,6 +410,7 @@ function tests.test_pdp_driver_updates_guard_before_publishing_state()
         })
         m.log = { debug = function() end, error = function() end }
         m.state_pulse = pulse.new()
+        m.signal_config_pulse = pulse.new()
         m.sim_state_ch = channel.new()
         m._emit_state = function(_, key, event)
             eq(key, 'card')

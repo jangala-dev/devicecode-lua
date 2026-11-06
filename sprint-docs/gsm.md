@@ -51,19 +51,45 @@ if neither specifies a type, GSM uses `IP`.
 
 Whenever an autoconnecting modem is disabled, GSM checks active PDP contexts
 against its configured `pdp_type` before enabling it. A mismatch is corrected
-once per modem, SIM and effective PDP configuration. The write preserves every
-other context setting, including the APN. After the correction the modem is
-restarted once; a write whose verification becomes unavailable is also treated
-as requiring that restart. On the next disabled-state pass, matching contexts
-need no write or restart and autoconnect can enable the modem. If the context
-reverts after restart, GSM reports the persistent mismatch and enables the modem
-without entering a reset loop. Definite read, write, or restart failures are
-retried before enabling.
+within a service-lifetime scope consisting of the modem ID, SIM identity (or a
+fallback while ICCID is unavailable), effective PDP type, and CID. The write
+preserves the complete existing `CGDCONT` definition after the PDP type,
+including APN and modem-specific fields.
+
+Enforcement is bounded and monotonic for the lifetime of the GSM service:
+
+- A scope permits two failed outer inspections. Successful inspections do not
+  consume or reset this budget.
+- Each CID permits two correction invocations. An invocation is consumed before
+  dispatch, including a pre-dispatch rejection.
+- A correction episode permits two restart reservations. Reservations are made
+  before the restart RPC and are not refunded after failure or cancellation.
+
+Verified applied corrections continue through the remaining eligible CIDs and
+then share one restart episode. A correction whose result is uncertain also
+requires a restart, but stops later sibling corrections. Definite rejections do
+not require a restart and allow later siblings to proceed unless that CID has
+exhausted its correction budget. If a second rejection follows changes already
+made in the same pass, GSM services their restart episode first, then fails open
+without a post-restart inspection. Normal successful restarts always require a
+fresh disabled-state inspection before enable.
+
+When a budget is exhausted, GSM emits `pdp_enforcement_exhausted` at error level
+with the budget kind (`inspection`, `correction`, or `restart`), its absorption
+scope, modem, affected CID or CIDs, effective type, counts and limit, and
+`enable_proceeding=true`; enabling then proceeds in that disabled pass. A CID
+blocked by restart exhaustion is skipped on later passes, while eligible or new
+CIDs remain enforceable. Enforcement state survives modem object recreation,
+configuration application, temporary SIM absence, and fallback-to-ICCID
+migration, but is neither persisted to disk nor evicted during the service
+process lifetime.
+
 If no contexts are reported active, no contexts are rewritten.
 Replies containing another PDP command's records or a different command echo,
 and active CIDs missing from the context list, fail inspection and prevent enabling.
 Successful inspections log `pdp_contexts_checked` with the requested type and each
-CID's observed type/activity; APNs and credentials are omitted.
+CID's observed type/activity. PDP logs never include raw ICCID, IMSI, APN,
+credentials, private SIM keys, or the preserved context-definition tail.
 
 PDP commands are allowed in disabled or registered state; restart is allowed from
 any state. Unsupported manufacturers retain their existing enable/connect behavior.
