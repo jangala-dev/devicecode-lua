@@ -2,6 +2,7 @@
 
 package.path = "../src/?.lua;" .. package.path
 package.path = '../?.lua;../?/init.lua;./?.lua;./?/init.lua;' .. package.path
+package.path = 'integration/?.lua;' .. package.path
 
 local function add_path(prefix)
 	package.path = prefix .. '?.lua;' .. prefix .. '?/init.lua;' .. package.path
@@ -26,6 +27,7 @@ assert(stdlib.setenv('CONFIG_TARGET', 'services'))
 local files = discovery.discover({
 	{ path = 'unit', module_prefix = 'unit' },
 	{ path = 'integration/devhost', module_prefix = 'integration.devhost' },
+	{ path = 'integration/onbox/support', module_prefix = 'onbox.support' },
 })
 
 local function monotonic_now()
