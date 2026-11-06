@@ -66,16 +66,20 @@ end
 ---@param command ATCommand
 ---@return ATResponseLine[]? lines
 ---@return string error
----@return boolean? timed_out
+---@return boolean timed_out
+---@return boolean dispatched
 local function run_pdp_command(port, command)
+    local dispatched = false
     local which, lines, err = fibers.perform(op.named_choice({
-        response = at.send_op(port, command),
+        response = at.send_op(port, command, {
+            on_dispatch = function() dispatched = true end,
+        }),
         timeout = sleep.sleep_op(PDP_AT_TIMEOUT),
     }))
-    if which == 'timeout' then return nil, 'pdp_command_timeout', true end
-    if err then return nil, err end
-    if not lines then return nil, 'missing_pdp_response' end
-    return lines, ""
+    if which == 'timeout' then return nil, 'pdp_command_timeout', true, dispatched end
+    if err then return lines, err, false, dispatched end
+    if not lines then return nil, 'missing_pdp_response', false, dispatched end
+    return lines, "", false, dispatched
 end
 
 ---@param backend ModemBackend
@@ -122,31 +126,48 @@ end
 ---@param backend ModemBackend
 ---@param cid integer
 ---@param pdp_type string
----@return boolean ok
----@return string error
+---@return ModemPdpCorrectionResult result
 local function set_pdn_type(backend, cid, pdp_type)
     local opts, validation_err = capability_args.new.ModemSetPdnTypeOpts(cid, pdp_type)
-    if not opts then return false, validation_err end
+    if not opts then return { outcome = 'rejected', dispatched = false, err = validation_err } end
     local before, read_before_err = backend:read_pdp_contexts()
-    if not before then return false, read_before_err end
+    if not before then
+        return { outcome = 'rejected', dispatched = false, err = read_before_err }
+    end
     local existing
     for _, context in ipairs(before) do
         if context.cid == opts.cid then existing = context; break end
     end
-    if not existing then return false, 'pdp_context_missing:' .. tostring(opts.cid) end
+    if not existing then
+        return { outcome = 'rejected', dispatched = false,
+            err = 'pdp_context_missing:' .. tostring(opts.cid) }
+    end
     local command = string.format(
         'AT+CGDCONT=%d,"%s"%s', opts.cid, opts.pdp_type, existing.definition_tail)
-    local _, err, timed_out = run_pdp_command(backend.identity.at_port, command)
-    if err ~= "" and not timed_out then return false, err end
+    local lines, err, _, dispatched = run_pdp_command(backend.identity.at_port, command)
+    if err ~= "" and lines then
+        return { outcome = 'rejected', dispatched = true, err = err }
+    elseif err ~= "" and not dispatched then
+        return { outcome = 'rejected', dispatched = false, err = err }
+    elseif err ~= "" and err ~= 'pdp_command_timeout' then
+        return { outcome = 'uncertain', dispatched = true, err = err }
+    end
     local contexts, read_err = backend:read_pdp_contexts()
-    if not contexts then return false, 'pdp_type_change_unverified:' .. read_err end
+    if not contexts then
+        return { outcome = 'uncertain', dispatched = true,
+            err = 'pdp_type_change_unverified:' .. read_err }
+    end
     for _, context in ipairs(contexts) do
         if context.cid == opts.cid then
-            if context.pdp_type == opts.pdp_type then return true, "" end
-            return false, 'pdp_type_verification_failed:' .. tostring(opts.cid)
+            if context.pdp_type == opts.pdp_type then
+                return { outcome = 'applied', dispatched = true, err = "" }
+            end
+            return { outcome = 'rejected', dispatched = true,
+                err = 'pdp_type_verification_failed:' .. tostring(opts.cid) }
         end
     end
-    return false, 'pdp_type_change_unverified:pdp_context_missing:' .. tostring(opts.cid)
+    return { outcome = 'uncertain', dispatched = true,
+        err = 'pdp_type_change_unverified:pdp_context_missing:' .. tostring(opts.cid) }
 end
 
 local SIM_POLL_INTERVAL = 5

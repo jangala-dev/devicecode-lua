@@ -533,7 +533,7 @@ end
 ---@field read_pdp_contexts fun(self: ModemBackend): ModemPdpContext[]?, string
 ---@field read_active_pdp_contexts fun(self: ModemBackend): ModemPdpActivation[]?, string
 ---@field read_pdp_info fun(self: ModemBackend): ModemPdpInfo?, string
----@field set_pdn_type fun(self: ModemBackend, cid: integer, pdp_type: string): boolean, string
+---@field set_pdn_type fun(self: ModemBackend, cid: integer, pdp_type: string): ModemPdpCorrectionResult
 ---@field start_state_monitor fun(self: ModemBackend): boolean, string
 ---@field stop_state_monitor_op fun(self: ModemBackend, timeout: number?): Op
 ---@field stop_state_monitor fun(self: ModemBackend, timeout: number?): boolean, string
@@ -572,6 +572,13 @@ end
 
 ---@class ModemPdpInfo
 ---@field pdp_contexts ModemPdpContext[]
+
+---@alias ModemPdpCorrectionOutcome 'rejected'|'applied'|'uncertain'
+
+---@class ModemPdpCorrectionResult
+---@field outcome ModemPdpCorrectionOutcome
+---@field dispatched boolean
+---@field err string
 
 ---@alias ModemInfoSnapshot
 ---| ModemIdentityInfo

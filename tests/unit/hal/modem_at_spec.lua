@@ -160,4 +160,35 @@ function tests.test_modem_at_transport_write_failures_close_both_streams()
     end
 end
 
+---@return nil
+function tests.test_modem_at_transport_marks_dispatch_only_before_write_attempt()
+    runfibers.run(function()
+        local dispatched = false
+        local lines, err = fibers.perform(at.send_op('/dev/devicecode-missing-at-port', 'AT', {
+            on_dispatch = function() dispatched = true end,
+        }))
+        assert(lines == nil)
+        assert(err and err:find('error opening AT read port', 1, true), tostring(err))
+        assert(dispatched == false)
+    end)
+    with_port(function(_, port, streams)
+        local open = file.open
+        local dispatched = false
+        file.open = function(path, mode, perms)
+            local stream, err = open(path, mode, perms)
+            if path == port.slave_name and mode == 'w' and stream then
+                stream.write = function() return nil, 'test write failure' end
+            end
+            return stream, err
+        end
+        local lines, err = fibers.perform(at.send_op(port.slave_name, 'AT+CGACT?', {
+            on_dispatch = function() dispatched = true end,
+        }))
+        assert(lines == nil)
+        assert(err and err:find('test write failure', 1, true), tostring(err))
+        assert(dispatched == true)
+        assert_closed(streams, 2)
+    end)
+end
+
 return tests

@@ -446,10 +446,25 @@ function Modem:set_pdn_type(opts)
         return return_error("invalid options", 1)
     end
     local allowed, state_err = self:_require_pdp_state()
-    if not allowed then return return_error(state_err, 1) end
-    local ok, err = self.backend:set_pdn_type(opts.cid, opts.pdp_type)
-    if not ok then return return_error(err, 1) end
-    return true, ""
+    if not allowed then
+        return true, { outcome = 'rejected', dispatched = false, err = state_err }
+    end
+    local result, legacy_err = self.backend:set_pdn_type(opts.cid, opts.pdp_type)
+    if type(result) ~= 'table' then
+        -- Keep non-AT/legacy backends on the structured capability contract.
+        if result == true then
+            result = { outcome = 'applied', dispatched = true, err = legacy_err or '' }
+        else
+            result = { outcome = 'rejected', dispatched = false, err = legacy_err or 'pdp_not_supported' }
+        end
+    end
+    if (result.outcome ~= 'rejected' and result.outcome ~= 'applied' and result.outcome ~= 'uncertain')
+        or type(result.dispatched) ~= 'boolean'
+        or type(result.err) ~= 'string'
+        or (result.outcome ~= 'rejected' and not result.dispatched) then
+        return return_error('invalid PDP correction result', 1)
+    end
+    return true, result
 end
 
 --- Connect the modem

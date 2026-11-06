@@ -13,6 +13,7 @@ local scope = require 'fibers.scope'
 
 ---@class ATSendOpts
 ---@field terminal_patterns ATTerminalPattern[]?
+---@field on_dispatch fun()? Called immediately before the command write is attempted.
 
 -- Usage example:
 --
@@ -65,6 +66,7 @@ local at = {}
 ---@return Op  -- yields (ATResponseLine[]?, string?)
 function at.send_op(port, command, opts)
     local terminal_patterns = (opts and opts.terminal_patterns) or {}
+    local on_dispatch = opts and opts.on_dispatch
 
     return scope.run_op(function(s)
         local reader, rd_err = file.open(port, "r")
@@ -81,6 +83,7 @@ function at.send_op(port, command, opts)
         end
         s:finally(function() writer:terminate('AT command finished') end)
 
+        if on_dispatch then on_dispatch() end
         local written, write_err = writer:write(command .. '\r')
         if not written then
             return nil, "error writing AT command: " .. tostring(write_err)

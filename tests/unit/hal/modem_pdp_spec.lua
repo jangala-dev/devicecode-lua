@@ -24,9 +24,10 @@ end
 local function with_at(responder, body, timeout)
     local saved = at.send_op
     local commands = {}
-    at.send_op = function(port, command)
+    at.send_op = function(port, command, opts)
         eq(port, '/dev/test-at')
         commands[#commands + 1] = command
+        if opts and opts.on_dispatch then opts.on_dispatch() end
         return responder(command, #commands)
     end
     local ok, err = safe.pcall(function()
@@ -237,8 +238,12 @@ function tests.test_pdp_type_options_reject_invalid_cids_and_command_injection()
     local opts = assert(args.new.ModemSetPdnTypeOpts(3, 'ipv4v6'))
     eq(opts.pdp_type, 'IPV4V6')
     with_at(function() error('invalid options reached AT') end, function(b)
-        eq(b:set_pdn_type(0, 'IP'), false)
-        eq(b:set_pdn_type(1, 'IP"'), false)
+        local result = b:set_pdn_type(0, 'IP')
+        eq(result.outcome, 'rejected')
+        eq(result.dispatched, false)
+        result = b:set_pdn_type(1, 'IP"')
+        eq(result.outcome, 'rejected')
+        eq(result.dispatched, false)
     end)
 end
 
@@ -256,9 +261,10 @@ function tests.test_pdp_setter_changes_only_type_and_preserves_all_context_setti
         eq(command, 'AT+CGDCONT?')
         return op.always({ context_line(1, 'IPV6'), context_line(3, 'IP', tail) })
     end, function(b, commands)
-        local ok, err = b:set_pdn_type(3, 'ip')
-        eq(ok, true)
-        eq(err, '')
+        local result = b:set_pdn_type(3, 'ip')
+        eq(result.outcome, 'applied')
+        eq(result.dispatched, true)
+        eq(result.err, '')
         eq(#commands, 3)
     end)
 end
@@ -269,9 +275,10 @@ function tests.test_pdp_setter_verifies_silent_timeout()
         if n == 2 then return sleep.sleep_op(math.huge) end
         return op.always({ context_line(1, 'IP') })
     end, function(b, commands)
-        local ok, err = b:set_pdn_type(1, 'IP')
-        eq(ok, true)
-        eq(err, '')
+        local result = b:set_pdn_type(1, 'IP')
+        eq(result.outcome, 'applied')
+        eq(result.dispatched, true)
+        eq(result.err, '')
         eq(#commands, 3)
     end, 5)
 end
@@ -284,21 +291,20 @@ function tests.test_pdp_setter_does_not_trust_ok_or_reboot_on_read_failure()
             if response == false then return op.always(nil, 'read failed') end
             return op.always(response)
         end, function(b)
-            local ok, err = b:set_pdn_type(1, 'IP')
-            eq(ok, false)
-            assert(err ~= '')
-            if response == false or #response == 0 then
-                assert(err:find('pdp_type_change_unverified:', 1, true))
-            end
+            local result = b:set_pdn_type(1, 'IP')
+            eq(result.outcome, (response == false or #response == 0) and 'uncertain' or 'rejected')
+            eq(result.dispatched, true)
+            assert(result.err ~= '')
         end)
     end
     with_at(function(_, n)
         if n == 1 then return op.always({ context_line(1, 'IPV6') }) end
         return op.always({}, 'error')
     end, function(b, commands)
-        local ok, err = b:set_pdn_type(1, 'IP')
-        eq(ok, false)
-        eq(err, 'error')
+        local result = b:set_pdn_type(1, 'IP')
+        eq(result.outcome, 'rejected')
+        eq(result.dispatched, true)
+        eq(result.err, 'error')
         eq(#commands, 2)
     end)
 end
@@ -335,8 +341,10 @@ function tests.test_pdp_driver_guards_get_and_set_before_backend_calls()
         eq(ok, false)
         assert(err:find('modem_invalid_pdp_state:', 1, true))
         ok, err = m:set_pdn_type(assert(args.new.ModemSetPdnTypeOpts(1, 'IP')))
-        eq(ok, false)
-        assert(err:find('modem_invalid_pdp_state:', 1, true))
+        eq(ok, true)
+        eq(err.outcome, 'rejected')
+        eq(err.dispatched, false)
+        assert(err.err:find('modem_invalid_pdp_state:', 1, true))
     end
     eq(m:set_pdn_type({ cid = 1, pdp_type = 'IP' }), false)
 end
@@ -348,7 +356,10 @@ function tests.test_pdp_driver_dispatches_set_and_restart_and_advertises_capabil
     }, 'registered')
     for _, state in ipairs({ 'disabled', 'registered' }) do
         m.card_state = state
-        eq(m:set_pdn_type(assert(args.new.ModemSetPdnTypeOpts(2, 'IP'))), true)
+        local ok, result = m:set_pdn_type(assert(args.new.ModemSetPdnTypeOpts(2, 'IP')))
+        eq(ok, true)
+        eq(result.outcome, 'applied')
+        eq(result.dispatched, true)
     end
     for _, state in ipairs({ 'registered', 'connected', 'disabled', 'connecting', 'failed' }) do
         m.card_state = state
