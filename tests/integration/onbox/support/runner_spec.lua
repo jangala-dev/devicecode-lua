@@ -640,13 +640,13 @@ function tests.modem_inventory_keeps_disabled_modems_without_at_ports()
         end
         equal(command, 'mmcli -m 3 -J')
         return { code = 0, stdout = util.encode({ modem = { generic = {
-            ['equipment-identifier'] = '866680041259328', state = 'disabled', model = 'EM06-E',
+            ['equipment-identifier'] = '000000000000003', state = 'disabled', model = 'EM06-E',
             ports = { 'cdc-wdm0 (qmi)', 'ttyUSB0 (qcdm)', 'ttyUSB1 (gps)', 'wwan0 (net)' },
         } } }) }
     end } }
     local modems = modem.new(box)
     local inventory = modems:inventory()
-    local primary = assert(inventory['866680041259328'], 'Modem without AT ports must remain visible')
+    local primary = assert(inventory['000000000000003'], 'Modem without AT ports must remain visible')
     equal(primary.id, '3')
     equal(primary.state, 'disabled')
     equal(primary.at_port, nil)
@@ -776,8 +776,8 @@ function tests.modem_probe_rejects_missing_at_port_before_remote_actions()
         upload = function() error('Must not upload for a missing AT port') end,
         run = function() error('Must not pause ModemManager for a missing AT port') end,
     } })
-    rejects(function() modems:probe({ imei = '866680041259328' }, { 'AT' }) end,
-        'No AT port reported by ModemManager for modem …9328')
+    rejects(function() modems:probe({ imei = '000000000000003' }, { 'AT' }) end,
+        'No AT port reported by ModemManager for modem …0003')
 end
 
 ---@return nil

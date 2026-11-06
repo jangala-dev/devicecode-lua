@@ -132,13 +132,71 @@ function tests.test_pdp_parsers_reject_malformed_or_duplicate_records()
         '+CGDCONT: 1,"IP","",""junk', '+CGDCONT: 1,"IP",""' }) do
         local result, err = quectel._test.parse_pdp_contexts({ line })
         eq(result, nil)
-        assert(err:find('malformed_pdp_context', 1, true))
+        eq(err, 'malformed_pdp_context')
     end
-    eq(quectel._test.parse_pdp_contexts({ context_line(1, 'IP'), context_line(1, 'IP') }), nil)
+    local contexts, context_err = quectel._test.parse_pdp_contexts({
+        context_line(1, 'IP'), context_line(1, 'IP'),
+    })
+    eq(contexts, nil)
+    eq(context_err, 'malformed_pdp_context')
     for _, line in ipairs({ '+CGACT: 1,2', '+CGACT: 0,1', '+CGACT: bad' }) do
-        eq(quectel._test.parse_pdp_activations({ line }), nil)
+        local activations, err = quectel._test.parse_pdp_activations({ line })
+        eq(activations, nil)
+        eq(err, 'malformed_pdp_activation')
     end
-    eq(quectel._test.parse_pdp_activations({ '+CGACT: 1,0', '+CGACT: 1,1' }), nil)
+    local activations, activation_err = quectel._test.parse_pdp_activations({
+        '+CGACT: 1,0', '+CGACT: 1,1',
+    })
+    eq(activations, nil)
+    eq(activation_err, 'malformed_pdp_activation')
+end
+
+function tests.test_pdp_parser_errors_do_not_expose_raw_modem_payloads()
+    local context_markers = { 'SECRET_APN', 'SECRET_ADDRESS', 'SECRET_TRAILING', 'SECRET_CONTROL' }
+    local malformed_context = '+CGDCONT: 1,"IP","' .. context_markers[1] .. '","'
+        .. context_markers[2] .. '" ' .. context_markers[3] .. '\r' .. context_markers[4]
+    local contexts, context_err = quectel._test.parse_pdp_contexts({ malformed_context })
+    eq(contexts, nil)
+    eq(context_err, 'malformed_pdp_context')
+    for _, marker in ipairs(context_markers) do
+        assert(not context_err:find(marker, 1, true))
+    end
+
+    local activation_marker = 'SECRET_ACTIVATION_PAYLOAD'
+    local activations, activation_err = quectel._test.parse_pdp_activations({
+        '+CGACT: 1,2,' .. activation_marker,
+    })
+    eq(activations, nil)
+    eq(activation_err, 'malformed_pdp_activation')
+    assert(not activation_err:find(activation_marker, 1, true))
+end
+
+function tests.test_pdp_setter_wraps_only_redacted_parser_errors()
+    local marker = 'SECRET_WRAPPED_APN'
+    local malformed = '+CGDCONT: 1,"IP","' .. marker .. '",""junk'
+    with_at(function()
+        return op.always({ malformed })
+    end, function(b, commands)
+        local result = b:set_pdn_type(1, 'IP')
+        eq(result.outcome, 'rejected')
+        eq(result.dispatched, false)
+        eq(result.err, 'malformed_pdp_context')
+        assert(not result.err:find(marker, 1, true))
+        eq(#commands, 1)
+    end)
+
+    with_at(function(_, n)
+        if n == 1 then return op.always({ context_line(1, 'IPV6') }) end
+        if n == 2 then return op.always({}) end
+        return op.always({ malformed })
+    end, function(b, commands)
+        local result = b:set_pdn_type(1, 'IP')
+        eq(result.outcome, 'uncertain')
+        eq(result.dispatched, true)
+        eq(result.err, 'pdp_type_change_unverified:malformed_pdp_context')
+        assert(not result.err:find(marker, 1, true))
+        eq(#commands, 3)
+    end)
 end
 
 ---@return nil

@@ -25,7 +25,7 @@ local function parse_pdp_contexts(lines)
             if not cid or cid <= 0 or seen[cid]
                 or not definition_tail or definition_tail:find('[\r\n]')
                 or not (trailing:match('^%s*$') or trailing:match('^%s*,')) then
-                return nil, 'malformed_pdp_context:' .. line
+                return nil, 'malformed_pdp_context'
             end
             seen[cid] = true
             contexts[#contexts + 1] = {
@@ -53,7 +53,7 @@ local function parse_pdp_activations(lines)
             local cid, active = line:match('^%+CGACT:%s*(%d+)%s*,%s*([01])%s*$')
             cid = tonumber(cid)
             if not cid or cid <= 0 or seen[cid] then
-                return nil, 'malformed_pdp_activation:' .. line
+                return nil, 'malformed_pdp_activation'
             end
             seen[cid] = true
             contexts[#contexts + 1] = { cid = cid, active = active == '1' }
