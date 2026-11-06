@@ -770,6 +770,16 @@ local function find_log(logs, what, budget_kind)
     end
 end
 
+local function count_logs(logs, what, budget_kind)
+    local total = 0
+    for _, record in ipairs(logs) do
+        if record.what == what and (not budget_kind or record.budget_kind == budget_kind) then
+            total = total + 1
+        end
+    end
+    return total
+end
+
 local function assert_logs_private(logs, secrets)
     local function visit(value)
         if type(value) == 'table' then
@@ -801,7 +811,19 @@ function tests.test_pdp_inspection_failures_are_scope_wide_monotonic_and_fail_op
         local restarted, err = m:_configure_pdp()
         eq(restarted, false)
         eq(err, '')
+        for _ = 1, 3 do
+            local repeated, repeated_err, _, decision = m:_configure_pdp()
+            eq(repeated, false)
+            eq(repeated_err, '')
+            eq(decision.proceed, true)
+        end
         eq(count(calls, 'set_pdn_type'), 0)
+        eq(reads, 3)
+        local scope_state = m.svc.pdp_enforcement.modems['modem-1'].types.IP.fallback
+        eq(scope_state.inspection_failures, 2)
+        eq(scope_state.inspection_exhausted, true)
+        eq(count_logs(logs, 'pdp_enforcement_exhausted', 'inspection'), 1)
+        eq(count_logs(logs, 'pdp_inspect_failed'), 2)
         local terminal = assert(find_log(logs, 'pdp_enforcement_exhausted', 'inspection'))
         eq(terminal.absorption, 'scope')
         eq(terminal.count, 2)
@@ -834,30 +856,47 @@ end
 function tests.test_pdp_inspection_exhaustion_enables_in_the_same_disabled_pass()
     local saved_sleep_op = sleep.sleep_op
     local ok, err = safe.pcall(function()
-        runfibers.run(function()
-            local reads = 0
-            local m, calls, logs
-            m, calls, logs = fixture({}, { call = function(method, opts, subs)
+        runfibers.run(function(scope)
+            local reads, passes = 0, 0
+            local m, calls, logs, unused_values, subs
+            m, calls, logs, unused_values, subs = fixture({}, { call = function(method, opts, active_subs)
                 if method == 'get' and opts.field == 'pdp_contexts' then
                     reads = reads + 1
                     return reply(false, 'read failed')
                 elseif method == 'enable' then
                     assert(find_log(logs, 'pdp_enforcement_exhausted', 'inspection'))
-                    subs[1].queue:put({ payload = { from = 'enabling', to = 'registered' } })
                 elseif method == 'connect' then
-                    subs[1].queue:put({ payload = { from = 'connecting', to = 'connected' } })
+                    active_subs[1].queue:put({ payload = { from = 'connecting', to = 'connected' } })
                     return reply(true)
                 end
             end })
+            local original_configure = m._configure_pdp
+            m._configure_pdp = function(self)
+                passes = passes + 1
+                return original_configure(self)
+            end
             sleep.sleep_op = function(seconds)
                 if seconds == 20 and reads == 1 then return op.always() end
                 return saved_sleep_op(seconds)
             end
             prepare_autoconnect(m)
+            assert(scope:spawn(function()
+                while count(calls, 'enable') < 1 do sleep.sleep(0.001) end
+                for expected_pass = 3, 5 do
+                    subs[1].queue:put({ payload = { from = 'disabled', to = 'disabled' } })
+                    while passes < expected_pass do sleep.sleep(0.001) end
+                end
+                subs[1].queue:put({ payload = { from = 'enabling', to = 'registered' } })
+            end))
             m:_autoconnect_loop()
             eq(reads, 2)
+            eq(passes, 5)
             eq(count(calls, 'enable'), 1)
             eq(count(calls, 'connect'), 1)
+            eq(count_logs(logs, 'pdp_enforcement_exhausted', 'inspection'), 1)
+            eq(count_logs(logs, 'pdp_inspect_failed'), 2)
+            local scope_state = m.svc.pdp_enforcement.modems['modem-1'].types.IP.fallback
+            eq(scope_state.inspection_failures, 2)
         end)
     end)
     sleep.sleep_op = saved_sleep_op
@@ -1033,6 +1072,69 @@ function tests.test_pdp_owner_replacement_reconciles_reserved_correction_as_not_
         eq(record.last_result.outcome, 'rejected')
         eq(record.last_result.dispatched, false)
         eq(scope_state.active_episode, nil)
+    end)
+end
+
+function tests.test_pdp_owner_replacement_at_restart_return_completes_without_false_stale_error()
+    runfibers.run(function()
+        local logs, replacement, replacement_calls = {}, nil, nil
+        local contexts = { context(1, 'IPV6', true) }
+        local svc = { obs_log = function(_, _, payload) logs[#logs + 1] = payload end }
+        local old, old_calls = fixture(contexts, {
+            svc = svc,
+            call = function(method, opts)
+                if method == 'set_pdn_type' then
+                    contexts[1].pdp_type = opts.pdp_type
+                elseif method == 'restart' then
+                    replacement, replacement_calls = fixture(contexts, {
+                        svc = svc,
+                        call = function(replacement_method, _, subs)
+                            local function put_card(payload)
+                                for index = 1, #subs do
+                                    if subs[index].field == 'card' and not subs[index].closed then
+                                        subs[index].queue:put({ payload = payload })
+                                        return
+                                    end
+                                end
+                                error('missing active card subscription')
+                            end
+                            if replacement_method == 'enable' then
+                                put_card({ from = 'enabling', to = 'registered' })
+                            elseif replacement_method == 'connect' then
+                                put_card({ from = 'connecting', to = 'connected' })
+                                return reply(true)
+                            end
+                        end,
+                    })
+                    replacement:_claim_pdp_owner()
+                    return reply(true)
+                end
+            end,
+        })
+        local old_restarted, old_err = old:_configure_pdp()
+        eq(old_restarted, false)
+        eq(old_err, 'pdp_owner_stale')
+        eq(count(old_calls, 'restart'), 1)
+
+        local restarted, err = replacement:_configure_pdp()
+        eq(restarted, true)
+        eq(err, '')
+        eq(count(replacement_calls, 'restart'), 1)
+
+        prepare_autoconnect(replacement)
+        replacement:_autoconnect_loop()
+        eq(count(replacement_calls, 'restart'), 1)
+        eq(count(replacement_calls, 'enable'), 1)
+        eq(count(replacement_calls, 'connect'), 1)
+        local restart_index, inspect_index, enable_index, connect_index
+        for index, call in ipairs(replacement_calls) do
+            if call.method == 'restart' then restart_index = restart_index or index end
+            if call.method == 'get' and call.opts.field == 'pdp_contexts' then inspect_index = inspect_index or index end
+            if call.method == 'enable' then enable_index = enable_index or index end
+            if call.method == 'connect' then connect_index = connect_index or index end
+        end
+        assert(restart_index < inspect_index and inspect_index < enable_index and enable_index < connect_index)
+        eq(count_logs(logs, 'autoconnect_failed'), 0)
     end)
 end
 

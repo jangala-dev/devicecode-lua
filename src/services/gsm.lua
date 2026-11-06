@@ -798,7 +798,8 @@ function GsmModem.new(cap, svc)
 end
 
 local function new_pdp_scope()
-	return { inspection_failures = 0, cids = {}, active_episode = nil, next_episode = 0, history = {} }
+	return { inspection_failures = 0, inspection_exhausted = false,
+		cids = {}, active_episode = nil, next_episode = 0, history = {} }
 end
 
 local function pdp_cid_record(scope_state, cid)
@@ -813,7 +814,12 @@ end
 
 local function merge_pdp_scopes(target, source)
 	if target == source then return target end
-	target.inspection_failures = math.max(target.inspection_failures or 0, source.inspection_failures or 0)
+	target.inspection_failures = math.min(MAX_PDP_INSPECTION_FAILURES,
+		math.max(target.inspection_failures or 0, source.inspection_failures or 0))
+	target.inspection_exhausted = target.inspection_exhausted or source.inspection_exhausted
+		or target.inspection_failures >= MAX_PDP_INSPECTION_FAILURES
+	target.inspection_enable_proceeded = target.inspection_enable_proceeded
+		or source.inspection_enable_proceeded
 	target.next_episode = math.max(target.next_episode or 0, source.next_episode or 0)
 	for cid, incoming in pairs(source.cids or {}) do
 		local current = target.cids[cid]
@@ -990,7 +996,8 @@ function GsmModem:_finish_pdp_operation(generation, pdp_type)
 		self.pdp_iccid = self.pdp_pending_iccid
 		self.pdp_pending_iccid = nil
 		-- Scope lookup performs the atomic fallback merge without yielding.
-		self:_pdp_scope(pdp_type)
+		local merged_scope = self:_pdp_scope(pdp_type)
+		if self.pdp_last_scope then self.pdp_last_scope = merged_scope end
 	end
 end
 
@@ -1629,17 +1636,32 @@ function GsmModem:_configure_pdp()
 	local pdp_type = self.cfg.pdp_type or DEFAULT_PDP_TYPE
 	local scope_state, generation = self:_begin_pdp_operation(pdp_type)
 	if not scope_state then return false, 'pdp_owner_stale' end
-	local function done(restarted, err, state)
+	local function done(restarted, err, state, enable_decision)
 		self:_finish_pdp_operation(generation, pdp_type)
-		return restarted, err, state
+		if enable_decision and self.pdp_last_scope then
+			enable_decision.scope = self.pdp_last_scope
+		end
+		return restarted, err, state, enable_decision
 	end
 	if scope_state.active_episode then
 		local restarted, episode_err, next_state = self:_service_pdp_episode(scope_state, pdp_type, generation)
-		if restarted or episode_err ~= '' or not self:_pdp_owner_active(generation) then
-			return done(restarted, episode_err ~= '' and episode_err or 'pdp_owner_stale', next_state)
+		if not self:_pdp_owner_active(generation) then
+			return done(false, 'pdp_owner_stale', next_state)
 		end
+		if episode_err ~= '' then return done(restarted, episode_err, next_state) end
+		if restarted then return done(true, '', next_state) end
 		-- Exhaustion and completed_unverified_fail_open both enable immediately.
 		return done(false, '', next_state)
+	end
+	if scope_state.inspection_exhausted
+		or (scope_state.inspection_failures or 0) >= MAX_PDP_INSPECTION_FAILURES then
+		scope_state.inspection_failures = MAX_PDP_INSPECTION_FAILURES
+		scope_state.inspection_exhausted = true
+		self.pdp_last_scope = scope_state
+		return done(false, '', nil, {
+			proceed = scope_state.inspection_enable_proceeded ~= true,
+			scope = scope_state,
+		})
 	end
 	self.svc:obs_log('debug', { what = 'pdp_inspect', modem = self.name, pdp_type = pdp_type })
 	local contexts, err = modem_get_field(self.cap, 'pdp_contexts', REQUEST_TIMEOUT, 0)
@@ -1648,11 +1670,14 @@ function GsmModem:_configure_pdp()
 		local safe_err = pdp_safe_error(err)
 		self.svc:obs_log('warn', { what = 'pdp_inspect_failed', modem = self.name, err = safe_err })
 		if err:find('pdp_not_supported', 1, true) then return done(false, 'pdp_not_supported') end
-		scope_state.inspection_failures = (scope_state.inspection_failures or 0) + 1
+		scope_state.inspection_failures = math.min(MAX_PDP_INSPECTION_FAILURES,
+			(scope_state.inspection_failures or 0) + 1)
 		if scope_state.inspection_failures >= MAX_PDP_INSPECTION_FAILURES then
+			scope_state.inspection_exhausted = true
 			self:_pdp_terminal_log('inspection', 'scope', pdp_type,
-				scope_state.inspection_failures, {}, generation)
-			return done(false, '', pdp_error_state(err))
+				MAX_PDP_INSPECTION_FAILURES, {}, generation)
+			self.pdp_last_scope = scope_state
+			return done(false, '', pdp_error_state(err), { proceed = true, scope = scope_state })
 		end
 		return done(false, safe_err, pdp_error_state(err))
 	end
@@ -1864,6 +1889,11 @@ function GsmModem:_autoconnect_loop()
 			local msg = msg_or_ver
 			if msg then
 				current_state = msg.payload.to
+				if self.pdp_last_scope and self:_pdp_owner_active()
+					and (current_state ~= 'disabled'
+						or (msg.payload.from ~= nil and msg.payload.from ~= 'disabled')) then
+					self.pdp_last_scope.inspection_enable_proceeded = false
+				end
 				if self.pdp_restart_waiting and pdp_restart_transition(msg.payload, self.pdp_restart_from) then
 					self.pdp_restart_waiting = false
 				end
@@ -1914,7 +1944,7 @@ function GsmModem:_autoconnect_loop()
 			local err, retry_timeout
 
 			if current_state == 'disabled' and not self.pdp_restart_waiting then
-				local restarted, pdp_err, next_state = self:_configure_pdp()
+				local restarted, pdp_err, next_state, enable_decision = self:_configure_pdp()
 				if next_state then
 					current_state = next_state
 					self.current_state = next_state
@@ -1928,9 +1958,13 @@ function GsmModem:_autoconnect_loop()
 				if restarted then
 					retry_timeout = 0 -- Re-read configuration on the next disabled pass.
 				elseif pdp_err == "" and current_state == 'disabled' and self.cfg.autoconnect
+					and (not enable_decision or enable_decision.proceed)
 					and self:_pdp_owner_active() then
 					local _, enable_err = call_modem_rpc(self.cap, 'enable', {}, REQUEST_TIMEOUT)
 					err = enable_err
+					if enable_err == '' and enable_decision and enable_decision.scope then
+						enable_decision.scope.inspection_enable_proceeded = true
+					end
 				end
 			elseif current_state == 'failed' then
 				local _, err_inner = call_modem_rpc(self.cap, 'listen_for_sim', {}, REQUEST_TIMEOUT)
