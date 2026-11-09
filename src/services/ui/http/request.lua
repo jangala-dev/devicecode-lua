@@ -149,6 +149,8 @@ local function handle_local_ui_visit(owner, ctx, deps)
 	if deps.conn then
 		deps.conn:publish(usage.topic, { value = {
 			visitor_id = payload.visitor_id, visit_id = payload.visit_id,
+			-- lua-http turns an HTTP/1 Host header into :authority, as in HTTP/2.
+			via = usage.via_from_host(ctx_header(ctx, ':authority') or ctx_header(ctx, 'host')),
 		} })
 	end
 	perform_response(owner:reply_json_op(202, { accepted = true }))

@@ -418,6 +418,25 @@ function tests.test_local_ui_visit_is_anonymous_and_publishes_only_valid_ids()
 		assert_eq(#sent, 1)
 		assert_eq(table.concat(sent[1].topic, '/'), 'obs/v1/ui/metric/local_ui_visits')
 		assert_eq(sent[1].payload.value.visitor_id, string.rep('a', 32))
+		assert_eq(sent[1].payload.value.via, 'other', 'no Host header')
+		-- lua-http turns an HTTP/1 Host header into :authority, as in HTTP/2.
+		local function lua_http_headers(fields)
+			return { get = function (_, name) return fields[name] end }
+		end
+		for _, case in ipairs({
+			{ { host = 'config.bigbox.home' }, 'name' },
+			{ { [':authority'] = '172.28.8.1:80' }, 'ip' },
+			{ lua_http_headers({ [':authority'] = 'config.bigbox.home', ['content-type'] = 'application/json' }), 'name' },
+		}) do
+			local named = fake_ctx('POST', '/api/local-ui/visit')
+			named.headers = case[1]
+			if not case[1].get then case[1]['content-type'] = 'application/json' end
+			named.body_string = ctx.body_string
+			assert_eq(request.run(scope, named, deps).status, 'ok')
+			assert_eq(sent[#sent].payload.value.via, case[2])
+			assert_eq(sent[#sent].payload.value.host, nil, 'the raw host is never sent')
+		end
+		sent = { sent[1] }
 		for _, raw in ipairs({ '{}', 'invalid', string.rep('x', 257), '{"visitor_id":{},"visit_id":5}' }) do
 			local bad = fake_ctx('POST', '/api/local-ui/visit')
 			bad.headers = ctx.headers

@@ -270,9 +270,8 @@ function Modem:_cache_group(group, value, observed_at)
     observed_at = observed_at or fibers.now()
     self.group_observed_at = self.group_observed_at or {}
     local timestamps = {}
-    local definition = GROUP_FIELDS[group] or {}
-    local fields = definition.fields or definition
-    for _, field in ipairs(fields) do
+    local definition = GROUP_FIELDS[group]
+    for _, field in ipairs(definition and definition.fields or {}) do
         -- A timestamp means the field was observed, including when the backend
         -- successfully observed that the field is absent. Failed groups do not
         -- advance these timestamps, so consumers can preserve their last value.
