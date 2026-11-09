@@ -23,6 +23,13 @@ local function ipv4(host)
 end
 
 local function ipv6(addr)
+	-- A dotted IPv4 ending, as in ::ffff:172.28.8.1, counts as two groups.
+	local extra = 0
+	local prefix, v4 = addr:match('^(.*:)(%d+%.%d+%.%d+%.%d+)$')
+	if v4 then
+		if not ipv4(v4) then return false end
+		addr, extra = prefix .. '0', 1
+	end
 	local head, tail = addr, nil
 	local at = addr:find('::', 1, true)
 	if at then
@@ -38,6 +45,7 @@ local function ipv6(addr)
 			end
 		end
 	end
+	count = count + extra
 	if at then return count <= 7 end
 	return count == 8
 end
@@ -49,7 +57,7 @@ function M.via_from_host(host)
 	if type(host) ~= 'string' then return 'other' end
 	host = host:lower()
 	if host:sub(1, 1) == '[' then
-		local addr, rest = host:match('^%[([%x:]+)%](.*)$')
+		local addr, rest = host:match('^%[([%x:%.]+)%](.*)$')
 		local port_ok = rest == '' or (rest and rest:match('^:%d+$'))
 		return (addr and port_ok and ipv6(addr)) and 'ip' or 'other'
 	end
