@@ -99,6 +99,7 @@ function new.ModemCapability(id, control_ch)
         'refresh_info',
         'set_signal_update_freq',
         'set_pdn_type',
+        'set_modes',
     }
     return new.Capability('modem', id, control_ch, offerings)
 end

@@ -152,6 +152,10 @@ ModemSignalInfo.__index = ModemSignalInfo
 local ModemTrafficInfo = {}
 ModemTrafficInfo.__index = ModemTrafficInfo
 
+---@class ModemModesInfo
+---@field supported_modes ModemModeCombination[]
+---@field current_modes ModemModeCombination
+
 ---@param values any
 ---@return boolean
 local function is_string_array(values)
@@ -534,6 +538,8 @@ end
 ---@field read_active_pdp_contexts fun(self: ModemBackend): ModemPdpActivation[]?, string
 ---@field read_pdp_info fun(self: ModemBackend): ModemPdpInfo?, string
 ---@field set_pdn_type fun(self: ModemBackend, cid: integer, pdp_type: string): ModemPdpCorrectionResult
+---@field read_modes fun(self: ModemBackend): ModemModesInfo?, string
+---@field set_modes fun(self: ModemBackend, preferred: string, allowed: string[]): boolean, string
 ---@field start_state_monitor fun(self: ModemBackend): boolean, string
 ---@field stop_state_monitor_op fun(self: ModemBackend, timeout: number?): Op
 ---@field stop_state_monitor fun(self: ModemBackend, timeout: number?): boolean, string

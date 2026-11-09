@@ -71,6 +71,10 @@ end
 
 ---@type table<string, ModemInfoGroup>
 local GROUP_FIELDS = {
+    modes = {
+        does_emit = false,
+        fields = { "supported_modes", "current_modes" },
+    },
     identity = {
         does_emit = true,
         fields = {
@@ -147,6 +151,7 @@ end
 local FIELD_TO_GROUP, VALID_GROUPS = normalise_groups(GROUP_FIELDS)
 
 local GROUP_FETCHERS = {
+    modes = "read_modes",
     identity = "read_identity",
     ports = "read_ports",
     sim = "read_sim_info",
@@ -299,7 +304,19 @@ function Modem:invalidate_groups(groups)
 end
 
 function Modem:_invalidate_dynamic()
-    self:invalidate_groups { 'sim', 'network', 'signal', 'traffic' }
+    self:invalidate_groups { 'sim', 'network', 'signal', 'traffic', 'modes' }
+end
+
+---@param opts ModemSetModesOpts
+function Modem:set_modes(opts)
+    if opts == nil or getmetatable(opts) ~= capability_args.ModemSetModesOpts then
+        return return_error('invalid options', 1)
+    end
+    local ok, err = self.backend:set_modes(opts.preferred, opts.allowed)
+    if not ok then return return_error(err, 1) end
+    self:invalidate_groups { 'modes', 'network', 'signal', 'traffic' }
+    self.state_pulse:signal()
+    return true
 end
 
 ---@param group string
