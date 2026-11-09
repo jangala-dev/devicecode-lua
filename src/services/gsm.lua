@@ -656,7 +656,8 @@ end
 ---@field current_state ModemState?
 ---@field pdp_restart_needed boolean?
 ---@field pdp_restart_waiting boolean?
----@field pdp_restart_from ModemState?
+---@field _pdp_restart_wait_owner table?
+---@field inspection_enable_proceeded boolean
 
 local function id_suffix(id)
 	id = tostring(id or '')
@@ -793,6 +794,7 @@ function GsmModem.new(cap, svc)
 	self.svc = svc
 	self.pdp_operation_active = false
 	self.pdp_pending_iccid = nil
+	self.inspection_enable_proceeded = false
 	self.domain = retained_domain.new(self.conn, { prefix = { 'state', 'gsm' } })
 	return self
 end
@@ -818,8 +820,6 @@ local function merge_pdp_scopes(target, source)
 		math.max(target.inspection_failures or 0, source.inspection_failures or 0))
 	target.inspection_exhausted = target.inspection_exhausted or source.inspection_exhausted
 		or target.inspection_failures >= MAX_PDP_INSPECTION_FAILURES
-	target.inspection_enable_proceeded = target.inspection_enable_proceeded
-		or source.inspection_enable_proceeded
 	target.next_episode = math.max(target.next_episode or 0, source.next_episode or 0)
 	for cid, incoming in pairs(source.cids or {}) do
 		local current = target.cids[cid]
@@ -996,8 +996,7 @@ function GsmModem:_finish_pdp_operation(generation, pdp_type)
 		self.pdp_iccid = self.pdp_pending_iccid
 		self.pdp_pending_iccid = nil
 		-- Scope lookup performs the atomic fallback merge without yielding.
-		local merged_scope = self:_pdp_scope(pdp_type)
-		if self.pdp_last_scope then self.pdp_last_scope = merged_scope end
+		self:_pdp_scope(pdp_type)
 	end
 end
 
@@ -1480,10 +1479,17 @@ end
 function GsmModem:_restart_after_pdp(scope_state, episode, generation)
 	return fibers.run_scope(function(scope)
 		local state_sub = self.cap:get_state_sub('card', { queue_len = 16, full = 'drop_oldest' })
-		scope:finally(function() state_sub:unsubscribe() end)
+		local invocation = {}
+		scope:finally(function()
+			state_sub:unsubscribe()
+			if self._pdp_restart_wait_owner == invocation then
+				self.pdp_restart_waiting = false
+				self._pdp_restart_wait_owner = nil
+			end
+		end)
 		local retained = state_sub:recv()
 		if not self:_pdp_owner_active(generation) then return false, 'pdp_owner_stale' end
-		self.pdp_restart_from = retained and retained.payload and retained.payload.to or self.current_state
+		invocation.from = retained and retained.payload and retained.payload.to or self.current_state
 		episode.restart_count = (episode.restart_count or 0) + 1
 		episode.restart_inflight = { owner_generation = generation, stage = 'reserved' }
 		episode.restart_inflight.stage = 'rpc_started'
@@ -1496,6 +1502,7 @@ function GsmModem:_restart_after_pdp(scope_state, episode, generation)
 			count = episode.restart_count, limit = MAX_PDP_RESTARTS,
 		})
 		if err ~= "" then return false, safe_err end
+		self._pdp_restart_wait_owner = invocation
 		self.pdp_restart_waiting = true
 		local deadline = fibers.now() + DEFAULT_RETRY_TIMEOUT
 		while true do
@@ -1504,14 +1511,12 @@ function GsmModem:_restart_after_pdp(scope_state, episode, generation)
 				timeout = sleep.sleep_op(math.max(0, deadline - fibers.now())),
 			}))
 			if which == 'timeout' or not msg then
-				self.pdp_restart_waiting = false
 				if which == 'timeout' then return false, 'pdp_restart_state_timeout' end
 				return false, 'state subscription interrupted'
 			end
 			if not self:_pdp_owner_active(generation) then return false, 'pdp_owner_stale' end
 			local state = msg.payload and msg.payload.to
-			if msg.payload and pdp_restart_transition(msg.payload, self.pdp_restart_from) then
-				self.pdp_restart_waiting = false
+			if msg.payload and pdp_restart_transition(msg.payload, invocation.from) then
 				return true, "", state
 			end
 		end
@@ -1638,9 +1643,6 @@ function GsmModem:_configure_pdp()
 	if not scope_state then return false, 'pdp_owner_stale' end
 	local function done(restarted, err, state, enable_decision)
 		self:_finish_pdp_operation(generation, pdp_type)
-		if enable_decision and self.pdp_last_scope then
-			enable_decision.scope = self.pdp_last_scope
-		end
 		return restarted, err, state, enable_decision
 	end
 	if scope_state.active_episode then
@@ -1657,10 +1659,8 @@ function GsmModem:_configure_pdp()
 		or (scope_state.inspection_failures or 0) >= MAX_PDP_INSPECTION_FAILURES then
 		scope_state.inspection_failures = MAX_PDP_INSPECTION_FAILURES
 		scope_state.inspection_exhausted = true
-		self.pdp_last_scope = scope_state
 		return done(false, '', nil, {
-			proceed = scope_state.inspection_enable_proceeded ~= true,
-			scope = scope_state,
+			proceed = self.inspection_enable_proceeded ~= true,
 		})
 	end
 	self.svc:obs_log('debug', { what = 'pdp_inspect', modem = self.name, pdp_type = pdp_type })
@@ -1676,8 +1676,7 @@ function GsmModem:_configure_pdp()
 			scope_state.inspection_exhausted = true
 			self:_pdp_terminal_log('inspection', 'scope', pdp_type,
 				MAX_PDP_INSPECTION_FAILURES, {}, generation)
-			self.pdp_last_scope = scope_state
-			return done(false, '', pdp_error_state(err), { proceed = true, scope = scope_state })
+			return done(false, '', pdp_error_state(err), { proceed = true })
 		end
 		return done(false, safe_err, pdp_error_state(err))
 	end
@@ -1697,10 +1696,17 @@ function GsmModem:_configure_pdp()
 				and record.corrections >= MAX_PDP_CORRECTIONS then
 				record.exhausted = true
 				local last = record.last_result or { outcome = 'rejected', dispatched = false }
-				self:_pdp_terminal_log('correction', 'cid', pdp_type, record.corrections, {
-					cid = context.cid, outcome = last.outcome, dispatched = last.dispatched,
-				}, generation)
-				return done(false, '')
+				if scope_state.active_episode then
+					scope_state.active_episode.pending_fail_open = {
+						cid = context.cid, count = record.corrections, result = last,
+					}
+					break
+				else
+					self:_pdp_terminal_log('correction', 'cid', pdp_type, record.corrections, {
+						cid = context.cid, outcome = last.outcome, dispatched = last.dispatched,
+					}, generation)
+					return done(false, '')
+				end
 			elseif not record.exhausted and not record.blocked then
 				local result
 				result, record = self:_invoke_pdp_correction(scope_state, context, pdp_type, generation)
@@ -1889,13 +1895,9 @@ function GsmModem:_autoconnect_loop()
 			local msg = msg_or_ver
 			if msg then
 				current_state = msg.payload.to
-				if self.pdp_last_scope and self:_pdp_owner_active()
-					and (current_state ~= 'disabled'
-						or (msg.payload.from ~= nil and msg.payload.from ~= 'disabled')) then
-					self.pdp_last_scope.inspection_enable_proceeded = false
-				end
-				if self.pdp_restart_waiting and pdp_restart_transition(msg.payload, self.pdp_restart_from) then
-					self.pdp_restart_waiting = false
+				if current_state ~= 'disabled'
+					or (msg.payload.from ~= nil and msg.payload.from ~= 'disabled') then
+					self.inspection_enable_proceeded = false
 				end
 				self.current_state = current_state
 				self:_accept_card_state(current_state)
@@ -1962,8 +1964,8 @@ function GsmModem:_autoconnect_loop()
 					and self:_pdp_owner_active() then
 					local _, enable_err = call_modem_rpc(self.cap, 'enable', {}, REQUEST_TIMEOUT)
 					err = enable_err
-					if enable_err == '' and enable_decision and enable_decision.scope then
-						enable_decision.scope.inspection_enable_proceeded = true
+					if enable_err == '' and enable_decision then
+						self.inspection_enable_proceeded = true
 					end
 				end
 			elseif current_state == 'failed' then
