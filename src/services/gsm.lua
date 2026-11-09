@@ -35,11 +35,15 @@ local apn_model = require 'services.gsm.apn_model'
 local cellular_modes = require 'services.gsm.modes'
 local mode_values = require 'services.hal.types.modem_modes'
 local apn_store_control = require 'services.gsm.apn_store_control_store'
+local apn_legacy_import = require 'services.gsm.apn_legacy_import'
 local tablex = require 'shared.table'
 
 local copy = tablex.deep_copy
 
 local REQUEST_TIMEOUT = 10
+local APN_IMPORT_READ_TIMEOUT = 5
+local APN_IMPORT_MAX_RETRY_S = 16
+local APN_IMPORT_GIVE_UP_S = 60
 local DEFAULT_RETRY_TIMEOUT = 20
 local DEFAULT_METRICS_INTERVAL = 120
 local DEFAULT_SIGNAL_FREQ = 5
@@ -1812,9 +1816,11 @@ function GsmModem:_apn_connect()
 				state_sub:recv() -- drain the retained current state
 
 				self.svc:obs_log('debug',
-					{ what = 'apn_connect_attempt', modem = self.name, apn = ranking.name, conn_str = conn_str })
+					{ what = 'apn_connect_attempt', modem = self.name, apn = ranking.name })
 
 				local _, conn_err = call_modem_rpc(self.cap, 'connect', opts, REQUEST_TIMEOUT)
+				-- A failed connect's error repeats the whole command, password included.
+				conn_err = apns.scrub_secrets(conn_err, conn_str, apn_table.password)
 
 				self.svc:obs_log('debug',
 					{ what = 'apn_connect_rpc', modem = self.name, apn = ranking.name, err = conn_err })
@@ -2311,6 +2317,63 @@ function GsmService.start(conn, opts)
 		return true, nil
 	end
 
+	-- Opens the store as usual, then, where configured and with no APNs saved, imports any
+	-- the v0.9 UI saved. This all happens at startup, before APN requests can arrive, so
+	-- nothing can overlap it. With APNs saved it does nothing beyond the normal load, and with
+	-- none there's nothing a save could lose. It only takes noticeable time if the store or
+	-- filesystem isn't answering, and it stops retrying so GSM always starts. No key is
+	-- written in that case, so the next start tries again.
+	local function open_apn_store_with_v09_import(cfg)
+		local store_ok, store_err = open_apn_store_for_config(cfg)
+		local spec = cfg.apn_store
+		if type(spec) ~= 'table' or spec.import_v09_user_cfg ~= true then return store_ok, store_err end
+
+		local give_up_s = opts.apn_import_give_up_s or APN_IMPORT_GIVE_UP_S
+		local function read_op()
+			local read_opts, opts_err = cap_sdk.args.new.FilesystemReadOpts(apn_legacy_import.FILENAME)
+			if not read_opts then return op.always(nil, opts_err or 'invalid_filesystem_read_opts') end
+			return cap_sdk.new_cap_ref(conn, 'fs', 'credentials'):call_control_op('read', read_opts, {
+				timeout = math.min(APN_IMPORT_READ_TIMEOUT, give_up_s),
+			})
+		end
+
+		local deadline = svc:now() + give_up_s
+		local retry_delay_s = 1.0
+		while true do
+			if store_ok and #custom_apns > 0 then return store_ok, store_err end
+			local result, err = nil, store_err
+			if store_ok then
+				result, err = perform(apn_legacy_import.run_op(apn_store, read_op))
+			end
+			if result then
+				if result.status == 'imported' then
+					svc:obs_log('info', { what = 'apn_v09_import_done', imported = result.imported, skipped = result.skipped })
+				elseif result.status == 'malformed' then
+					svc:obs_log('warn', { what = 'apn_v09_import_malformed_file' })
+				elseif (result.skipped or 0) > 0 then
+					svc:obs_log('warn', { what = 'apn_v09_import_no_valid_records', skipped = result.skipped })
+				end
+				return open_apn_store_for_config(cfg)
+			end
+			local remaining = deadline - svc:now()
+			if remaining <= 0 then
+				svc:obs_log('warn', { what = 'apn_v09_import_gave_up', err = tostring(err) })
+				-- An attempt's save can land even though its reply never arrived.
+				return open_apn_store_for_config(cfg)
+			end
+			svc:obs_log('debug', { what = 'apn_v09_import_retry', err = tostring(err) })
+			perform(sleep.sleep_op(math.min(retry_delay_s, remaining)))
+			retry_delay_s = math.min(retry_delay_s * 2, APN_IMPORT_MAX_RETRY_S)
+			if svc:now() >= deadline then
+				svc:obs_log('warn', { what = 'apn_v09_import_gave_up', err = tostring(err) })
+				return open_apn_store_for_config(cfg)
+			end
+			if not store_ok then
+				store_ok, store_err = open_apn_store_for_config(cfg)
+			end
+		end
+	end
+
 	local function signal_all_modems()
 		for _, modem in pairs(modems) do
 			modem:_signal_config_change()
@@ -2503,7 +2566,7 @@ function GsmService.start(conn, opts)
 		end
 	end
 
-	local store_ok, store_err = open_apn_store_for_config(current_cfg)
+	local store_ok, store_err = open_apn_store_with_v09_import(current_cfg)
 	if not store_ok then
 		svc:obs_log('warn', { what = 'apn_store_unavailable', err = tostring(store_err) })
 	end
