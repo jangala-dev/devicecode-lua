@@ -50,51 +50,51 @@ local DiffTrigger = {}
 DiffTrigger.__index = DiffTrigger
 
 local function check_diff_args_valid(config)
-    if config.initial_val ~= nil and type(config.initial_val) ~= 'number' then
-        return 'Initial value must be a number'
-    end
-    if config.diff_method ~= 'any-change' and type(config.threshold) ~= 'number' then
-        return 'Threshold must be a number'
-    end
+	if config.initial_val ~= nil and type(config.initial_val) ~= 'number' then
+		return 'Initial value must be a number'
+	end
+	if config.diff_method ~= 'any-change' and type(config.threshold) ~= 'number' then
+		return 'Threshold must be a number'
+	end
 end
 
 ---@param config table
 ---@return DiffTrigger?
 ---@return string? error
 function DiffTrigger.new(config)
-    local valid_err = check_diff_args_valid(config)
-    if valid_err then return nil, valid_err end
+	local valid_err = check_diff_args_valid(config)
+	if valid_err then return nil, valid_err end
 
-    local self = setmetatable({}, DiffTrigger)
-    self.config = config
-    self.threshold = config.threshold
+	local self = setmetatable({}, DiffTrigger)
+	self.config = config
+	self.threshold = config.threshold
 
-    local dm = config.diff_method
-    if dm == 'absolute' then
-        self.diff_fn = function(curr, last, threshold)
-            return math.abs(curr - last) >= threshold
-        end
-    elseif dm == 'percent' then
-        self.diff_fn = function(curr, last, threshold)
-            return (math.abs((curr - last) / last) * 100) >= threshold
-        end
-    elseif dm == 'any-change' then
-        self.diff_fn = function(curr, last)
-            return curr ~= last
-        end
-    else
-        return nil, "Diff method must be 'absolute', 'percent' or 'any-change'"
-    end
-    return self, nil
+	local dm = config.diff_method
+	if dm == 'absolute' then
+		self.diff_fn = function(curr, last, threshold)
+			return math.abs(curr - last) >= threshold
+		end
+	elseif dm == 'percent' then
+		self.diff_fn = function(curr, last, threshold)
+			return (math.abs((curr - last) / last) * 100) >= threshold
+		end
+	elseif dm == 'any-change' then
+		self.diff_fn = function(curr, last)
+			return curr ~= last
+		end
+	else
+		return nil, "Diff method must be 'absolute', 'percent' or 'any-change'"
+	end
+	return self, nil
 end
 
 ---@return table
 function DiffTrigger:new_state()
-    return {
-        empty    = (self.config.initial_val == nil),
-        last_val = self.config.initial_val or 0,
-        curr_val = nil,
-    }
+	return {
+		empty    = (self.config.initial_val == nil),
+		last_val = self.config.initial_val or 0,
+		curr_val = nil,
+	}
 end
 
 ---@param value any
@@ -103,13 +103,13 @@ end
 ---@return boolean short_circuit
 ---@return string? error
 function DiffTrigger:run(value, state)
-    state.curr_val = value
-    if state.empty or self.diff_fn(state.curr_val, state.last_val, self.threshold) then
-        state.last_val = value
-        state.empty = false
-        return value, false, nil
-    end
-    return nil, true, nil
+	state.curr_val = value
+	if state.empty or self.diff_fn(state.curr_val, state.last_val, self.threshold) then
+		state.last_val = value
+		state.empty = false
+		return value, false, nil
+	end
+	return nil, true, nil
 end
 
 --- No-op: DiffTrigger does not reset last_val on publish.
@@ -133,18 +133,18 @@ TimeTrigger.__index = TimeTrigger
 ---@return TimeTrigger?
 ---@return string? error
 function TimeTrigger.new(config)
-    if type(config.duration) ~= 'number' then
-        return nil, 'Duration must be a number'
-    end
-    local self    = setmetatable({}, TimeTrigger)
-    self.duration = config.duration
-    self.config   = config
-    return self, nil
+	if type(config.duration) ~= 'number' then
+		return nil, 'Duration must be a number'
+	end
+	local self    = setmetatable({}, TimeTrigger)
+	self.duration = config.duration
+	self.config   = config
+	return self, nil
 end
 
 ---@return table
 function TimeTrigger:new_state()
-    return { timeout = runtime.now() + self.duration }
+	return { timeout = runtime.now() + self.duration }
 end
 
 ---@param value any
@@ -153,11 +153,11 @@ end
 ---@return boolean short_circuit
 ---@return string? error
 function TimeTrigger:run(value, state)
-    if runtime.now() >= state.timeout then
-        state.timeout = runtime.now() + self.duration
-        return value, false, nil
-    end
-    return nil, true, nil
+	if runtime.now() >= state.timeout then
+		state.timeout = runtime.now() + self.duration
+		return value, false, nil
+	end
+	return nil, true, nil
 end
 
 ---@param state table
@@ -179,20 +179,20 @@ DeltaValue.__index = DeltaValue
 ---@return DeltaValue?
 ---@return string? error
 function DeltaValue.new(config)
-    if config.initial_val ~= nil and type(config.initial_val) ~= 'number' then
-        return nil, 'Initial value must be a number'
-    end
-    local self = setmetatable({}, DeltaValue)
-    self.config = config
-    return self, nil
+	if config.initial_val ~= nil and type(config.initial_val) ~= 'number' then
+		return nil, 'Initial value must be a number'
+	end
+	local self = setmetatable({}, DeltaValue)
+	self.config = config
+	return self, nil
 end
 
 ---@return table
 function DeltaValue:new_state()
-    return {
-        last_val = self.config.initial_val or 0,
-        curr_val = nil,
-    }
+	return {
+		last_val = self.config.initial_val or 0,
+		curr_val = nil,
+	}
 end
 
 ---@param value any
@@ -201,22 +201,22 @@ end
 ---@return boolean short_circuit
 ---@return string? error
 function DeltaValue:run(value, state)
-    if type(value) ~= 'number' then
-        return nil, false, 'Value must be a number'
-    end
-    local difference = value - state.last_val
-    -- A counter lower than before was reset (interface restart, wifi reload):
-    -- it counted up from zero, so the new value is the change.
-    if difference < 0 then difference = value end
-    state.curr_val = value
-    return difference, false, nil
+	if type(value) ~= 'number' then
+		return nil, false, 'Value must be a number'
+	end
+	local difference = value - state.last_val
+	-- A counter lower than before was reset (interface restart, wifi reload):
+	-- it counted up from zero, so the new value is the change.
+	if difference < 0 then difference = value end
+	state.curr_val = value
+	return difference, false, nil
 end
 
 --- On reset, advance last_val to curr_val so the next delta is computed from
 --- the most-recently-published sample.
 ---@param state table
 function DeltaValue:reset(state)
-    state.last_val = state.curr_val or 0
+	state.last_val = state.curr_val or 0
 end
 
 -------------------------------------------------------------------------------
@@ -230,37 +230,37 @@ ProcessPipeline.__index = ProcessPipeline
 
 ---@return ProcessPipeline
 local function new_process_pipeline()
-    return setmetatable({ process_blocks = {} }, ProcessPipeline)
+	return setmetatable({ process_blocks = {} }, ProcessPipeline)
 end
 
 --- Append a processing block to the pipeline.
 ---@param block any
 ---@return string? error
 function ProcessPipeline:add(block)
-    if block == nil then return 'processing block cannot be nil' end
-    table.insert(self.process_blocks, block)
+	if block == nil then return 'processing block cannot be nil' end
+	table.insert(self.process_blocks, block)
 end
 
 local function has_counter(pipeline)
-    for _, block in ipairs(pipeline.process_blocks) do
-        if getmetatable(block) == DeltaValue then return true end
-    end
-    return false
+	for _, block in ipairs(pipeline.process_blocks) do
+		if getmetatable(block) == DeltaValue then return true end
+	end
+	return false
 end
 
 --- Measure this pipeline's counter from `value`. Only blocks up to the DeltaValue
 --- see the raw counter; any after it compare deltas, so they stay as they are.
 local function seed_counter(pipeline, state, value)
-    for i, block in ipairs(pipeline.process_blocks) do
-        local mt = getmetatable(block)
-        if mt == DeltaValue or mt == DiffTrigger then
-            local block_state = state.blocks[i]
-            block_state.last_val = value
-            block_state.curr_val = value
-            block_state.empty = false
-        end
-        if mt == DeltaValue then break end
-    end
+	for i, block in ipairs(pipeline.process_blocks) do
+		local mt = getmetatable(block)
+		if mt == DeltaValue or mt == DiffTrigger then
+			local block_state = state.blocks[i]
+			block_state.last_val = value
+			block_state.curr_val = value
+			block_state.empty = false
+		end
+		if mt == DeltaValue then break end
+	end
 end
 
 --- Create a fresh state table for this pipeline (and all its blocks).
@@ -271,14 +271,14 @@ end
 ---@param opts? { baseline_first_sample: boolean? }
 ---@return table
 function ProcessPipeline:new_state(opts)
-    local state = { full_run = false, blocks = {} }
-    for i, block in ipairs(self.process_blocks) do
-        state.blocks[i] = block:new_state()
-    end
-    if opts and opts.baseline_first_sample and has_counter(self) then
-        state.baseline_pending = true
-    end
-    return state
+	local state = { full_run = false, blocks = {} }
+	for i, block in ipairs(self.process_blocks) do
+		state.blocks[i] = block:new_state()
+	end
+	if opts and opts.baseline_first_sample and has_counter(self) then
+		state.baseline_pending = true
+	end
+	return state
 end
 
 --- Run the pipeline, passing value through each block sequentially.
@@ -289,52 +289,52 @@ end
 ---@return boolean short_circuit
 ---@return string? error
 function ProcessPipeline:run(value, state)
-    -- Taken here, ahead of the blocks: a trigger could reject the first sample
-    -- (a percent change from a counter at zero), and the next would then be lost.
-    if state.baseline_pending and type(value) == 'number' then
-        state.baseline_pending = nil
-        seed_counter(self, state, value)
-        return nil, true, nil
-    end
+	-- Taken here, ahead of the blocks: a trigger could reject the first sample
+	-- (a percent change from a counter at zero), and the next would then be lost.
+	if state.baseline_pending and type(value) == 'number' then
+		state.baseline_pending = nil
+		seed_counter(self, state, value)
+		return nil, true, nil
+	end
 
-    local val   = value
-    local short = false
-    local err   = nil
+	local val   = value
+	local short = false
+	local err   = nil
 
-    for i, block in ipairs(self.process_blocks) do
-        val, short, err = block:run(val, state.blocks[i])
-        if err or short then break end
-    end
+	for i, block in ipairs(self.process_blocks) do
+		val, short, err = block:run(val, state.blocks[i])
+		if err or short then break end
+	end
 
-    if not short and not err then
-        state.full_run = true
-    end
+	if not short and not err then
+		state.full_run = true
+	end
 
-    return val, short, err
+	return val, short, err
 end
 
 --- Reset block states, but only when the pipeline produced a published value
 --- (i.e. ran to completion without short-circuiting).
 ---@param state table
 function ProcessPipeline:reset(state)
-    if state.full_run then
-        for i, block in ipairs(self.process_blocks) do
-            block:reset(state.blocks[i])
-        end
-        state.full_run = false
-    end
+	if state.full_run then
+		for i, block in ipairs(self.process_blocks) do
+			block:reset(state.blocks[i])
+		end
+		state.full_run = false
+	end
 end
 
 --- Reset regardless of whether the pipeline produced a published value.
 ---@param state table
 function ProcessPipeline:force_reset(state)
-    state.full_run = true
-    self:reset(state)
+	state.full_run = true
+	self:reset(state)
 end
 
 return {
-    DiffTrigger          = DiffTrigger,
-    TimeTrigger          = TimeTrigger,
-    DeltaValue           = DeltaValue,
-    new_process_pipeline = new_process_pipeline,
+	DiffTrigger          = DiffTrigger,
+	TimeTrigger          = TimeTrigger,
+	DeltaValue           = DeltaValue,
+	new_process_pipeline = new_process_pipeline,
 }

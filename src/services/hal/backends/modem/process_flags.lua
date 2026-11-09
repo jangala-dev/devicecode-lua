@@ -8,15 +8,15 @@ local M = {}
 ---It may be native on pidfd/FFI backends or reaper-backed on OpenWrt plain Lua.
 ---@return table flags
 function M.owned_monitor_flags()
-    local flags = {
-        process_group = true,
-    }
+	local flags = {
+		process_group = true,
+	}
 
-    if type(exec.supports) == "function" and exec.supports("parent_death_signal") then
-        flags.parent_death_signal = "TERM"
-    end
+	if type(exec.supports) == "function" and exec.supports("parent_death_signal") then
+		flags.parent_death_signal = "TERM"
+	end
 
-    return flags
+	return flags
 end
 
 return M

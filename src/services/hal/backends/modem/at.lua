@@ -36,10 +36,10 @@ local scope = require 'fibers.scope'
 ---@param input string
 ---@return string
 local function trim(input)
-    -- Pattern matches non-printable characters and spaces at the start and end of the string
-    -- %c matches control characters, %s matches all whitespace characters
-    -- %z matches the character with representation 0x00 (NUL byte)
-    return (input:gsub("^[%c%s%z]+", ""):gsub("[%c%s%z]+$", ""))
+	-- Pattern matches non-printable characters and spaces at the start and end of the string
+	-- %c matches control characters, %s matches all whitespace characters
+	-- %z matches the character with representation 0x00 (NUL byte)
+	return (input:gsub("^[%c%s%z]+", ""):gsub("[%c%s%z]+$", ""))
 end
 
 ---@class AT
@@ -65,73 +65,73 @@ local at = {}
 ---@param opts ATSendOpts?
 ---@return Op  -- yields (ATResponseLine[]?, string?)
 function at.send_op(port, command, opts)
-    local terminal_patterns = (opts and opts.terminal_patterns) or {}
-    local on_dispatch = opts and opts.on_dispatch
+	local terminal_patterns = (opts and opts.terminal_patterns) or {}
+	local on_dispatch = opts and opts.on_dispatch
 
-    return scope.run_op(function(s)
-        local reader, rd_err = file.open(port, "r")
-        if not reader then
-            return nil, "error opening AT read port: " .. rd_err
-        end
+	return scope.run_op(function(s)
+		local reader, rd_err = file.open(port, "r")
+		if not reader then
+			return nil, "error opening AT read port: " .. rd_err
+		end
 
-        -- Finalisers cannot wait for a graceful stream close.
-        s:finally(function() reader:terminate('AT command finished') end)
+		-- Finalisers cannot wait for a graceful stream close.
+		s:finally(function() reader:terminate('AT command finished') end)
 
-        local writer, wr_err = file.open(port, "w")
-        if not writer then
-            return nil, "error opening AT write port: " .. wr_err
-        end
-        s:finally(function() writer:terminate('AT command finished') end)
+		local writer, wr_err = file.open(port, "w")
+		if not writer then
+			return nil, "error opening AT write port: " .. wr_err
+		end
+		s:finally(function() writer:terminate('AT command finished') end)
 
-        if on_dispatch then on_dispatch() end
-        local written, write_err = writer:write(command .. '\r')
-        if not written then
-            return nil, "error writing AT command: " .. tostring(write_err)
-        end
-        local closed, close_err = writer:close()
-        if not closed then
-            return nil, "error flushing AT command: " .. tostring(close_err)
-        end
+		if on_dispatch then on_dispatch() end
+		local written, write_err = writer:write(command .. '\r')
+		if not written then
+			return nil, "error writing AT command: " .. tostring(write_err)
+		end
+		local closed, close_err = writer:close()
+		if not closed then
+			return nil, "error flushing AT command: " .. tostring(close_err)
+		end
 
-        local res = {}
-        while true do
-            local line, read_err = s:perform(reader:read_line_op())
+		local res = {}
+		while true do
+			local line, read_err = s:perform(reader:read_line_op())
 
-            if not line then
-                return nil, read_err or "unknown error"
-            end
+			if not line then
+				return nil, read_err or "unknown error"
+			end
 
-            line = trim(line)
+			line = trim(line)
 
-            -- Built-in terminals
-            if line:find("^OK$") then
-                return res, nil
-            elseif line:find("^ERROR$") then
-                return res, "error"
-            else
-                local error_code = line:match("^%+CME ERROR: (%d+)$")
-                                or line:match("^%+CMS ERROR: (%d+)$")
-                if error_code then
-                    return res, error_code
-                end
-            end
+			-- Built-in terminals
+			if line:find("^OK$") then
+				return res, nil
+			elseif line:find("^ERROR$") then
+				return res, "error"
+			else
+				local error_code = line:match("^%+CME ERROR: (%d+)$")
+								or line:match("^%+CMS ERROR: (%d+)$")
+				if error_code then
+					return res, error_code
+				end
+			end
 
-            -- User-supplied terminal patterns
-            for _, tp in ipairs(terminal_patterns) do
-                if line:find(tp.pattern) then
-                    table.insert(res, line)
-                    return res, tp.is_error and line or nil
-                end
-            end
+			-- User-supplied terminal patterns
+			for _, tp in ipairs(terminal_patterns) do
+				if line:find(tp.pattern) then
+					table.insert(res, line)
+					return res, tp.is_error and line or nil
+				end
+			end
 
-            if #line > 0 then table.insert(res, line) end
-        end
-    end):wrap(function(st, _report, a, b)
-        if st == 'ok' then return a, b end
-        if st == 'cancelled' then return nil, 'cancelled' end
-        -- 'failed': a is the primary error string
-        return nil, a or "AT command failed"
-    end)
+			if #line > 0 then table.insert(res, line) end
+		end
+	end):wrap(function(st, _report, a, b)
+		if st == 'ok' then return a, b end
+		if st == 'cancelled' then return nil, 'cancelled' end
+		-- 'failed': a is the primary error string
+		return nil, a or "AT command failed"
+	end)
 end
 
 return at
