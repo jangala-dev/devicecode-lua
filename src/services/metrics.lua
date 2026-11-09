@@ -356,7 +356,7 @@ local function attempt_crash_send()
 	local queued = http_publish(data, function(accepted)
 		State.crash_inflight = false
 		if accepted then
-			State.crash_store:mark_sent(rec.seq, now())
+			State.crash_store:mark_sent(rec.seq, now(), rec.mono)
 		else
 			State.crash_store:mark_failed(now())
 		end

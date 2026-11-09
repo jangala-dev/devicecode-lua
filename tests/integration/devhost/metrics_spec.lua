@@ -561,6 +561,22 @@ function T.a_damaged_crash_file_does_not_stop_metrics()
 	})
 end
 
+-- Numbering starts again after a damaged file, so an answer for an older record
+-- mustn't remove a newer one with the same seq.
+function T.an_answer_after_renumbering_keeps_the_new_record()
+	with_pending_crash(true, function(sent, store)
+		assert(#sent == 1, 'expected the old record to be sent, got ' .. #sent)
+		store:record_failure({ service = 'net', status = 'failed', primary = 'x' })
+		sent[1].on_result(true)
+		local rec = store:next_pending(math.huge)
+		assert(rec, 'the new record should still be pending')
+		assert(rec.mono == 600, 'expected the new record, got mono ' .. tostring(rec.mono))
+	end, {
+		file = '{"boot_id":"boot-1","seq":2147483647,"crashes":1,"next_send":0,'
+			.. '"pending":[{"seq":1,"mono":550,"kind":"service_failed"}]}',
+	})
+end
+
 function T.crash_record_waits_for_time_sync()
 	with_pending_crash(false, function(sent)
 		assert(#sent == 0, 'should not send before the clock is synced, got ' .. #sent)

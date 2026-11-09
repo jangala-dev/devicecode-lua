@@ -372,11 +372,12 @@ Store.next_send_at = guarded(function(self)
 	return state.next_send or 0
 end)
 
---- The cloud accepted this record.
-Store.mark_sent = guarded(function(self, seq, now)
+--- The cloud accepted this record. mono, when given, must match too, because numbering
+--- starts again after a damaged file and a seq can then be reused.
+Store.mark_sent = guarded(function(self, seq, now, mono)
 	local state = self:load()
 	for i, rec in ipairs(state.pending) do
-		if rec.seq == seq then
+		if rec.seq == seq and (mono == nil or rec.mono == mono) then
 			table.remove(state.pending, i)
 			break
 		end
