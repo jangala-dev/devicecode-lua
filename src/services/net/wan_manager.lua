@@ -89,7 +89,15 @@ local function mark_speedtest_skipped(state, uplink, generation, reason)
 		local id = uplink.uplink_id
 		local rec = s.wan_runtime.speedtests[id] or { uplink_id = id }
 		local measurement = wan_policy.measurement(s, uplink)
-		if (reason == 'fresh_same_path' or reason == 'fresh_weak_path') and rec.last_success then
+		local active = state.active_speedtests and state.active_speedtests[id]
+		local awaiting_observation = reason == 'waiting_for_observation'
+			and rec.state == 'running' and active
+			and active.generation == generation and rec.generation == generation
+			and active.speedtest_id == rec.id
+		if reason == 'running' or awaiting_observation then
+			-- Observation updates must not make an active download eligible again.
+			-- Preserve its state until the original completion arrives.
+		elseif (reason == 'fresh_same_path' or reason == 'fresh_weak_path') and rec.last_success then
 			rec.state = 'ok'
 			rec.ok = true
 			if reason == 'fresh_weak_path' and type(measurement) == 'table' then
@@ -257,22 +265,25 @@ function M.reconcile_speedtests(state, reason)
 		return s
 	end)
 
+	-- Release tests on uplinks observed offline before choosing the next one to launch.
+	for i = 1, #uplinks do
+		local uplink = uplinks[i]
+		if not wan_policy.uplink_online(snap, uplink) and wan_policy.uplink_observed_status(snap, uplink) ~= nil then
+			local active = state.active_speedtests[uplink.uplink_id]
+			if active and active.handle and type(active.handle.cancel) == 'function' then
+				active.handle:cancel('uplink_offline')
+			end
+			state.active_speedtests[uplink.uplink_id] = nil
+		end
+	end
+
 	local speedtest_pending = false
 	for i = 1, #uplinks do
 		local uplink = uplinks[i]
 		local observed_status = wan_policy.uplink_observed_status(snap, uplink)
 		local online = wan_policy.uplink_online(snap, uplink)
 		if not online then
-			local skip_reason = 'not_online'
-			if observed_status == nil then
-				skip_reason = 'waiting_for_observation'
-			else
-				local active = state.active_speedtests[uplink.uplink_id]
-				if active and active.handle and type(active.handle.cancel) == 'function' then
-					active.handle:cancel('uplink_offline')
-				end
-				state.active_speedtests[uplink.uplink_id] = nil
-			end
+			local skip_reason = observed_status == nil and 'waiting_for_observation' or 'not_online'
 			mark_speedtest_skipped(state, uplink, generation, skip_reason)
 			report_speedtest_skip(state, skip_reason, reason, uplink, generation)
 		else
@@ -280,8 +291,12 @@ function M.reconcile_speedtests(state, reason)
 				{ generation = generation, now = now(state) })
 			if due then
 				speedtest_pending = true
-				local ok, err = start_speedtest_for_uplink(state, uplink)
-				if ok ~= true then return nil, err end
+				-- The HAL runs speed tests serially, but each caller deadline starts
+				-- at launch. Launch one at a time; completion reconciles the next.
+				if next(state.active_speedtests) == nil then
+					local ok, err = start_speedtest_for_uplink(state, uplink)
+					if ok ~= true then return nil, err end
+				end
 			else
 				if due_reason == 'running' then speedtest_pending = true end
 				mark_speedtest_skipped(state, uplink, generation, due_reason or 'not_due')
@@ -378,6 +393,8 @@ function M.handle_speedtest_done(state, ev)
 			rec.last_success_key = rec.measurement_key
 			rec.last_success = {
 				mbps = mbps,
+				lower_bound = result.lower_bound,
+				estimator = result.estimator,
 				bytes = result.bytes,
 				data_mib = result.data_mib,
 				duration_s = result.duration_s,
@@ -407,6 +424,13 @@ function M.handle_speedtest_done(state, ev)
 		end
 		rec.data_mib = result.data_mib
 		rec.duration_s = result.duration_s
+		rec.bytes = result.bytes
+		rec.setup_s = result.setup_s
+		rec.total_duration_s = result.total_duration_s
+		rec.stop_reason = result.stop_reason
+		rec.estimator = result.estimator
+		rec.lower_bound = result.lower_bound
+		rec.error_detail = result.err
 		s.wan_runtime.speedtests[ev.uplink_id] = rec
 		s.stats.speedtests_completed = (s.stats.speedtests_completed or 0) + 1
 		return s

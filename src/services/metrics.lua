@@ -25,6 +25,7 @@
 
 local fibers         = require 'fibers'
 local op             = require 'fibers.op'
+local pulse          = require 'fibers.pulse'
 local sleep          = require 'fibers.sleep'
 local runtime        = require 'fibers.runtime'
 local time           = require 'fibers.utils.time'
@@ -40,11 +41,16 @@ local http_m         = require 'services.metrics.http'
 local conf           = require 'services.metrics.config'
 local types          = require 'services.metrics.types'
 local ui_usage       = require 'services.ui.usage'
+local crash_record   = require 'devicecode.crash_record'
 
 
 local unpack = unpack or rawget(table, 'unpack')
 
 local NAME = 'metrics'
+
+-- The least time between crash sends, whatever the store says. If /tmp is full the
+-- store can't save its own wait, and that mustn't become a tight loop.
+local CRASH_MIN_GAP_S = 5
 
 -------------------------------------------------------------------------------
 -- Topic helpers
@@ -109,6 +115,13 @@ end
 -- Service state
 -------------------------------------------------------------------------------
 
+-- devicecode starts well inside this on a fresh boot, so a later start is a
+-- restart of the process, and the kernel counters have kept their values.
+local RESTART_MIN_UPTIME_S = 300
+-- Endpoints first seen this soon after a restart were already counting before it.
+-- Later ones are new, such as a Wi-Fi session, so their first sample is real traffic.
+local RESTART_BASELINE_WINDOW_S = 600
+
 ---@type ServiceState
 local State = {
 	conn             = nil,
@@ -116,6 +129,7 @@ local State = {
 	name             = nil,
 	http_ref         = nil,
 	http_send_ch     = nil,
+	crash_send_ch    = nil,
 	pipelines_map    = {},
 	metric_states    = {},
 	endpoint_to_pipe = {},
@@ -127,6 +141,13 @@ local State = {
 	cloud_config     = nil,
 	base_time        = nil,
 	fs_cap           = nil,
+	crash_store      = nil,
+	crash_inflight   = false,
+	crash_last_try   = -math.huge,
+	crash_due        = math.huge,
+	crash_wake       = nil,
+	baseline_until   = nil,
+	config_data      = nil,
 }
 
 -------------------------------------------------------------------------------
@@ -244,20 +265,27 @@ local function log_publish(data)
 end
 
 ---@param data table<string, MetricSample>
-local function http_publish(data)
+---@param on_result fun(accepted: boolean)? called with the cloud's answer, and the send
+--- isn't retried: the caller paces its own retries
+---@return boolean queued
+local function http_publish(data, on_result)
 	local senml_list, encode_err = senml.encode_r('', data)
 	if encode_err then
 		State.svc:obs_log('error', { what = 'senml_encode_failed', err = tostring(encode_err) })
-		return
+		return false
 	end
-	if #senml_list == 0 then return end
+	if #senml_list == 0 then return false end
 
-	local body = json.encode(senml_list)
+	local body, json_err = json.encode(senml_list)
+	if not body then
+		State.svc:obs_log('error', { what = 'http_publish_encode_failed', err = tostring(json_err) })
+		return false
+	end
 
 	local valid, config_err = conf.validate_http_config(State.cloud_config)
 	if not valid then
 		State.svc:obs_log('error', { what = 'http_publish_skipped', err = tostring(config_err) })
-		return
+		return false
 	end
 
 	local channel_id
@@ -269,7 +297,7 @@ local function http_publish(data)
 	end
 	if channel_id == nil then
 		State.svc:obs_log('error', { what = 'http_publish_failed', err = 'no data channel id found' })
-		return
+		return false
 	end
 
 	local uri   = string.format('%s/http/channels/%s/messages',
@@ -277,12 +305,74 @@ local function http_publish(data)
 	local auth  = 'Thing ' .. State.cloud_config.thing_key
 
 	-- Non-blocking enqueue: drop and log if the channel is at capacity.
-	local full = perform(State.http_send_ch:put_op({ uri = uri, auth = auth, body = body })
+	local send_ch = on_result and State.crash_send_ch or State.http_send_ch
+	local full = perform(send_ch:put_op({
+		uri = uri, auth = auth, body = body, on_result = on_result, one_shot = on_result ~= nil,
+	})
 		:or_else(function() return true end))
 
 	if full then
 		State.svc:obs_log('error', { what = 'http_queue_full', err = 'dropping publish payload' })
+		return false
 	end
+	return true
+end
+
+--- Work out when the main loop should next try a crash send. /tmp is cleared by a
+--- reboot, so this can't wait for the publish tick. The result is kept here because
+--- the loop goes round for every metric and the store is a file.
+local function schedule_crash_send()
+	State.crash_due = math.huge
+	if not State.crash_store or State.crash_inflight then return end
+	if not (State.base_time.synced and State.cloud_config) then return end
+	local due = State.crash_store:next_send_at()
+	if due then State.crash_due = math.max(due, State.crash_last_try + CRASH_MIN_GAP_S) end
+end
+
+--- Send the next crash record from an earlier process, in its own request. It goes
+--- straight to the cloud rather than through a pipeline, so it can't be lost to the
+--- start-up race between metrics and config. It stays on file until accepted.
+local function attempt_crash_send()
+	if not State.crash_store or State.crash_inflight then return end
+	if not (State.base_time.synced and State.cloud_config) then return end
+
+	local tnow = now()
+	if tnow < State.crash_last_try + CRASH_MIN_GAP_S then return end
+	local rec = State.crash_store:next_pending(tnow)
+	if not rec then return end
+	State.crash_last_try = tnow
+
+	-- rec.mono is from the same boot, so it converts to the time of the crash.
+	local at = math.floor((State.base_time.real + (rec.mono - State.base_time.mono)) * 1000)
+	local data = {}
+	for _, field in ipairs({ 'kind', 'service', 'status', 'reason', 'log', 'seq' }) do
+		if rec[field] ~= nil then
+			data['system.crash.' .. field] = { value = rec[field], time = at }
+		end
+	end
+	data['system.crash.uptime_s'] = { value = rec.mono, time = at }
+
+	State.crash_inflight = true
+	local queued = http_publish(data, function(accepted)
+		State.crash_inflight = false
+		if accepted then
+			State.crash_store:mark_sent(rec.seq, now(), rec.mono)
+		else
+			State.crash_store:mark_failed(now())
+		end
+		-- The answer arrives while the main loop is asleep on the old deadline.
+		schedule_crash_send()
+		State.crash_wake:signal()
+	end)
+	if not queued then
+		State.crash_inflight = false
+		State.crash_store:mark_failed(tnow)
+	end
+end
+
+local function send_pending_crash()
+	attempt_crash_send()
+	schedule_crash_send()
 end
 
 
@@ -383,7 +473,9 @@ local function handle_metric(msg)
 
 	-- Get-or-create per-endpoint processing state.
 	if not State.metric_states[endpoint_str] then
-		State.metric_states[endpoint_str]    = pipe_cfg.pipeline:new_state()
+		State.metric_states[endpoint_str]    = pipe_cfg.pipeline:new_state({
+			baseline_first_sample = State.baseline_until ~= nil and now() <= State.baseline_until,
+		})
 		State.endpoint_to_pipe[endpoint_str] = metric_name
 	end
 	State.endpoint_seen[endpoint_str] = now()
@@ -403,6 +495,31 @@ end
 -------------------------------------------------------------------------------
 -- Config handling
 -------------------------------------------------------------------------------
+
+local function deep_equal(a, b)
+	if a == b then return true end
+	if type(a) ~= 'table' or type(b) ~= 'table' then return false end
+	for k, v in pairs(a) do
+		if not deep_equal(v, b[k]) then return false end
+	end
+	for k in pairs(b) do
+		if a[k] == nil then return false end
+	end
+	return true
+end
+
+--- A pipeline's definition, and the template it uses if any.
+local function pipeline_definition(data, metric_name)
+	local pipeline = data and data.pipelines and data.pipelines[metric_name]
+	local template = pipeline and pipeline.template
+	return pipeline, template and data.templates and data.templates[template]
+end
+
+local function same_pipeline(old_data, new_data, metric_name)
+	local old_pipeline, old_template = pipeline_definition(old_data, metric_name)
+	local new_pipeline, new_template = pipeline_definition(new_data, metric_name)
+	return old_pipeline ~= nil and deep_equal(old_pipeline, new_pipeline) and deep_equal(old_template, new_template)
+end
 
 ---@param payload table?
 ---@return number next_publish_time
@@ -429,10 +546,16 @@ local function handle_config(payload)
 	State.cloud_url = payload.data and payload.data.cloud_url
 	rebuild_cloud_config()
 
-	-- Replace all pipeline state (logic may have changed).
+	-- Replace state only for pipelines whose logic has changed. Counters on the rest
+	-- have lost nothing, whatever else in the config changed.
+	for endpoint_str, metric_name in pairs(State.endpoint_to_pipe) do
+		if not same_pipeline(State.config_data, payload.data, metric_name) then
+			State.metric_states[endpoint_str]    = nil
+			State.endpoint_to_pipe[endpoint_str] = nil
+		end
+	end
+	State.config_data      = payload.data
 	State.pipelines_map    = new_pipelines_map
-	State.metric_states    = {}
-	State.endpoint_to_pipe = {}
 	State.publish_period   = new_publish_period
 
 	if State.base_time.synced and State.publish_period then
@@ -453,9 +576,11 @@ local function handle_time_sync(synced)
 			State.base_time.real = real - (mono - State.base_time.mono)
 			return true -- first sync
 		end
-	else
-		State.base_time.synced = false
+		-- Sync regained: take up any correction to the clock.
+		State.base_time.real = now_real() - (now() - State.base_time.mono)
 	end
+	-- Losing sync changes nothing. Timestamps come from the monotonic clock and the
+	-- offset from the first sync, and telemetry is how we'd see a box in this state.
 	return false
 end
 
@@ -488,6 +613,9 @@ local function main()
 			timesync = time_sub:recv_op(),
 			-- timesync = State.base_time.synced and op.never() or op.always({ payload = true }),
 			tick     = sleep.sleep_until_op(next_publish_time),
+			crash    = sleep.sleep_until_op(State.crash_due),
+			-- Only has to wake the loop, so that it goes round with the new crash_due.
+			crash_wake = State.crash_wake:next_op(),
 		}))
 
 
@@ -506,6 +634,7 @@ local function main()
 			State.svc:obs_log('debug', next_s
 				and string.format('config applied, next publish in %.1fs', next_s)
 				or 'config applied, publishing suspended (waiting for NTP sync)')
+			send_pending_crash()
 		elseif which == 'metric' then
 			local msg = a
 			if msg then
@@ -522,11 +651,11 @@ local function main()
 				elseif first_sync then
 					State.svc:obs_event('ntp_synced', { first = true })
 					State.svc:obs_log('debug', 'NTP synced, waiting for config before scheduling publish')
-				elseif not State.base_time.synced then
-					next_publish_time = math.huge
+				elseif msg.payload ~= true then
 					State.svc:obs_event('ntp_lost', {})
 					State.svc:obs_log('debug', { what = 'ntp_lost' })
 				end
+				send_pending_crash()
 			end
 		elseif which == 'tick' then
 			local visits = State.ui_visits:drain(State.base_time)
@@ -550,6 +679,9 @@ local function main()
 			end
 			publish_all(values)
 			prune_idle_endpoints(now())
+			send_pending_crash()
+		elseif which == 'crash' then
+			send_pending_crash()
 		end
 	end
 
@@ -584,9 +716,11 @@ function M.start(conn, opts)
 	State.svc              = svc
 	State.name             = name
 	State.http_ref         = http_sdk.new_ref(conn, opts.http_service_id or 'main')
-	State.http_send_ch     = http_m.start_http_publisher(State.http_ref, function(level, payload)
-		svc:obs_log(level, payload)
-	end)
+	local function publisher_log(level, payload) svc:obs_log(level, payload) end
+	State.http_send_ch     = http_m.start_http_publisher(State.http_ref, publisher_log)
+	-- A publisher sends one payload at a time and retries ordinary telemetry for ever
+	-- on a network failure, so crash records can't wait in the same queue.
+	State.crash_send_ch    = http_m.start_http_publisher(State.http_ref, publisher_log)
 	State.pipelines_map    = {}
 	State.metric_states    = {}
 	State.endpoint_to_pipe = {}
@@ -598,6 +732,14 @@ function M.start(conn, opts)
 	State.cloud_config     = nil
 	State.base_time        = types.new.BaseTime(now_real(), now())
 	State.fs_cap           = nil
+	State.crash_store      = opts.crash_store or crash_record.new()
+	State.crash_inflight   = false
+	State.crash_last_try   = -math.huge
+	State.crash_due        = math.huge
+	State.crash_wake       = pulse.new()
+	State.config_data      = nil
+	-- Monotonic time is time since boot, so this tells a restart from a fresh boot.
+	State.baseline_until   = (now() >= RESTART_MIN_UPTIME_S) and (now() + RESTART_BASELINE_WINDOW_S) or nil
 
 	fibers.current_scope():finally(function()
 		local _, primary = fibers.current_scope():status()

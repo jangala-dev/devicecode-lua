@@ -80,4 +80,89 @@ function T.start_http_publisher_sends_expected_request()
 	assert(ok_run, tostring(run_err))
 end
 
+-- The cloud's answer reaches the sender, so a crash record stays on file if refused.
+local function on_result_for_status(status)
+	local original_http_module = package.loaded['services.metrics.http']
+	package.loaded['services.metrics.http'] = nil
+	local answer = nil
+
+	local ok_run, run_err = pcall(function()
+		runfibers.run(function(scope)
+			local clock = virtual_time.install({ monotonic = 0, realtime = 1700000000 })
+			scope:finally(function() clock:restore() end)
+
+			local http_mod     = require 'services.metrics.http'
+			local worker_scope = scope:child()
+			local spawn_ok, spawn_err = worker_scope:spawn(function()
+				local ch = http_mod.start_http_publisher(make_fake_ref({}, status))
+				perform(ch:put_op({
+					uri = 'http://x/', auth = 'Thing k', body = '[]',
+					on_result = function(accepted) answer = accepted end,
+				}))
+			end)
+			assert(spawn_ok, tostring(spawn_err))
+
+			time_harness.flush_ticks(20)
+			worker_scope:cancel('test done')
+			perform(worker_scope:join_op())
+		end, { timeout = 2.0 })
+	end)
+
+	package.loaded['services.metrics.http'] = original_http_module
+	if not ok_run then error(run_err, 0) end
+	return answer
+end
+
+function T.on_result_reports_an_accepted_send()
+	assert(on_result_for_status('202') == true, 'expected accepted')
+end
+
+function T.on_result_reports_a_refused_send()
+	assert(on_result_for_status('503') == false, 'expected refused')
+end
+
+-- A one-shot send doesn't retry: the sender paces its own retries, and metered
+-- SIMs shouldn't pay for a crash record again every few seconds during an outage.
+function T.one_shot_send_reports_a_network_failure_without_retrying()
+	local original_http_module = package.loaded['services.metrics.http']
+	package.loaded['services.metrics.http'] = nil
+	local answer, attempts = nil, 0
+
+	local ok_run, run_err = pcall(function()
+		runfibers.run(function(scope)
+			local clock = virtual_time.install({ monotonic = 0, realtime = 1700000000 })
+			scope:finally(function() clock:restore() end)
+
+			local ref = {}
+			function ref:exchange_op()
+				attempts = attempts + 1
+				return op.always(nil, 'network unreachable')
+			end
+
+			local http_mod     = require 'services.metrics.http'
+			local worker_scope = scope:child()
+			assert(worker_scope:spawn(function()
+				local ch = http_mod.start_http_publisher(ref)
+				perform(ch:put_op({
+					uri = 'http://x/', auth = 'Thing k', body = '[]', one_shot = true,
+					on_result = function(accepted) answer = accepted end,
+				}))
+			end))
+
+			-- A retry would come after 1 s, and again 2 s after that.
+			for _ = 1, 8 do
+				clock:advance(0.5)
+				time_harness.flush_ticks(20)
+			end
+			worker_scope:cancel('test done')
+			perform(worker_scope:join_op())
+		end, { timeout = 10.0 }) -- on the virtual clock, which this spec advances
+	end)
+
+	package.loaded['services.metrics.http'] = original_http_module
+	if not ok_run then error(run_err, 0) end
+	assert(attempts == 1, 'expected one attempt, got ' .. attempts)
+	assert(answer == false, 'expected the failure to be reported, got ' .. tostring(answer))
+end
+
 return T
