@@ -102,11 +102,13 @@ build using tar over SSH, stops devicecode, resets and rediscovers the modems,
 and restarts the service. It waits for every target modem to connect, then reads
 `CGDCONT` and `CGACT` and checks every active CID against that modem's effective
 config. It repeats the build/deploy/check cycle with `IP`, then `IPV4V6`.
-The source configs are untouched; the build output preserves the box's existing
-config and changes only the GSM PDP fields for the two test phases.
+The source configs are untouched. Each test phase starts from the config the
+service is actually running (the saved config if there is one, otherwise the
+bootstrap config) and changes only the GSM PDP fields.
 
-By default a final cycle restores the original per-modem config and checks it
-again, keeping the new code deployed. `--keep-final-config` instead leaves the
+By default a final cycle puts the original bootstrap and saved configs back before
+restarting the service, then checks the per-modem config again, keeping the new
+code deployed. `--keep-final-config` instead leaves the
 second test config active. `--first`, `--second`, `--timeout`, `--runtime`,
 `--service`, `--target`, and `--build-command` customize the run.
 
@@ -120,9 +122,9 @@ Private build, service, AT, and failure logs plus `results.json` are saved under
 `tests/integration/onbox/modem_pdp/artifacts/pdp-box-<timestamp>` in the mounted
 workspace (override with `--artifacts`). This directory is ignored by Git. Config/build
 artifacts may contain credentials: the directory and files have private permissions.
-A runtime backup is retained in `/tmp/devicecode-pdp-box-<timestamp>` on the
-box. Failures print relevant logs and attempt to restore the original runtime
-and config. The saved service stream is included even if the box's syslog ring
+The original runtime is backed up to `original-runtime.tar.gz` in that artifacts
+directory; the box's temporary workspace is removed during cleanup. Failures print
+relevant logs and attempt to restore the original runtime and config. The saved service stream is included even if the box's syslog ring
 has rolled over. A rollback failure is reported explicitly with the backup path.
 
 Offline checks for the runner:
