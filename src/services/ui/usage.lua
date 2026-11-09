@@ -10,6 +10,32 @@ function M.valid(value)
 	return type(value) == 'table' and valid_id(value.visitor_id) and valid_id(value.visit_id)
 end
 
+local VIA = { ip = true, name = true, other = true }
+M.UI_NAME = 'config.bigbox.home'
+
+local function ipv4(host)
+	local parts = { host:match('^(%d+)%.(%d+)%.(%d+)%.(%d+)$') }
+	if #parts ~= 4 then return false end
+	for _, part in ipairs(parts) do
+		if #part > 3 or tonumber(part) > 255 then return false end
+	end
+	return true
+end
+
+--- Which address the UI was reached at, from the request's Host header: 'name' for
+--- the box's UI name, 'ip' for an address, otherwise 'other'. Browser storage is per
+--- address, so this tells apart visitors who use each one. The host itself is not sent.
+function M.via_from_host(host)
+	if type(host) ~= 'string' then return 'other' end
+	host = host:lower()
+	if host:sub(1, 1) == '[' then
+		return host:match('^%[[%x:%.]+%]:?%d*$') and 'ip' or 'other'
+	end
+	host = host:gsub(':%d+$', ''):gsub('%.$', '')
+	if host == M.UI_NAME then return 'name' end
+	return ipv4(host) and 'ip' or 'other'
+end
+
 function M.new()
 	local pending, recent = {}, {}
 	local buffer = {}
@@ -23,7 +49,10 @@ function M.new()
 			-- Also collapse simultaneous tabs that generated different visit IDs.
 			if record.visitor_id == value.visitor_id then return false end
 		end
-		local record = { visitor_id = value.visitor_id, visit_id = value.visit_id, time = now }
+		local record = {
+			visitor_id = value.visitor_id, visit_id = value.visit_id, time = now,
+			via = VIA[value.via] and value.via or 'other',
+		}
 		if #pending == 128 then table.remove(pending, 1) end
 		if #recent == 256 then table.remove(recent, 1) end
 		pending[#pending + 1] = record
@@ -39,6 +68,7 @@ function M.new()
 				visitor_id = record.visitor_id,
 				visit_id = record.visit_id,
 				visited_at_ms = math.floor((base_time.real + record.time - base_time.mono) * 1000),
+				via = record.via,
 			}
 		end
 		pending = {}

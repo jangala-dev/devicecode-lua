@@ -26,6 +26,32 @@ function tests.batches_multiple_visits_and_deduplicates_across_flushes()
 	assert(buffer:add(visit(4, 1), 1810), 'new visit after thirty minutes')
 end
 
+-- Browser storage is per address, so reports say which address was used.
+function tests.classifies_the_address_used()
+	local cases = {
+		['config.bigbox.home'] = 'name', ['CONFIG.BigBox.Home.'] = 'name', ['config.bigbox.home:80'] = 'name',
+		['172.28.8.1'] = 'ip', ['172.28.8.1:8080'] = 'ip', ['[fd00::1]'] = 'ip', ['[fd00::1]:80'] = 'ip',
+		['example.com'] = 'other', ['999.1.1.1'] = 'other', ['172.28.8'] = 'other', [''] = 'other',
+	}
+	for host, want in pairs(cases) do
+		local got = usage.via_from_host(host)
+		assert(got == want, host .. ': expected ' .. want .. ', got ' .. tostring(got))
+	end
+	assert(usage.via_from_host(nil) == 'other')
+	assert(usage.via_from_host({}) == 'other')
+end
+
+function tests.reports_the_address_used_with_each_visit()
+	local buffer = usage.new()
+	local first, second, third = visit(1), visit(2), visit(3)
+	first.via, second.via, third.via = 'ip', 'name', 'somewhere.example'
+	assert(buffer:add(first, 10)); assert(buffer:add(second, 11)); assert(buffer:add(third, 12))
+	local batch = json.decode(buffer:drain({ real = 0, mono = 0 }))
+	assert(batch.visits[1].via == 'ip')
+	assert(batch.visits[2].via == 'name')
+	assert(batch.visits[3].via == 'other', 'only the three known values are sent')
+end
+
 function tests.drops_oldest_on_overflow()
 	local buffer = usage.new()
 	for i = 1, 300 do assert(buffer:add(visit(i), i)) end
