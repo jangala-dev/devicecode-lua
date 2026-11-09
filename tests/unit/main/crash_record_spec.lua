@@ -588,6 +588,22 @@ function T.records_with_impossible_numbers_are_dropped()
 	os.remove(path)
 end
 
+-- Only a damaged file gets near the limit, so starting again is fine.
+function T.numbering_starts_again_at_the_limit()
+	local path = temp_path()
+	local f = assert(io.open(path, 'w'))
+	f:write('{"boot_id":"boot-1","seq":2147483647,"crashes":1,"next_send":0,'
+		.. '"pending":[{"seq":2147483647,"mono":5}]}')
+	f:close()
+	for i = 1, 2 do
+		restarted(path):record_failure({ service = 'net', status = 'failed', primary = 'x' })
+		local got = restarted(path):next_pending(math.huge)
+		assert(got and got.seq == i, 'expected seq ' .. i .. ', got ' .. tostring(got and got.seq))
+		restarted(path):mark_sent(got.seq, 2100)
+	end
+	os.remove(path)
+end
+
 function T.pending_that_is_not_a_list_counts_as_empty()
 	local path = temp_path()
 	local f = assert(io.open(path, 'w'))

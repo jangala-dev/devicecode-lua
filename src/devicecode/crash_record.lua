@@ -262,6 +262,10 @@ end
 --- Add a record for this run, with log_text already redacted. The first record of a
 --- run wins.
 function Store:add(state, fields, log_text)
+	-- Only a damaged file gets this far, so drop what it held rather than lose new records.
+	if state.seq + 1 >= MAX_COUNT then
+		state.seq, state.pending = 0, {}
+	end
 	state.seq = state.seq + 1
 	local rec = {
 		seq     = state.seq,
