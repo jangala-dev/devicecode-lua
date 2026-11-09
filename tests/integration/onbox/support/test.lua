@@ -9,14 +9,14 @@ require('onbox.support.fiber_runtime').configure(repo)
 
 local total = 0
 for _, module in ipairs({ 'auth_spec', 'runner_spec' }) do
-    local tests = require('onbox.support.' .. module)
-    local names = {}
-    for name in pairs(tests) do names[#names + 1] = name end
-    table.sort(names)
-    for _, name in ipairs(names) do
-        tests[name]()
-        total = total + 1
-        print('PASS ' .. module .. '.' .. name)
-    end
+	local tests = require('onbox.support.' .. module)
+	local names = {}
+	for name in pairs(tests) do names[#names + 1] = name end
+	table.sort(names)
+	for _, name in ipairs(names) do
+		tests[name]()
+		total = total + 1
+		print('PASS ' .. module .. '.' .. name)
+	end
 end
 print(('%d shared on-box support tests passed'):format(total))

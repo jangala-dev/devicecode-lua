@@ -1,65 +1,65 @@
 local T = {}
 
 local function with_exec_supports(supports_parent_death_signal, fn)
-    local saved_exec = package.loaded['fibers.io.exec']
-    local saved_mod = package.loaded['services.hal.backends.modem.process_flags']
+	local saved_exec = package.loaded['fibers.io.exec']
+	local saved_mod = package.loaded['services.hal.backends.modem.process_flags']
 
-    package.loaded['fibers.io.exec'] = {
-        supports = function(name)
-            return name == 'parent_death_signal' and supports_parent_death_signal or false
-        end,
-    }
-    package.loaded['services.hal.backends.modem.process_flags'] = nil
+	package.loaded['fibers.io.exec'] = {
+		supports = function(name)
+			return name == 'parent_death_signal' and supports_parent_death_signal or false
+		end,
+	}
+	package.loaded['services.hal.backends.modem.process_flags'] = nil
 
-    local ok, a, b = pcall(fn)
+	local ok, a, b = pcall(fn)
 
-    package.loaded['fibers.io.exec'] = saved_exec
-    package.loaded['services.hal.backends.modem.process_flags'] = saved_mod
+	package.loaded['fibers.io.exec'] = saved_exec
+	package.loaded['services.hal.backends.modem.process_flags'] = saved_mod
 
-    if not ok then error(a, 0) end
-    return a, b
+	if not ok then error(a, 0) end
+	return a, b
 end
 
 function T.owned_monitor_flags_always_requests_process_group()
-    with_exec_supports(false, function()
-        local flags = require('services.hal.backends.modem.process_flags').owned_monitor_flags()
-        assert(flags.process_group == true)
-        assert(flags.parent_death_signal == nil)
-        assert(flags.pdeathsig == nil)
-    end)
+	with_exec_supports(false, function()
+		local flags = require('services.hal.backends.modem.process_flags').owned_monitor_flags()
+		assert(flags.process_group == true)
+		assert(flags.parent_death_signal == nil)
+		assert(flags.pdeathsig == nil)
+	end)
 end
 
 function T.owned_monitor_flags_adds_parent_death_signal_only_when_supported()
-    with_exec_supports(true, function()
-        local flags = require('services.hal.backends.modem.process_flags').owned_monitor_flags()
-        assert(flags.process_group == true)
-        assert(flags.parent_death_signal == 'TERM')
-        assert(flags.pdeathsig == nil)
-    end)
+	with_exec_supports(true, function()
+		local flags = require('services.hal.backends.modem.process_flags').owned_monitor_flags()
+		assert(flags.process_group == true)
+		assert(flags.parent_death_signal == 'TERM')
+		assert(flags.pdeathsig == nil)
+	end)
 end
 
 local function read_qmi_source()
-    local candidates = {
-        '../src/services/hal/backends/modem/modes/qmi.lua',
-        'src/services/hal/backends/modem/modes/qmi.lua',
-    }
-    for _, path in ipairs(candidates) do
-        local f = io.open(path, 'r')
-        if f then
-            local src = f:read('*a')
-            f:close()
-            return src
-        end
-    end
-    error('could not read qmi.lua')
+	local candidates = {
+		'../src/services/hal/backends/modem/modes/qmi.lua',
+		'src/services/hal/backends/modem/modes/qmi.lua',
+	}
+	for _, path in ipairs(candidates) do
+		local f = io.open(path, 'r')
+		if f then
+			local src = f:read('*a')
+			f:close()
+			return src
+		end
+	end
+	error('could not read qmi.lua')
 end
 
 function T.qmi_sim_power_cycle_commands_use_owned_process_flags()
-    local src = read_qmi_source()
-    assert(src:match('uim%-sim%-power%-off=1"[%s%S]-flags%s*=%s*process_flags%.owned_monitor_flags%(%)'),
-        'qmicli SIM power-off command must use owned process flags')
-    assert(src:match('uim%-sim%-power%-on=1"[%s%S]-flags%s*=%s*process_flags%.owned_monitor_flags%(%)'),
-        'qmicli SIM power-on command must use owned process flags')
+	local src = read_qmi_source()
+	assert(src:match('uim%-sim%-power%-off=1"[%s%S]-flags%s*=%s*process_flags%.owned_monitor_flags%(%)'),
+		'qmicli SIM power-off command must use owned process flags')
+	assert(src:match('uim%-sim%-power%-on=1"[%s%S]-flags%s*=%s*process_flags%.owned_monitor_flags%(%)'),
+		'qmicli SIM power-on command must use owned process flags')
 end
 
 return T

@@ -4,28 +4,28 @@
 local contract = require "services.hal.backends.band.contract"
 
 local BACKENDS = {
-    "services.hal.backends.band.providers.openwrt-dawn",
+	"services.hal.backends.band.providers.openwrt-dawn",
 }
 
 ---Instantiate a new backend from the first supported provider.
 ---@return table|nil  backend instance
 ---@return string     err  "" on success
 local function new()
-    for _, path in ipairs(BACKENDS) do
-        local ok, provider = pcall(require, path)
-        if ok and provider.is_supported and provider.is_supported() then
-            local backend = provider.backend.new()
-            local valid, verr = contract.validate(backend)
-            if valid then
-                return backend, ""
-            else
-                return nil, "backend " .. path .. " failed contract check: " .. verr
-            end
-        end
-    end
-    return nil, "no supported band backend found on this device"
+	for _, path in ipairs(BACKENDS) do
+		local ok, provider = pcall(require, path)
+		if ok and provider.is_supported and provider.is_supported() then
+			local backend = provider.backend.new()
+			local valid, verr = contract.validate(backend)
+			if valid then
+				return backend, ""
+			else
+				return nil, "backend " .. path .. " failed contract check: " .. verr
+			end
+		end
+	end
+	return nil, "no supported band backend found on this device"
 end
 
 return {
-    new = new,
+	new = new,
 }
