@@ -616,14 +616,16 @@ function Process:_launch(command, opts, background, on_handle)
     local leases_retired = false
     local spawned = false
 
-    local function finish_gate(poison)
+    -- Failed containment poisons this Process in the shutdown helpers, not the
+    -- shared gate: the independent recovery Process must still be able to launch.
+    -- retire_leases() separately poisons the gate when credential FD state is unsafe.
+    local function finish_gate()
         local errors = {}
         if not leases_retired then
             leases_retired = true
             local retired, retire_err = pcall(function() retire_leases(leases) end)
             if not retired then errors[#errors + 1] = tostring(retire_err) end
         end
-        if poison then poison_launch_gate(poison) end
         if gate_held then release_launch_gate(gate_token); gate_held = false end
         if #errors > 0 then error(table.concat(errors, '\n'), 0) end
     end
@@ -712,9 +714,7 @@ function Process:_launch(command, opts, background, on_handle)
             assert(#cleanup_errors == 0, table.concat(cleanup_errors, '\n'))
         end
     end)
-    local containment_error = spawned and not cleaned
-        and ('Launch containment failed: ' .. tostring(cleanup_err)) or nil
-    local finalized, final_err = pcall(finish_gate, containment_error)
+    local finalized, final_err = pcall(finish_gate)
     local errors = { tostring(launch_err) }
     if not cleaned then errors[#errors + 1] = 'Launch cleanup failed: ' .. tostring(cleanup_err) end
     if not finalized then errors[#errors + 1] = 'Credential cleanup failed: ' .. tostring(final_err) end
@@ -937,7 +937,7 @@ function Process:start(command, log_path, input_path, opts)
                 assert(unistd.rmdir(workspace))
             end)
             if not contained then
-                poison_launch_gate(contain_err)
+                self:_poison(contain_err)
                 errors[#errors + 1] = 'Provisional process retained: ' .. tostring(contain_err)
             end
         elseif workspace then

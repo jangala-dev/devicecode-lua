@@ -20,6 +20,12 @@ Imports use the `onbox.support.*` namespace.
 for each test. `runner.open()` checks local tools, prompts when `--ask-pass` is
 selected, and creates a session exposing `process`, `ssh` and `logs`.
 The file-password and SSH-key modes use `--password-file` and `--ssh-key-auth`.
+Before any test mutation, the runner logs the SSH route, hostname, hardware
+revision, machine ID, device-tree serial when available, and negotiated SSH
+host-key fingerprint to stderr and `box-identity.log`. It then asks the operator
+to confirm the connected box. Pass `--yes` for unattended runs to log the same
+identity and skip only that confirmation prompt. The default route remains
+`root@172.28.100.1`.
 
 Use `box:phase(label, body)` for automatic log capture around a phase and
 `box:run(body, hooks)` for the full test lifecycle. Register resource cleanup

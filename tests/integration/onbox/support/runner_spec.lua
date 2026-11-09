@@ -68,6 +68,7 @@ function tests.common_arguments_extend_without_test_specific_defaults()
     local args = runner.parse_args({}, repo, here)
     equal(args.password_file, repo .. '/boxkey')
     equal(args.ask_pass, false)
+    equal(args.yes, false)
     equal(args.build_command, 'make build-all')
     equal(args.first, nil)
     equal(args.keep_final_config, nil)
@@ -78,6 +79,8 @@ function tests.common_arguments_extend_without_test_specific_defaults()
     equal(args.custom, 'value')
     equal(args.leave_config, true)
     equal(args.password_file, nil)
+    args = runner.parse_args({ '--yes' }, repo, here)
+    equal(args.yes, true)
     rejects(function() runner.parse_args({ '--timeout', '0' }, repo, here) end, 'Timeout must be positive')
     rejects(function() runner.parse_args({ '--runtime', '/' }, repo, here) end, 'Runtime must name')
     rejects(function() runner.parse_args({ '--host' }, repo, here) end, 'Missing value')
@@ -85,6 +88,44 @@ function tests.common_arguments_extend_without_test_specific_defaults()
         { '--ask-pass', '--password-file', 'unused' }, { '--password-file', 'unused', '--ask-pass' } }) do
         rejects(function() runner.parse_args(flags, repo, here) end, 'Choose one of')
     end
+end
+
+---@return nil
+function tests.target_identity_is_logged_and_confirmation_can_be_skipped_or_required()
+    with_session(function(box)
+        box.ssh.run = function()
+            return { code = 0, stderr = '', stdout = table.concat({
+                'hostname=lab-box',
+                'hardware_revision=bigbox-v1',
+                'machine_id=0123456789abcdef',
+                'serial=BB-42',
+            }, '\n') .. '\n' }
+        end
+        box.process.run = function()
+            return { code = 0, stderr = '', stdout = '256 SHA256:example-key box (ED25519)\n' }
+        end
+        local output = { content = '' }
+        function output:write(value) self.content = self.content .. value end
+        function output:flush() end
+
+        box.args.yes = true
+        local identity = box:confirm_target(nil, output)
+        equal(identity.route, 'root@172.28.100.1')
+        equal(identity.hostname, 'lab-box')
+        equal(identity.ssh_host_key, 'SHA256:example-key')
+        assert(output.content:find('machine ID: 0123456789abcdef', 1, true))
+        assert(output.content:find('[y/N]', 1, true) == nil)
+        equal(util.read(box.artifacts .. '/box-identity.log'), output.content)
+
+        box.args.yes = false
+        output.content = ''
+        local reader = { read = function() return 'yes' end }
+        box:confirm_target(reader, output)
+        assert(output.content:find('[y/N]', 1, true))
+
+        reader = { read = function() return 'no' end }
+        rejects(function() box:confirm_target(reader, output) end, 'On-box test cancelled')
+    end)
 end
 
 ---@return nil
@@ -1050,6 +1091,59 @@ function tests.identity_failure_before_feeder_uses_bounded_command_cleanup_only(
     equal(stdin_closed, true)
     equal(negative_signals, 0)
     assert(owned.poison, 'Unidentified command cleanup did not poison its Process')
+end
+
+---@return nil
+function tests.interrupted_launch_before_identity_keeps_recovery_gate_available()
+    with_session(function(box)
+        local signal = signals.signal
+        local interrupt_handler
+        signals.signal = function(sig, handler, flags)
+            if sig == signals.SIGINT and type(handler) == 'function' and not interrupt_handler then
+                interrupt_handler = handler
+            end
+            return signal(sig, handler, flags)
+        end
+        box.logs.stop = function() end
+        local read_handoff = box.process._read_handoff
+        local interrupted = false
+        box.process._read_handoff = function(self, handle)
+            local pgid = read_handoff(self, handle)
+            if pgid and not interrupted then
+                interrupted = true
+                assert(interrupt_handler, 'SIGINT handler was not installed')
+                interrupt_handler()
+                return nil
+            end
+            return pgid
+        end
+        local rolled_back = false
+        local ok, code = pcall(function()
+            return box:run(function()
+                box.process:run('sleep 30')
+            end, {
+                diagnostics = function() end,
+                rollback = function()
+                    equal(box.recovery_process:run('true').code, 0)
+                    rolled_back = true
+                end,
+            })
+        end)
+        box.process._read_handoff = read_handoff
+        signals.signal = signal
+        assert(ok, code)
+        equal(code, 1)
+        equal(interrupted, true)
+        equal(rolled_back, true)
+        assert(box.process.poison, 'Unidentified launch did not poison its owning Process')
+
+        -- The leader was stopped through its command handle, but the deliberately
+        -- unidentified handle remains registered for diagnosis. Release its local
+        -- test resources so this fault-injection case cannot affect later specs.
+        fiber_runtime.get().fibers.run(function()
+            for handle in pairs(box.process.active) do box.process:_close_handle(handle, true) end
+        end)
+    end)
 end
 
 ---@return nil
