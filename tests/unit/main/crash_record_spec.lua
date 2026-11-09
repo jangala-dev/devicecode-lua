@@ -535,6 +535,43 @@ function T.a_corrupt_file_does_not_stop_devicecode()
 	os.remove(path)
 end
 
+-- Valid JSON that this module didn't write, such as a hand edit or a damaged file.
+function T.records_of_the_wrong_shape_are_dropped()
+	local path = temp_path()
+	local f = assert(io.open(path, 'w'))
+	f:write('{"boot_id":"boot-1","seq":"x","crashes":null,"next_send":"soon","failures":{},'
+		.. '"pending":[true,"x",{"seq":"2","mono":5},{"seq":3},{"seq":4,"mono":1e999},'
+		.. '{"seq":5,"mono":900,"kind":"service_failed","reason":7,"log":"tail"}]}')
+	f:close()
+
+	local store = restarted(path)
+	local rec = store:next_pending(2000)
+	assert(rec, 'expected the one good record')
+	assert(rec.seq == 5 and rec.mono == 900, 'seq ' .. tostring(rec.seq) .. ' mono ' .. tostring(rec.mono))
+	assert(rec.kind == 'service_failed', 'kind: ' .. tostring(rec.kind))
+	assert(rec.reason == nil, 'a reason that is not text should be dropped')
+	assert(rec.log == 'tail', 'log: ' .. tostring(rec.log))
+	assert(store:next_send_at() == 0, 'expected it to be due now')
+
+	store:mark_failed(2000)
+	assert(store:next_send_at() == 2000 + crash_record.RETRY_MIN_S, 'failures should count from zero')
+	store:mark_sent(5, 2100)
+	assert(store:next_send_at() == nil, 'expected nothing pending')
+
+	store:record_failure({ service = 'net', status = 'failed', primary = 'x' })
+	assert(restarted(path):next_pending(math.huge).seq == 6, 'new records should follow the kept ones')
+	os.remove(path)
+end
+
+function T.pending_that_is_not_a_list_counts_as_empty()
+	local path = temp_path()
+	local f = assert(io.open(path, 'w'))
+	f:write('{"boot_id":"boot-1","seq":1,"crashes":1,"next_send":0,"pending":{"a":{"seq":1,"mono":5}}}')
+	f:close()
+	assert(restarted(path):next_pending(2000) == nil, 'expected nothing pending')
+	os.remove(path)
+end
+
 function T.an_unwritable_path_does_not_stop_devicecode()
 	local store = new_store('/nonexistent-dir/devicecode-crash.json')
 	store:begin_run()

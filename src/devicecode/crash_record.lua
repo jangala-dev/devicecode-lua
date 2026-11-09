@@ -188,6 +188,28 @@ function M.new(opts)
 	}, Store)
 end
 
+local function finite(v)
+	return type(v) == 'number' and v == v and v > -math.huge and v < math.huge
+end
+
+local function count(v)
+	return finite(v) and v >= 0 and math.floor(v) or 0
+end
+
+local RECORD_TEXT = { kind = M.MAX_REASON, service = M.MAX_REASON, status = M.MAX_REASON,
+	reason = M.MAX_REASON, log = M.MAX_LOG }
+
+--- A record from file, in the shape add() writes, or nil. The file is only JSON, so
+--- anything else in it must not reach the sender.
+local function clean_record(rec)
+	if type(rec) ~= 'table' or not finite(rec.seq) or not finite(rec.mono) then return nil end
+	local out = { seq = rec.seq, mono = rec.mono }
+	for field, max in pairs(RECORD_TEXT) do
+		if type(rec[field]) == 'string' then out[field] = rec[field]:sub(1, max) end
+	end
+	return out
+end
+
 function Store:load()
 	local state
 	local f = io.open(self.path, 'r')
@@ -198,7 +220,25 @@ function Store:load()
 	if type(state) ~= 'table' or state.boot_id ~= self.boot_id or type(state.pending) ~= 'table' then
 		return { boot_id = self.boot_id, seq = 0, crashes = 0, pending = {}, next_send = 0 }
 	end
-	return state
+
+	local out = {
+		boot_id  = self.boot_id,
+		seq      = count(state.seq),
+		crashes  = count(state.crashes),
+		failures = count(state.failures),
+		running  = state.running == true,
+		recorded = state.recorded == true,
+		pending  = {},
+	}
+	for _, rec in ipairs(state.pending) do
+		rec = clean_record(rec)
+		if rec and #out.pending < M.MAX_PENDING then
+			out.pending[#out.pending + 1] = rec
+			if rec.seq > out.seq then out.seq = math.floor(rec.seq) end
+		end
+	end
+	out.next_send = finite(state.next_send) and state.next_send or 0
+	return out
 end
 
 function Store:save(state)

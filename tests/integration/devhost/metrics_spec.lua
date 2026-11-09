@@ -374,6 +374,11 @@ local function with_pending_crash(synced, body, opts)
 	local earlier = new_store(500)
 	earlier:begin_run()
 	earlier:record_failure({ service = 'gsm', status = 'failed', primary = 'gsm.lua:1: boom' })
+	if opts.file then
+		local f = assert(io.open(path, 'w'))
+		f:write(opts.file)
+		f:close()
+	end
 	for i = 2, opts.records or 1 do
 		local later = new_store(500 + i)
 		later:begin_run()
@@ -542,6 +547,18 @@ function T.crash_sends_stay_spaced_when_the_store_cannot_save()
 		assert(#sent >= 2, 'expected it to keep trying, got ' .. #sent)
 		assert(#sent <= 5, 'expected sends at least 5s apart, got ' .. #sent)
 	end, { timeout = 3000, publish_period = 3600 })
+end
+
+-- Valid JSON with records of the wrong shape mustn't stop metrics.
+function T.a_damaged_crash_file_does_not_stop_metrics()
+	with_pending_crash(true, function(sent)
+		assert(#sent == 1, 'expected the good record to be sent, got ' .. #sent)
+		assert(senml_field(sent[1], 'seq').v == 5, 'expected the good record')
+		assert(senml_field(sent[1], 'kind').vs == 'service_failed', 'kind')
+	end, {
+		file = '{"boot_id":"boot-1","seq":5,"crashes":1,"next_send":0,'
+			.. '"pending":[true,{"seq":4},{"seq":5,"mono":550,"kind":"service_failed"}]}',
+	})
 end
 
 function T.crash_record_waits_for_time_sync()
