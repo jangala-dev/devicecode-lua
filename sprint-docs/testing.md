@@ -1,5 +1,74 @@
 # Testing
 
+## Shared support for physical box tests
+
+Reusable Lua helpers live in `tests/integration/onbox/support/`. Run inside the
+devcontainer and add `tests/integration/?.lua` and `src/?.lua` to `package.path`.
+Imports use the `onbox.support.*` namespace.
+
+| Module | Responsibility |
+| --- | --- |
+| `auth` | Hidden password entry and inherited password pipes. |
+| `process` | Local commands, timeouts, captured output and background process groups. |
+| `ssh` | Remote commands, authentication and uploads over SSH stdin. |
+| `logs` | Continuous syslog capture, configurable filters and failure diagnostics. |
+| `devicecode` | Dependencies, build/package/deploy, service control and config/runtime snapshots. |
+| `runner` | Common arguments, private artifacts, signals, phases and cleanup. |
+| `modem` | Discovery by IMEI, state waits, reset/rediscovery and guarded AT probing. |
+
+`runner.parse_args()` accepts extra defaults, value options and boolean flags
+for each test. `runner.open()` checks local tools, prompts when `--ask-pass` is
+selected, and creates a session exposing `process`, `ssh` and `logs`.
+The file-password and SSH-key modes use `--password-file` and `--ssh-key-auth`.
+Before any test mutation, the runner logs the SSH route, hostname, hardware
+revision, machine ID, device-tree serial when available, and negotiated SSH
+host-key fingerprint to stderr and `box-identity.log`. It then asks the operator
+to confirm the connected box. Pass `--yes` for unattended runs to log the same
+identity and skip only that confirmation prompt. The default route remains
+`root@172.28.100.1`.
+
+Use `box:phase(label, body)` for automatic log capture around a phase and
+`box:run(body, hooks)` for the full test lifecycle. Register resource cleanup
+with `box:defer(callback)`; callbacks run in reverse order, even after failure.
+Failure hooks can collect extra diagnostics and perform test-specific rollback.
+The shared runner does not choose when to deploy, reset devices or restore config.
+Keep assertions and config transformations in the individual test.
+
+Create `devicecode.new(box)` to manage a runtime. `prepare()` conclusively
+snapshots the bootstrap and persistent config before dependency installation;
+SSH, timeout and permission failures are fatal and are not treated as an absent
+persistent file. `backup()` validates a remote archive, downloads it into the
+private artifact directory and atomically commits the local recovery copy before
+mutation is allowed.
+`build(label, config)` optionally replaces only the staged config. `deploy()`
+stops the service and unpacks the archive, while `write_config()` updates both
+config locations. `restore_runtime()` restores the snapshot and leaves the
+service stopped so the caller can recover devices before restarting it.
+`restore_persistent()` also restores the absence of an originally missing file.
+Runtime rollback replaces the deployed tree from the committed backup instead
+of overlaying it, so files introduced by a failed deployment are removed.
+Configuration uploads use a sibling temporary file and same-filesystem rename;
+an interrupted upload cannot truncate the active configuration.
+
+Preparation may run `opkg update` and install missing test dependencies. Those
+package and package-list changes are intentionally non-transactional and persist
+after the test; runtime rollback does not remove packages. Each session removes
+its exact `/tmp/devicecode-<artifact-id>` workspace during cleanup when the box
+remains reachable. An unreachable box can retain that directory and the cleanup
+failure is reported.
+
+`modem.new(box)` is optional for modem tests. It keeps selection policy in the
+caller, waits by stable IMEI across changing mmcli IDs, and accepts a list of AT
+commands for probing. Its helper briefly pauses ModemManager with a trap and
+watchdog to resume it. AT assertions belong in the calling test.
+
+Run the support checks without a box or password file:
+
+```bash
+devcontainer exec --workspace-folder . bash -lc \
+  'luajit tests/integration/onbox/support/test.lua'
+```
+
 ## Unit Testing
 
 If we want to 100% unit test our code we will need to think about refactoring around local functions within modules that our
