@@ -22,6 +22,26 @@ local function ipv4(host)
 	return true
 end
 
+local function ipv6(addr)
+	local head, tail = addr, nil
+	local at = addr:find('::', 1, true)
+	if at then
+		if addr:find('::', at + 1, true) then return false end
+		head, tail = addr:sub(1, at - 1), addr:sub(at + 2)
+	end
+	local count = 0
+	for _, part in ipairs({ head, tail }) do
+		if part ~= '' then
+			for group in (part .. ':'):gmatch('([^:]*):') do
+				if not group:match('^%x%x?%x?%x?$') then return false end
+				count = count + 1
+			end
+		end
+	end
+	if at then return count <= 7 end
+	return count == 8
+end
+
 --- Which address the UI was reached at, from the request's Host header: 'name' for
 --- the box's UI name, 'ip' for an address, otherwise 'other'. Browser storage is per
 --- address, so this tells apart visitors who use each one. The host itself is not sent.
@@ -29,7 +49,9 @@ function M.via_from_host(host)
 	if type(host) ~= 'string' then return 'other' end
 	host = host:lower()
 	if host:sub(1, 1) == '[' then
-		return host:match('^%[[%x:%.]+%]:?%d*$') and 'ip' or 'other'
+		local addr, rest = host:match('^%[([%x:]+)%](.*)$')
+		local port_ok = rest == '' or (rest and rest:match('^:%d+$'))
+		return (addr and port_ok and ipv6(addr)) and 'ip' or 'other'
 	end
 	host = host:gsub(':%d+$', ''):gsub('%.$', '')
 	if host == M.UI_NAME then return 'name' end

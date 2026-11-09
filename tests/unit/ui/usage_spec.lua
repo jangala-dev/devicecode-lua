@@ -31,7 +31,10 @@ function tests.classifies_the_address_used()
 	local cases = {
 		['config.bigbox.home'] = 'name', ['CONFIG.BigBox.Home.'] = 'name', ['config.bigbox.home:80'] = 'name',
 		['172.28.8.1'] = 'ip', ['172.28.8.1:8080'] = 'ip', ['[fd00::1]'] = 'ip', ['[fd00::1]:80'] = 'ip',
+		['[::1]'] = 'ip', ['[2001:db8::8:800:200c:417a]:443'] = 'ip', ['[1:2:3:4:5:6:7:8]'] = 'ip',
 		['example.com'] = 'other', ['999.1.1.1'] = 'other', ['172.28.8'] = 'other', [''] = 'other',
+		['[1234]'] = 'other', ['[::::]'] = 'other', ['[fd00::1]80'] = 'other', ['[1:2:3:4:5:6:7:8:9]'] = 'other',
+		['[1::2::3]'] = 'other', ['[12345::1]'] = 'other', ['[]'] = 'other', ['172.28.8.1:'] = 'other',
 	}
 	for host, want in pairs(cases) do
 		local got = usage.via_from_host(host)
