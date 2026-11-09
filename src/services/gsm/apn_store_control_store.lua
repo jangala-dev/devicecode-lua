@@ -68,6 +68,21 @@ function Store:load_op()
 	end)
 end
 
+-- Resolves to true if the key exists, even holding an empty list, and false if it doesn't.
+function Store:exists_op()
+	return fibers.run_scope_op(function ()
+		local opts, oerr = cap_args.new.ControlStoreGetOpts(self._key)
+		if not opts then return nil, oerr or 'invalid_control_store_get_opts' end
+		local body, err = fibers.perform(call_op(self, 'get', opts))
+		if body ~= nil then return true, nil end
+		if tostring(err or '') == 'not found' then return false, nil end
+		return nil, err or 'control_store_get_failed'
+	end):wrap(function(st, rep, exists, err)
+		if st ~= 'ok' then return nil, tostring(exists or err or rep) end
+		return exists, err
+	end)
+end
+
 function Store:save_op(records)
 	return fibers.run_scope_op(function ()
 		local list, lerr = apn_model.normalise_list(records)

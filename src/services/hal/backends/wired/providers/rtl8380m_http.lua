@@ -476,7 +476,8 @@ end
 local function parse_vlan_membership_string(s)
 	local out = {}
 	s = tostring(s or '')
-	for token in s:gmatch('%S+') do
+	-- Switches list memberships separated by spaces or by ", " (e.g. "1UP, 4T, 8T").
+	for token in s:gmatch('[^%s,]+') do
 		local vlan, flags = token:match('^(%d+)([A-Z]+)$')
 		if vlan then
 			local rec = { vlan = tonumber(vlan), raw = token }

@@ -30,19 +30,15 @@ local pulse = require "fibers.pulse"
 ---@field initialised boolean
 ---@field caps_applied boolean
 ---@field state_pulse Pulse
+---@field signal_config_pulse Pulse
 ---@field sim_inserted_pulse Pulse
 ---@field sim_state_ch Channel
+---@field card_state string?
+---@field signal_poll_interval number?
 ---@field log Logger
+---@field card_state ModemState?
 local Modem = {}
 Modem.__index = Modem
-
-local function list_to_map(list)
-    local map = {}
-    for _, value in ipairs(list) do
-        map[value] = true
-    end
-    return map
-end
 
 ---- Constant Definitions ----
 local D_LOG_EMITTER = false
@@ -51,73 +47,119 @@ local DEFAULT_STOP_TIMEOUT = 5
 local LISTEN_TRIGGER_INTERVAL = 1
 
 local CONTROL_Q_LEN = 8
+local MODEM_INFO_SCHEMA = 'devicecode.hal.modem.info/1'
+local MODEM_SIGNAL_SCHEMA = 'devicecode.hal.modem.signal/1'
 
-local GROUP_FIELDS = {
-    identity = {
-        "imei",
-        "drivers",
-        "plugin",
-        "model",
-        "revision",
-        "firmware",
-    },
-    ports = {
-        "device",
-        "primary_port",
-        "at_ports",
-        "qmi_ports",
-        "net_ports",
-    },
-    sim = {
-        "sim",
-        "iccid",
-        "imsi",
-        "gid1",
-        "sim_lock",
-        "sim_lock_retries",
-        "modem_state",
-    },
-    network = {
-        "access_techs",
-        "operator",
-        "mcc",
-        "mnc",
-        "active_band_class",
-    },
-    signal = {
-        "signal",
-    },
-    traffic = {
-        "rx_bytes",
-        "tx_bytes",
-    },
+local STATIC_GROUPS = {
+	identity = true,
+	ports = true,
 }
 
-local FIELD_TO_GROUP = {}
-for group_name, fields in pairs(GROUP_FIELDS) do
-    for _, field in ipairs(fields) do
-        FIELD_TO_GROUP[field] = group_name
-    end
+local SIGNAL_ACTIVE_STATES = {
+	registered = true,
+	connecting = true,
+	connected = true,
+}
+
+local function signal_polling_active(state)
+	return SIGNAL_ACTIVE_STATES[state] == true
 end
 
+---@class ModemInfoGroup
+---@field fields string[]
+---@field does_emit boolean
+
+---@type table<string, ModemInfoGroup>
+local GROUP_FIELDS = {
+	modes = {
+		does_emit = false,
+		fields = { "supported_modes", "current_modes" },
+	},
+	identity = {
+		does_emit = true,
+		fields = {
+			"imei",
+			"drivers",
+			"plugin",
+			"model",
+			"revision",
+			"firmware",
+		},
+	},
+	ports = {
+		does_emit = true,
+		fields = {
+			"device",
+			"primary_port",
+			"at_ports",
+			"qmi_ports",
+			"net_ports",
+		},
+	},
+	sim = {
+		does_emit = true,
+		fields = {
+			"sim",
+			"iccid",
+			"imsi",
+			"gid1",
+			"sim_lock",
+			"sim_lock_retries",
+			"modem_state",
+		},
+	},
+	network = {
+		does_emit = true,
+		fields = {
+			"access_techs",
+			"operator",
+			"mcc",
+			"mnc",
+			"active_band_class",
+		},
+	},
+	signal = {
+		does_emit = true,
+		fields = {
+			"signal",
+		},
+	},
+	traffic = {
+		does_emit = true,
+		fields = {
+			"rx_bytes",
+			"tx_bytes",
+		},
+	},
+	pdp = { fields = { "pdp_contexts" }, does_emit = false },
+}
+
+---@param groups table<string, ModemInfoGroup>
+---@return table<string, string> field_to_group
+---@return table<string, boolean> valid_groups
+local function normalise_groups(groups)
+	local fields, valid = {}, {}
+	for group_name, group in pairs(groups) do
+		valid[group_name] = true
+		for _, field in ipairs(group.fields) do
+			fields[field] = group_name
+		end
+	end
+	return fields, valid
+end
+
+local FIELD_TO_GROUP, VALID_GROUPS = normalise_groups(GROUP_FIELDS)
+
 local GROUP_FETCHERS = {
-    identity = "read_identity",
-    ports = "read_ports",
-    sim = "read_sim_info",
-    network = "read_network_info",
-    signal = "read_signal",
-    traffic = "read_traffic",
+	modes = "read_modes",
+	identity = "read_identity",
+	ports = "read_ports",
+	sim = "read_sim_info",
+	network = "read_network_info",
+	signal = "read_signal",
+	traffic = "read_traffic",
+	pdp = "read_pdp_info",
 }
-
-local VALID_GROUPS = list_to_map {
-    "identity",
-    "ports",
-    "sim",
-    "network",
-    "signal",
-    "traffic",
-}
-
 
 ---- Modem Utility Functions ----
 
@@ -130,18 +172,18 @@ local VALID_GROUPS = list_to_map {
 ---@return boolean ok
 ---@return string? error
 local function emit(emit_ch, imei, mode, key, data)
-    local payload, err = hal_types.new.Emit(
-        'modem',
-        imei,
-        mode,
-        key,
-        data
-    )
-    if not payload then
-        return false, err
-    end
-    emit_ch:put(payload)
-    return true
+	local payload, err = hal_types.new.Emit(
+		'modem',
+		imei,
+		mode,
+		key,
+		data
+	)
+	if not payload then
+		return false, err
+	end
+	emit_ch:put(payload)
+	return true
 end
 
 --- Utility function to return a ControlError
@@ -151,10 +193,10 @@ end
 ---@return string reason
 ---@return integer? code
 local function return_error(err, code)
-    if err == nil then
-        err = "unknown error"
-    end
-    return false, err, code
+	if err == nil then
+		err = "unknown error"
+	end
+	return false, err, code
 end
 
 --- Emit an event.
@@ -163,7 +205,7 @@ end
 ---@return boolean ok
 ---@return string? error
 function Modem:_emit_event(key, data)
-    return emit(self.cap_emit_ch, self.imei, 'event', key, data)
+	return emit(self.cap_emit_ch, self.imei, 'event', key, data)
 end
 
 --- Emit a state.
@@ -172,7 +214,7 @@ end
 ---@return boolean ok
 ---@return string? error
 function Modem:_emit_state(key, data)
-    return emit(self.cap_emit_ch, self.imei, 'state', key, data)
+	return emit(self.cap_emit_ch, self.imei, 'state', key, data)
 end
 
 --- Emit meta information.
@@ -181,7 +223,7 @@ end
 ---@return boolean ok
 ---@return string? error
 function Modem:_emit_meta(key, data)
-    return emit(self.cap_emit_ch, self.imei, 'meta', key, data)
+	return emit(self.cap_emit_ch, self.imei, 'meta', key, data)
 end
 
 --- Validate that a function is implemented
@@ -190,103 +232,148 @@ end
 ---@return boolean is_valid
 ---@return string? error
 local function validate_fn(fn, verb)
-    if fn == nil then
-        return false, tostring(verb) .. " is unimplemented"
-    end
-    if type(fn) ~= "function" then
-        return false, tostring(verb) .. " is not a function"
-    end
-    return true
+	if fn == nil then
+		return false, tostring(verb) .. " is unimplemented"
+	end
+	if type(fn) ~= "function" then
+		return false, tostring(verb) .. " is not a function"
+	end
+	return true
 end
 
 --- Trim the traceback from an error message
 ---@param err string
 ---@return string trimmed_error
 local function trim_error(err)
-    local traceback_start = err:find("\nstack traceback:")
-    if traceback_start then
-        return err:sub(1, traceback_start - 1)
-    end
-    return err
+	local traceback_start = err:find("\nstack traceback:")
+	if traceback_start then
+		return err:sub(1, traceback_start - 1)
+	end
+	return err
 end
 
 ---@param snapshot any
 ---@param field string
 ---@return any
 local function extract_group_field(snapshot, field)
-    if field == "signal" then
-        return snapshot.values
-    end
-    return snapshot[field]
+	if field == "signal" then
+		return snapshot.values
+	end
+	return snapshot[field]
 end
 
 ---@param group string
 ---@return boolean
 local function group_valid(group)
-    return VALID_GROUPS[group] == true
+	return VALID_GROUPS[group] == true
 end
 
 ---@param group string
 ---@param value any
-function Modem:_cache_group(group, value)
-    self.cache:set(group, value)
+function Modem:_cache_group(group, value, observed_at)
+	self.cache:set(group, value)
+	observed_at = observed_at or fibers.now()
+	self.group_observed_at = self.group_observed_at or {}
+	local timestamps = {}
+	local definition = GROUP_FIELDS[group]
+	for _, field in ipairs(definition and definition.fields or {}) do
+		-- A timestamp means the field was observed, including when the backend
+		-- successfully observed that the field is absent. Failed groups do not
+		-- advance these timestamps, so consumers can preserve their last value.
+		timestamps[field] = observed_at
+	end
+	self.group_observed_at[group] = timestamps
+	return timestamps
 end
 
 ---@param group string
 function Modem:_invalidate_group(group)
-    if not group_valid(group) then return end
-    if self.cache and type(self.cache.delete) == 'function' then
-        self.cache:delete(group)
-    elseif self.cache and self.cache.store then
-        self.cache.store[group] = nil
-    end
+	if not group_valid(group) then return end
+	if self.cache and type(self.cache.delete) == 'function' then
+		self.cache:delete(group)
+	elseif self.cache and self.cache.store then
+		self.cache.store[group] = nil
+	end
 end
 
 ---@param groups string[]
 function Modem:invalidate_groups(groups)
-    for _, group in ipairs(groups or {}) do
-        self:_invalidate_group(group)
-    end
+	for _, group in ipairs(groups or {}) do
+		self:_invalidate_group(group)
+	end
 end
 
 function Modem:_invalidate_dynamic()
-    self:invalidate_groups { 'sim', 'network', 'signal', 'traffic' }
+	self:invalidate_groups { 'sim', 'network', 'signal', 'traffic', 'modes' }
+end
+
+---@param opts ModemSetModesOpts
+function Modem:set_modes(opts)
+	if opts == nil or getmetatable(opts) ~= capability_args.ModemSetModesOpts then
+		return return_error('invalid options', 1)
+	end
+	local ok, err = self.backend:set_modes(opts.preferred, opts.allowed)
+	if not ok then return return_error(err, 1) end
+	self:invalidate_groups { 'modes', 'network', 'signal', 'traffic' }
+	self.state_pulse:signal()
+	return true
 end
 
 ---@param group string
 ---@param timescale number?
----@return any snapshot
+---@return ModemInfoSnapshot? snapshot
 ---@return string error
 function Modem:_get_group(group, timescale)
-    if not group_valid(group) then
-        return nil, "unsupported group: " .. tostring(group)
-    end
+	if not group_valid(group) then
+		return nil, "unsupported group: " .. tostring(group)
+	end
 
-    local cached = self.cache:get(group, timescale)
-    if cached ~= nil then
-        return cached, ""
-    end
+	if group == 'pdp' then
+		local ok, err = self:_require_pdp_state()
+		if not ok then return nil, err end
+	end
 
-    local fetcher_name = GROUP_FETCHERS[group]
-    local fetcher = self.backend and self.backend[fetcher_name] or nil
-    if type(fetcher) ~= "function" then
-        return nil, "group " .. tostring(group) .. " is not implemented by backend"
-    end
+	local cached = group ~= 'pdp' and self.cache:get(group, timescale) or nil
+	-- Firmware lookup failures are non-fatal during startup. Retry incomplete
+	-- identity reads even when callers request an indefinitely cached snapshot.
+	if cached ~= nil and not (group == 'identity' and cached.firmware == nil) then
+		return cached, "", self.group_observed_at and self.group_observed_at[group] or {}
+	end
 
-    local snapshot, err = fetcher(self.backend)
-    if err ~= "" then
-        return nil, err
-    end
+	local fetcher_name = GROUP_FETCHERS[group]
+	local fetcher = self.backend and self.backend[fetcher_name] or nil
+	if type(fetcher) ~= "function" then
+		return nil, "group " .. tostring(group) .. " is not implemented by backend"
+	end
 
-    self:_cache_group(group, snapshot)
-    return snapshot, ""
+	-- Multi-command readers can yield after observing a field. Use the start
+	-- time conservatively so completing later cannot supersede a newer event.
+	local observed_at = fibers.now()
+	local snapshot, err = fetcher(self.backend)
+	if err ~= "" then
+		return nil, err
+	end
+
+	if group == 'pdp' then return snapshot, "", {} end
+	local timestamps = self:_cache_group(group, snapshot, observed_at)
+	return snapshot, "", timestamps
+end
+
+-- State is updated by the lifecycle monitor before its event is published.
+---@return boolean allowed
+---@return string error
+function Modem:_require_pdp_state()
+	if self.card_state ~= 'disabled' and self.card_state ~= 'registered' then
+		return false, 'modem_invalid_pdp_state:' .. tostring(self.card_state or 'unknown')
+	end
+	return true, ""
 end
 
 --- Checks if an error string indicates a closed command
 ---@param err string
 ---@return boolean is_closed
 local function is_command_closed(err)
-    return err == "Command closed" or err == "Stream closed"
+	return err == "Command closed" or err == "Stream closed"
 end
 
 ---- Modem Capabilities ----
@@ -297,29 +384,29 @@ end
 ---@return any reason_or_value
 ---@return integer? code
 function Modem:get(opts)
-    if opts == nil or getmetatable(opts) ~= capability_args.ModemGetOpts then
-        return return_error("invalid options", 1)
-    end
-    local field = opts.field
-    local timescale = opts.timescale
+	if opts == nil or getmetatable(opts) ~= capability_args.ModemGetOpts then
+		return return_error("invalid options", 1)
+	end
+	local field = opts.field
+	local timescale = opts.timescale
 
-    -- Check that the field is supported
-    local group = FIELD_TO_GROUP[field]
-    if not group then
-        return return_error("unsupported field: " .. tostring(field), 1)
-    end
+	-- Check that the field is supported
+	local group = FIELD_TO_GROUP[field]
+	if not group then
+		return return_error("unsupported field: " .. tostring(field), 1)
+	end
 
-    local snapshot, err = self:_get_group(group, timescale)
-    if err ~= "" then
-        return return_error("error getting field " .. tostring(field) .. ": " .. tostring(err), 1)
-    end
+	local snapshot, err = self:_get_group(group, timescale)
+	if err ~= "" then
+		return return_error("error getting field " .. tostring(field) .. ": " .. tostring(err), 1)
+	end
 
-    local value = extract_group_field(snapshot, field)
-    if value == nil then
-        return return_error("field unavailable: " .. tostring(field), 1)
-    end
+	local value = extract_group_field(snapshot, field)
+	if value == nil then
+		return return_error("field unavailable: " .. tostring(field), 1)
+	end
 
-    return true, value
+	return true, value
 end
 
 --- Enable the modem
@@ -327,12 +414,12 @@ end
 ---@return string? reason
 ---@return integer? code
 function Modem:enable()
-    local ok, err = self.backend:enable()
-    if not ok then
-        return return_error(err, 1)
-    end
-    self:_invalidate_dynamic()
-    return true
+	local ok, err = self.backend:enable()
+	if not ok then
+		return return_error(err, 1)
+	end
+	self:_invalidate_dynamic()
+	return true
 end
 
 --- Disable the modem
@@ -340,12 +427,12 @@ end
 ---@return string? reason
 ---@return integer? code
 function Modem:disable()
-    local ok, err = self.backend:disable()
-    if not ok then
-        return return_error(err, 1)
-    end
-    self:_invalidate_dynamic()
-    return true
+	local ok, err = self.backend:disable()
+	if not ok then
+		return return_error(err, 1)
+	end
+	self:_invalidate_dynamic()
+	return true
 end
 
 --- Reset the modem
@@ -353,12 +440,49 @@ end
 ---@return string? reason
 ---@return integer? code
 function Modem:reset()
-    local ok, err = self.backend:reset()
-    if not ok then
-        return return_error(err, 1)
-    end
-    self:_invalidate_dynamic()
-    return true
+	local ok, err = self.backend:reset()
+	if not ok then
+		return return_error(err, 1)
+	end
+	self:_invalidate_dynamic()
+	return true
+end
+
+---@return boolean ok
+---@return string? reason
+---@return integer? code
+function Modem:restart()
+	return self:reset()
+end
+
+---@param opts ModemSetPdnTypeOpts
+---@return boolean ok
+---@return string reason
+---@return integer? code
+function Modem:set_pdn_type(opts)
+	if opts == nil or getmetatable(opts) ~= capability_args.ModemSetPdnTypeOpts then
+		return return_error("invalid options", 1)
+	end
+	local allowed, state_err = self:_require_pdp_state()
+	if not allowed then
+		return true, { outcome = 'rejected', dispatched = false, err = state_err }
+	end
+	local result, legacy_err = self.backend:set_pdn_type(opts.cid, opts.pdp_type)
+	if type(result) ~= 'table' then
+		-- Keep non-AT/legacy backends on the structured capability contract.
+		if result == true then
+			result = { outcome = 'applied', dispatched = true, err = legacy_err or '' }
+		else
+			result = { outcome = 'rejected', dispatched = false, err = legacy_err or 'pdp_not_supported' }
+		end
+	end
+	if (result.outcome ~= 'rejected' and result.outcome ~= 'applied' and result.outcome ~= 'uncertain')
+		or type(result.dispatched) ~= 'boolean'
+		or type(result.err) ~= 'string'
+		or (result.outcome ~= 'rejected' and not result.dispatched) then
+		return return_error('invalid PDP correction result', 1)
+	end
+	return true, result
 end
 
 --- Connect the modem
@@ -367,15 +491,15 @@ end
 ---@return string? reason
 ---@return integer? code
 function Modem:connect(opts)
-    if opts == nil or getmetatable(opts) ~= capability_args.ModemConnectOpts then
-        return return_error("invalid options", 1)
-    end
-    local ok, err = self.backend:connect(opts.connection_string)
-    if not ok then
-        return return_error(err, 1)
-    end
-    self:invalidate_groups { 'network', 'signal', 'traffic' }
-    return true
+	if opts == nil or getmetatable(opts) ~= capability_args.ModemConnectOpts then
+		return return_error("invalid options", 1)
+	end
+	local ok, err = self.backend:connect(opts.connection_string)
+	if not ok then
+		return return_error(err, 1)
+	end
+	self:invalidate_groups { 'network', 'signal', 'traffic' }
+	return true
 end
 
 --- Disconnect the modem
@@ -383,12 +507,12 @@ end
 ---@return string? reason
 ---@return integer? code
 function Modem:disconnect()
-    local ok, err = self.backend:disconnect()
-    if not ok then
-        return return_error(err, 1)
-    end
-    self:invalidate_groups { 'network', 'signal', 'traffic' }
-    return true
+	local ok, err = self.backend:disconnect()
+	if not ok then
+		return return_error(err, 1)
+	end
+	self:invalidate_groups { 'network', 'signal', 'traffic' }
+	return true
 end
 
 --- Inhibit the modem
@@ -396,31 +520,31 @@ end
 ---@return string? reason
 ---@return integer? code
 function Modem:inhibit()
-    local done_ch = channel.new()
+	local done_ch = channel.new()
 
-    local ok, err = self.scope:spawn(function()
-        local result_ok, result_err = self.backend:inhibit()
-        done_ch:put({ ok = result_ok, err = result_err })
-    end)
+	local ok, err = self.scope:spawn(function()
+		local result_ok, result_err = self.backend:inhibit()
+		done_ch:put({ ok = result_ok, err = result_err })
+	end)
 
-    if not ok then
-        return return_error("failed to spawn inhibit fiber: " .. tostring(err), 1)
-    end
+	if not ok then
+		return return_error("failed to spawn inhibit fiber: " .. tostring(err), 1)
+	end
 
-    local source, msg, primary = fibers.perform(op.named_choice {
-        done = done_ch:get_op(),
-        failed = self.scope:fault_op(),
-    })
+	local source, msg, primary = fibers.perform(op.named_choice {
+		done = done_ch:get_op(),
+		failed = self.scope:fault_op(),
+	})
 
-    if source == "done" then
-        if not msg.ok then
-            return return_error(msg.err, 1)
-        end
-        return true
-    elseif source == "failed" then
-        return return_error("modem inhibit failed: " .. tostring(primary), 1)
-    end
-    return return_error("unexpected error during modem inhibit", 1)
+	if source == "done" then
+		if not msg.ok then
+			return return_error(msg.err, 1)
+		end
+		return true
+	elseif source == "failed" then
+		return return_error("modem inhibit failed: " .. tostring(primary), 1)
+	end
+	return return_error("unexpected error during modem inhibit", 1)
 end
 
 --- Uninhibit the modem
@@ -428,11 +552,11 @@ end
 ---@return string? reason
 ---@return integer? code
 function Modem:uninhibit()
-    local ok, err = self.backend:uninhibit()
-    if not ok then
-        return return_error(err, 1)
-    end
-    return true
+	local ok, err = self.backend:uninhibit()
+	if not ok then
+		return return_error(err, 1)
+	end
+	return true
 end
 
 --- Start listening for a sim insertion
@@ -440,45 +564,45 @@ end
 ---@return string? reason
 ---@return integer? code
 function Modem:listen_for_sim()
-    if self.listening_for_sim then
-        return true
-    end
-    self.listening_for_sim = true
-    local ok, err = fibers.current_scope():spawn(function()
-        self:_emit_state("sim_listener", "open")
+	if self.listening_for_sim then
+		return true
+	end
+	self.listening_for_sim = true
+	local ok, err = fibers.current_scope():spawn(function()
+		self:_emit_state("sim_listener", "open")
 
-        fibers.current_scope():finally(function()
-            self.listening_for_sim = false
-            self:_emit_state("sim_listener", "closed")
-        end)
+		fibers.current_scope():finally(function()
+			self.listening_for_sim = false
+			self:_emit_state("sim_listener", "closed")
+		end)
 
-        -- Capture pulse version before reading state to close the insertion race window.
-        local last_seen = self.sim_inserted_pulse:version()
-        local sim_present = self.sim_state_ch:get()
+		-- Capture pulse version before reading state to close the insertion race window.
+		local last_seen = self.sim_inserted_pulse:version()
+		local sim_present = self.sim_state_ch:get()
 
-        while sim_present ~= true do
-            local source, _, primary = fibers.perform(op.named_choice {
-                inserted = self.sim_inserted_pulse:changed_op(last_seen),
-                trigger  = sleep.sleep_op(LISTEN_TRIGGER_INTERVAL),
-                failed   = self.scope:fault_op(),
-            })
-            if source == "inserted" then
-                break
-            elseif source == "trigger" then
-                local trigger_ok, check_err = self.backend:trigger_sim_presence_check()
-                if not trigger_ok then
-                    self.log:error({ what = 'trigger_sim_check_failed', imei = self.imei, err = tostring(check_err) })
-                end
-            elseif source == "failed" then
-                self.log:error({ what = 'listen_for_sim_scope_faulted', imei = self.imei, err = tostring(primary) })
-                break
-            end
-        end
-    end)
-    if not ok then
-        return return_error("listen_for_sim spawn failed: " .. tostring(err), 1)
-    end
-    return true
+		while sim_present ~= true do
+			local source, _, primary = fibers.perform(op.named_choice {
+				inserted = self.sim_inserted_pulse:changed_op(last_seen),
+				trigger  = sleep.sleep_op(LISTEN_TRIGGER_INTERVAL),
+				failed   = self.scope:fault_op(),
+			})
+			if source == "inserted" then
+				break
+			elseif source == "trigger" then
+				local trigger_ok, check_err = self.backend:trigger_sim_presence_check()
+				if not trigger_ok then
+					self.log:error({ what = 'trigger_sim_check_failed', imei = self.imei, err = tostring(check_err) })
+				end
+			elseif source == "failed" then
+				self.log:error({ what = 'listen_for_sim_scope_faulted', imei = self.imei, err = tostring(primary) })
+				break
+			end
+		end
+	end)
+	if not ok then
+		return return_error("listen_for_sim spawn failed: " .. tostring(err), 1)
+	end
+	return true
 end
 
 --- Set the signal update period
@@ -487,213 +611,317 @@ end
 ---@return string? reason
 ---@return integer? code
 function Modem:set_signal_update_freq(opts)
-    if opts == nil or getmetatable(opts) ~= capability_args.ModemSignalUpdateOpts then
-        return return_error("invalid options", 1)
-    end
-    local ok, err = self.backend:set_signal_update_interval(opts.frequency)
-    if not ok then
-        return return_error(err, 1)
-    end
-    return true
+	if opts == nil or getmetatable(opts) ~= capability_args.ModemSignalUpdateOpts then
+		return return_error("invalid options", 1)
+	end
+	local ok, err = self.backend:set_signal_update_interval(opts.frequency)
+	if not ok then
+		return return_error(err, 1)
+	end
+	self.signal_poll_interval = opts.frequency
+	self.signal_config_pulse:signal()
+	return true
 end
 
+--- Request a complete modem information refresh.
+---@return boolean ok
+---@return string reason
+function Modem:refresh_info()
+	self.state_pulse:signal()
+	return true, "refresh requested"
+end
+
+---@return boolean ok
+---@return string error
+function Modem:_poll_signal_once()
+	local observed_at = fibers.now()
+	local access_techs, access_err = self.backend:read_access_techs()
+	if not access_techs then
+		return false, access_err
+	end
+
+	local signal, signal_err = self.backend:read_signal()
+	if not signal then
+		return false, signal_err
+	end
+
+	self:_cache_group('signal', signal, observed_at)
+
+	local cached_network = self.cache:get('network', math.huge)
+	if cached_network then
+		cached_network.access_techs = access_techs
+		self.cache:set('network', cached_network)
+		local timestamps = self.group_observed_at.network or {}
+		timestamps.access_techs = observed_at
+		self.group_observed_at.network = timestamps
+	end
+
+	local emit_ok, emit_err = self:_emit_event('signal', {
+		schema = MODEM_SIGNAL_SCHEMA,
+		observed_at = observed_at,
+		access_techs = access_techs,
+		signal = signal.values,
+	})
+	if not emit_ok then
+		return false, emit_err
+	end
+	return true, ""
+end
+
+function Modem:signal_poller()
+	local seen = self.signal_config_pulse:version()
+	self.log:debug({ what = 'signal_poller_started', imei = self.imei })
+
+	fibers.current_scope():finally(function()
+		self.log:debug({ what = 'signal_poller_exiting', imei = self.imei })
+	end)
+
+	while true do
+		local interval = self.signal_poll_interval
+		local which, version
+		if interval then
+			which, version = fibers.perform(op.named_choice {
+				tick = sleep.sleep_op(interval),
+				config = self.signal_config_pulse:changed_op(seen),
+			})
+		else
+			which, version = 'config', self.signal_config_pulse:changed(seen)
+		end
+
+		if which == 'config' then
+			if not version then return end
+			seen = version
+		end
+
+		if signal_polling_active(self.card_state) then
+			local ok, err = self:_poll_signal_once()
+			if not ok then
+				self.log:debug({ what = 'signal_poll_failed', imei = self.imei, err = tostring(err) })
+			end
+		end
+	end
+end
+
+---@return nil
 function Modem:emitter()
-    local timeout_buffer = 0.1
-    self.log:debug({ what = 'emitter_started', imei = self.imei })
+	local timeout_buffer = 0.1
+	self.log:debug({ what = 'emitter_started', imei = self.imei })
 
-    fibers.current_scope():finally(function()
-        self.log:debug({ what = 'emitter_exiting', imei = self.imei })
-    end)
+	fibers.current_scope():finally(function()
+		self.log:debug({ what = 'emitter_exiting', imei = self.imei })
+	end)
 
-    local seen_version = 0
-    while true do
-        self.log:debug({ what = 'emitter_waiting', imei = self.imei, seen_version = seen_version })
-        local new_version = self.state_pulse:changed(seen_version)
-        if not new_version then
-            -- Pulse was closed
-            break
-        end
-        seen_version = new_version
-        sleep.sleep(timeout_buffer) -- we want to put some buffer time in to invalidate any cache
-        self.log:debug({ what = 'emitter_dispatching', imei = self.imei })
+	local seen_version = 0
+	while true do
+		self.log:debug({ what = 'emitter_waiting', imei = self.imei, seen_version = seen_version })
+		local new_version = self.state_pulse:changed(seen_version)
+		if not new_version then
+			-- Pulse was closed
+			break
+		end
+		seen_version = new_version
+		sleep.sleep(timeout_buffer) -- we want to put some buffer time in to invalidate any cache
+		self.log:debug({ what = 'emitter_dispatching', imei = self.imei })
 
-        for group_name, fields in pairs(GROUP_FIELDS) do
-            local snapshot, group_err = self:_get_group(group_name, timeout_buffer)
-            if group_err ~= "" then
-                if D_LOG_EMITTER then
-                    self.log:warn({
-                        what = 'emitter_group_failed',
-                        imei = self.imei,
-                        group = group_name,
-                        err = tostring(trim_error(group_err))
-                    })
-                end
-            else
-                for _, field in ipairs(fields) do
-                    local value = extract_group_field(snapshot, field)
-                    if value ~= nil then
-                        local emit_ok, emit_err = self:_emit_meta(field, value)
-                        if not emit_ok and D_LOG_EMITTER then
-                            self.log:warn({
-                                what = 'emitter_emit_failed',
-                                imei = self.imei,
-                                field = tostring(field),
-                                err = tostring(emit_err)
-                            })
-                        end
-                    end
-                end
-            end
-        end
-    end
+		local values = {}
+		local observed_at = {}
+		for group_name, group in pairs(GROUP_FIELDS) do
+			if group.does_emit then
+				local timescale = STATIC_GROUPS[group_name] and math.huge or 0
+				local snapshot, group_err, timestamps = self:_get_group(group_name, timescale)
+				if group_err ~= "" then
+					if D_LOG_EMITTER then
+						self.log:warn({
+							what = 'emitter_group_failed',
+							imei = self.imei,
+							group = group_name,
+							err = tostring(trim_error(group_err))
+						})
+					end
+				else
+					for _, field in ipairs(group.fields) do
+						local value = extract_group_field(snapshot, field)
+						observed_at[field] = timestamps[field]
+						if value ~= nil then
+							values[field] = value
+							local emit_ok, emit_err = self:_emit_meta(field, value)
+							if not emit_ok and D_LOG_EMITTER then
+								self.log:warn({
+									what = 'emitter_emit_failed',
+									imei = self.imei,
+									field = tostring(field),
+									err = tostring(emit_err)
+								})
+							end
+						end
+					end
+				end
+			end
+		end
+
+		local emit_ok, emit_err = self:_emit_state('info', {
+			schema = MODEM_INFO_SCHEMA,
+			values = values,
+			observed_at = observed_at,
+		})
+		if not emit_ok then
+			self.log:warn({ what = 'info_snapshot_emit_failed', imei = self.imei, err = tostring(emit_err) })
+		end
+	end
 end
 
 --- Handles both modem card state changes and SIM presence lifecycle in a single fiber.
 --- card_state is always current when SIM removal decisions are made, eliminating the
 --- need for backend-level guards about whether to reset on SIM absent.
+---@return nil
 function Modem:modem_lifecycle_monitor()
-    local function on_card_change(state_update)
-        ---@cast state_update ModemStateEvent
-        self.log:debug({ what = 'state_change', imei = self.imei, from = state_update.from, to = state_update.to })
-        local to_state = state_update and state_update.to or nil
-        if to_state == 'failed' or to_state == 'disabled' then
-            self:_invalidate_dynamic()
-        elseif to_state == 'locked' then
-            self:invalidate_groups { 'network', 'signal', 'traffic' }
-        else
-            self:invalidate_groups { 'network', 'signal', 'traffic' }
-        end
-        self:_emit_state('card', state_update)
+	---@param state_update ModemStateEvent
+	---@return nil
+	local function on_card_change(state_update)
+		---@cast state_update ModemStateEvent
+		self.log:debug({ what = 'state_change', imei = self.imei, from = state_update.from, to = state_update.to })
+		local to_state = state_update and state_update.to or nil
+		self.card_state = to_state
+		self.signal_config_pulse:signal()
+		if to_state == 'failed' or to_state == 'disabled' then
+			self:_invalidate_dynamic()
+		elseif to_state == 'locked' then
+			self:invalidate_groups { 'network', 'signal', 'traffic' }
+		else
+			self:invalidate_groups { 'network', 'signal', 'traffic' }
+		end
+		self:_emit_state('card', state_update)
 
-        self.state_pulse:signal()
-    end
+		self.state_pulse:signal()
+	end
 
-    local function on_sim_change(present, current_card_state)
-        local sim_state = present == true and "present" or "absent"
+	local function on_sim_change(present, current_card_state)
+		local sim_state = present == true and "present" or "absent"
 
-        self.log:debug({ what = 'sim_' .. sim_state, imei = self.imei })
-        self:_emit_state("sim_state", sim_state)
+		self.log:debug({ what = 'sim_' .. sim_state, imei = self.imei })
+		self:_emit_state("sim_state", sim_state)
 
-        if present == true then
-            self:_invalidate_dynamic()
-            self.sim_inserted_pulse:signal()
-            self.state_pulse:signal()
-        elseif present == false then
-            self:_invalidate_dynamic()
-            if current_card_state ~= "failed" then
-                -- Only reset if the card is not already in a failed state.
-                -- If failed, a SIM-absent report is expected and resetting would cause a boot loop.
-                self:reset()
-                self.scope:cancel("modem restarting")
-            end
-        end
-    end
+		if present == true then
+			self:_invalidate_dynamic()
+			self.sim_inserted_pulse:signal()
+			self.state_pulse:signal()
+		elseif present == false then
+			self:_invalidate_dynamic()
+			if current_card_state ~= "failed" then
+				-- Only reset if the card is not already in a failed state.
+				-- If failed, a SIM-absent report is expected and resetting would cause a boot loop.
+				self:reset()
+				self.scope:cancel("modem restarting")
+			end
+		end
+	end
 
-    self.log:debug({ what = 'lifecycle_monitor_started', imei = self.imei })
+	self.log:debug({ what = 'lifecycle_monitor_started', imei = self.imei })
 
-    fibers.current_scope():finally(function()
-        self.log:debug({ what = 'lifecycle_monitor_exiting', imei = self.imei })
-    end)
+	fibers.current_scope():finally(function()
+		self.card_state = nil
+		self.log:debug({ what = 'lifecycle_monitor_exiting', imei = self.imei })
+	end)
 
-    local init_card_state, state_err = fibers.perform(self.backend:monitor_state_op())
-    if state_err ~= "" then
-        self.log:error({ what = 'state_monitor_init_failed', imei = self.imei, err = tostring(state_err) })
-        return
-    end
-    ---@cast init_card_state ModemStateEvent
-    on_card_change(init_card_state)
-    local card_state = init_card_state and init_card_state.to
-    local sim_present = nil
-    while true do
-        local source, v1, v2 = fibers.perform(op.named_choice {
-            card_change = self.backend:monitor_state_op(),        -- outputs when modem state changes
-            sim_change  = self.backend:wait_for_sim_present_op(), -- outputs when sim state changes
-            send        = self.sim_state_ch:put_op(sim_present),
-        })
+	local init_card_state, state_err = fibers.perform(self.backend:monitor_state_op())
+	if state_err ~= "" then
+		self.log:error({ what = 'state_monitor_init_failed', imei = self.imei, err = tostring(state_err) })
+		return
+	end
+	---@cast init_card_state ModemStateEvent
+	on_card_change(init_card_state)
+	local card_state = init_card_state and init_card_state.to
+	local sim_present = nil
+	while true do
+		local source, v1, v2 = fibers.perform(op.named_choice {
+			card_change = self.backend:monitor_state_op(),        -- outputs when modem state changes
+			sim_change  = self.backend:wait_for_sim_present_op(), -- outputs when sim state changes
+			send        = self.sim_state_ch:put_op(sim_present),
+		})
 
-        if is_command_closed(v2) then
-            local command_name = source == "card_change" and "state monitor" or "sim monitor"
-            self.log:error({ what = command_name .. '_closed', imei = self.imei, err = tostring(v2) })
-            break
-        end
+		if is_command_closed(v2) then
+			local command_name = source == "card_change" and "state monitor" or "sim monitor"
+			self.log:error({ what = command_name .. '_closed', imei = self.imei, err = tostring(v2) })
+			break
+		end
 
-        if source == "card_change" then
-            local state_update, err = v1, v2
-            ---@cast state_update ModemStateEvent
-            if err ~= "" then
-                self.log:error({ what = 'state_monitor_error', imei = self.imei, err = tostring(err) })
-            elseif state_update then
-                card_state = state_update.to
-                on_card_change(state_update)
-            end
-        elseif source == "sim_change" then
-            local present, err = v1, v2
-            if err ~= "" then
-                self.log:error({ what = 'sim_poll_error', imei = self.imei, err = tostring(err) })
-            else
-                if sim_present ~= present then
-                    on_sim_change(present, card_state)
-                end
-                sim_present = present
-            end
-        end
-        -- source == "send": listener consumed sim_present, loop to re-offer
-    end
-    self.log:trace({ what = 'lifecycle_monitor_exiting', imei = self.imei })
+		if source == "card_change" then
+			local state_update, err = v1, v2
+			---@cast state_update ModemStateEvent
+			if err ~= "" then
+				self.log:error({ what = 'state_monitor_error', imei = self.imei, err = tostring(err) })
+			elseif state_update then
+				card_state = state_update.to
+				on_card_change(state_update)
+			end
+		elseif source == "sim_change" then
+			local present, err = v1, v2
+			if err ~= "" then
+				self.log:error({ what = 'sim_poll_error', imei = self.imei, err = tostring(err) })
+			else
+				if sim_present ~= present then
+					on_sim_change(present, card_state)
+				end
+				sim_present = present
+			end
+		end
+		-- source == "send": listener consumed sim_present, loop to re-offer
+	end
+	self.log:trace({ what = 'lifecycle_monitor_exiting', imei = self.imei })
 end
 
 function Modem:control_manager()
-    if self.cap_emit_ch == nil then
-        self.log:error({ what = 'control_no_emit_ch', imei = self.imei })
-        return
-    end
-    if self.control_ch == nil then
-        self.log:error({ what = 'control_no_control_ch', imei = self.imei })
-        return
-    end
+	if self.cap_emit_ch == nil then
+		self.log:error({ what = 'control_no_emit_ch', imei = self.imei })
+		return
+	end
+	if self.control_ch == nil then
+		self.log:error({ what = 'control_no_control_ch', imei = self.imei })
+		return
+	end
 
-    self.log:debug({ what = 'control_manager_started', imei = self.imei })
+	self.log:debug({ what = 'control_manager_started', imei = self.imei })
 
-    fibers.current_scope():finally(function()
-        self.log:debug({ what = 'control_manager_exiting', imei = self.imei })
-    end)
+	fibers.current_scope():finally(function()
+		self.log:debug({ what = 'control_manager_exiting', imei = self.imei })
+	end)
 
-    while true do
-        local request, req_err = self.control_ch:get()
-        if not request then
-            self.log:error({ what = 'control_ch_error', imei = self.imei, err = tostring(req_err) })
-            break
-        end
+	while true do
+		local request, req_err = self.control_ch:get()
+		if not request then
+			self.log:error({ what = 'control_ch_error', imei = self.imei, err = tostring(req_err) })
+			break
+		end
 
-        ---@cast request ControlRequest
+		---@cast request ControlRequest
 
-        local ok, reason, code
+		local ok, reason, code
 
-        local fn = self[request.verb]
-        local valid, validation_err = validate_fn(fn, request.verb)
-        if not valid then
-            ok = false
-            reason = validation_err
-        else
-            local call_ok, fn_ok, fn_reason, fn_code = pcall(fn, self, request.opts)
-            if not call_ok then
-                ok = false
-                reason = "internal error: " .. tostring(fn_ok)
-                code = 1
-            else
-                ok = fn_ok
-                reason = fn_reason
-                code = fn_code
-            end
-        end
+		local fn = self[request.verb]
+		local valid, validation_err = validate_fn(fn, request.verb)
+		if not valid then
+			ok = false
+			reason = validation_err
+		else
+			local call_ok, fn_ok, fn_reason, fn_code = pcall(fn, self, request.opts)
+			if not call_ok then
+				ok = false
+				reason = "internal error: " .. tostring(fn_ok)
+				code = 1
+			else
+				ok = fn_ok
+				reason = fn_reason
+				code = fn_code
+			end
+		end
 
-        local reply, reply_err = hal_types.new.Reply(ok, reason, code)
-        if not reply then
-            self.log:error({ what = 'reply_create_failed', imei = self.imei, err = tostring(reply_err) })
-        else
-            request.reply_ch:put(reply)
-        end
-    end
+		local reply, reply_err = hal_types.new.Reply(ok, reason, code)
+		if not reply then
+			self.log:error({ what = 'reply_create_failed', imei = self.imei, err = tostring(reply_err) })
+		else
+			request.reply_ch:put(reply)
+		end
+	end
 end
 
 ---- Driver Functions ----
@@ -702,21 +930,22 @@ end
 ---@return boolean ok
 ---@return string error
 function Modem:start()
-    if not self.initialised then
-        return false, "modem not initialised"
-    end
-    if not self.caps_applied then
-        return false, "capabilities not applied"
-    end
+	if not self.initialised then
+		return false, "modem not initialised"
+	end
+	if not self.caps_applied then
+		return false, "capabilities not applied"
+	end
 
-    self.scope:spawn(function() self:modem_lifecycle_monitor() end)
-    self.scope:spawn(function() self:control_manager() end)
-    self.scope:spawn(function() self:emitter() end)
+	self.scope:spawn(function() self:modem_lifecycle_monitor() end)
+	self.scope:spawn(function() self:control_manager() end)
+	self.scope:spawn(function() self:emitter() end)
+	self.scope:spawn(function() self:signal_poller() end)
 
-    -- Signal initial pulse so emitter emits the initial state
-    self.state_pulse:signal()
+	-- Signal initial pulse so emitter emits the initial state
+	self.state_pulse:signal()
 
-    return true, ""
+	return true, ""
 end
 
 --- Closes down the modem driver
@@ -724,31 +953,32 @@ end
 ---@return boolean ok
 ---@return string error
 function Modem:stop(timeout)
-    timeout = timeout or DEFAULT_STOP_TIMEOUT
+	timeout = timeout or DEFAULT_STOP_TIMEOUT
 
-    if self.backend and self.backend.shutdown_op then
-        local ok, err = fibers.perform(self.backend:shutdown_op(1.0))
-        if not ok then
-            self.log:warn({
-                what = "backend_shutdown_failed",
-                address = self.address,
-                imei = self.imei,
-                err = tostring(err),
-            })
-        end
-    end
+	-- Stop workers from polling monitors while backend shutdown removes them.
+	self.scope:cancel("modem stopping")
 
-    self.scope:cancel("modem stopping")
+	if self.backend and self.backend.shutdown_op then
+		local ok, err = fibers.perform(self.backend:shutdown_op(1.0))
+		if not ok then
+			self.log:warn({
+				what = "backend_shutdown_failed",
+				address = self.address,
+				imei = self.imei,
+				err = tostring(err),
+			})
+		end
+	end
 
-    local source = fibers.perform(op.named_choice {
-        join = self.scope:join_op(),
-        timeout = sleep.sleep_op(timeout)
-    })
+	local source = fibers.perform(op.named_choice {
+		join = self.scope:join_op(),
+		timeout = sleep.sleep_op(timeout)
+	})
 
-    if source == "timeout" then
-        return false, "modem stop timeout"
-    end
-    return true, ""
+	if source == "timeout" then
+		return false, "modem stop timeout"
+	end
+	return true, ""
 end
 
 --- Apply capabilities to HAL and start monitoring state
@@ -757,86 +987,86 @@ end
 ---@return Capability[]? capabilities
 ---@return string? error
 function Modem:capabilities(emit_ch)
-    if not self.initialised then
-        return nil, "modem not initialised"
-    end
-    if self.caps_applied then
-        return nil, "capabilities already applied"
-    end
+	if not self.initialised then
+		return nil, "modem not initialised"
+	end
+	if self.caps_applied then
+		return nil, "capabilities already applied"
+	end
 
-    self.cap_emit_ch = emit_ch
+	self.cap_emit_ch = emit_ch
 
-    local modem_cap, mod_cap_err = cap_types.new.ModemCapability(
-        self.imei,
-        self.control_ch
-    )
-    if not modem_cap then
-        return nil, "failed to create modem capability: " .. tostring(mod_cap_err)
-    end
+	local modem_cap, mod_cap_err = cap_types.new.ModemCapability(
+		self.imei,
+		self.control_ch
+	)
+	if not modem_cap then
+		return nil, "failed to create modem capability: " .. tostring(mod_cap_err)
+	end
 
-    self.caps_applied = true
+	self.caps_applied = true
 
-    return { modem_cap }
+	return { modem_cap }
 end
 
 --- Setup modem overrides and long running fibers
 ---@return string error
 function Modem:init()
-    if self.initialised then
-        return "already initialised"
-    end
+	if self.initialised then
+		return "already initialised"
+	end
 
-    local backend_built_sig = cond.new()
+	local backend_built_sig = cond.new()
 
-    local ok, err = self.scope:spawn(function()
-        self.backend = modem_backend_provider.new(self.address)
+	local ok, err = self.scope:spawn(function()
+		self.backend = modem_backend_provider.new(self.address)
 
-        self.scope:finally(function()
-            if self.backend and self.backend.terminate then
-                self.backend:terminate("modem_driver_scope_exit")
-            end
-        end)
+		self.scope:finally(function()
+			if self.backend and self.backend.terminate then
+				self.backend:terminate("modem_driver_scope_exit")
+			end
+		end)
 
-        local sim_ok, sim_err = self.backend:start_sim_presence_monitor()
-        if not sim_ok then
-            error("failed to start SIM presence monitor: " .. tostring(sim_err))
-        end
+		local sim_ok, sim_err = self.backend:start_sim_presence_monitor()
+		if not sim_ok then
+			error("failed to start SIM presence monitor: " .. tostring(sim_err))
+		end
 
-        local state_ok, state_err = self.backend:start_state_monitor()
-        if not state_ok then
-            error("failed to start modem state monitor: " .. tostring(state_err))
-        end
+		local state_ok, state_err = self.backend:start_state_monitor()
+		if not state_ok then
+			error("failed to start modem state monitor: " .. tostring(state_err))
+		end
 
-        local identity_info, identity_err = self.backend:read_identity()
-        if not identity_info then
-            error("failed to get modem identity info: " .. tostring(identity_err))
-        end
+		local identity_info, identity_err = self.backend:read_identity()
+		if not identity_info then
+			error("failed to get modem identity info: " .. tostring(identity_err))
+		end
 
-        self:_cache_group("identity", identity_info)
-        self.imei = identity_info.imei
-        self.model = identity_info.model
-        self.mode = identity_info.mode
+		self:_cache_group("identity", identity_info)
+		self.imei = identity_info.imei
+		self.model = identity_info.model
+		self.mode = identity_info.mode
 
-        backend_built_sig:signal()
-    end)
+		backend_built_sig:signal()
+	end)
 
-    if not ok then
-        return "failed to spawn modem backend fiber: " .. tostring(err)
-    end
+	if not ok then
+		return "failed to spawn modem backend fiber: " .. tostring(err)
+	end
 
-    local source, _, primary = fibers.perform(op.named_choice {
-        backend_ready = backend_built_sig:wait_op(),
-        failed = self.scope:fault_op()
-    })
+	local source, _, primary = fibers.perform(op.named_choice {
+		backend_ready = backend_built_sig:wait_op(),
+		failed = self.scope:fault_op()
+	})
 
-    if source == "backend_ready" then
-        self.initialised = true
-        return ""
-    elseif source == "failed" then
-        return "modem init failed: " .. tostring(primary) -- primary is the error from the faulted fiber
-    else
-        return "unexpected error during modem init"
-    end
+	if source == "backend_ready" then
+		self.initialised = true
+		return ""
+	elseif source == "failed" then
+		return "modem init failed: " .. tostring(primary) -- primary is the error from the faulted fiber
+	else
+		return "unexpected error during modem init"
+	end
 end
 
 --- Create a new Modem driver.
@@ -845,40 +1075,43 @@ end
 ---@return Modem? modem
 ---@return string error
 local function new(address, logger)
-    if type(address) ~= 'string' or address == '' then
-        return nil, "invalid address"
-    end
+	if type(address) ~= 'string' or address == '' then
+		return nil, "invalid address"
+	end
 
-    local control_ch = channel.new(CONTROL_Q_LEN)
+	local control_ch = channel.new(CONTROL_Q_LEN)
 
-    local scope, err = fibers.current_scope():child()
-    if not scope then
-        return nil, "failed to create child scope: " .. tostring(err)
-    end
+	local scope, err = fibers.current_scope():child()
+	if not scope then
+		return nil, "failed to create child scope: " .. tostring(err)
+	end
 
-    -- Print out driver stack trace if scope closes on a failure
-    scope:finally(function()
-        local st, primary = scope:status()
-        if st == 'failed' then
-            logger:error({ what = 'scope_error', address = address, err = tostring(primary) })
-            logger:debug({ what = 'scope_exit', address = address, status = st })
-        end
-        logger:debug({ what = 'stopped', address = address })
-    end)
+	-- Print out driver stack trace if scope closes on a failure
+	scope:finally(function()
+		local st, primary = scope:status()
+		if st == 'failed' then
+			logger:error({ what = 'scope_error', address = address, err = tostring(primary) })
+			logger:debug({ what = 'scope_exit', address = address, status = st })
+		end
+		logger:debug({ what = 'stopped', address = address })
+	end)
 
-    return setmetatable({
-        scope = scope,
-        log = logger,
-        address = address,
-        cache = cache_mod.new(math.huge, fibers.now, '.'),
-        initialised = false,  -- modem cannot apply capabilities until initialised
-        caps_applied = false, -- modem cannot start until capabilities applied
-        listening_for_sim = false,
-        state_pulse = pulse.new(),
-        sim_inserted_pulse = pulse.new(),
-        sim_state_ch = channel.new(),
-        control_ch = control_ch
-    }, Modem), ""
+	return setmetatable({
+		scope = scope,
+		log = logger,
+		address = address,
+		cache = cache_mod.new(math.huge, fibers.now, '.'),
+		initialised = false,  -- modem cannot apply capabilities until initialised
+		caps_applied = false, -- modem cannot start until capabilities applied
+		listening_for_sim = false,
+		card_state = nil,
+		signal_poll_interval = nil,
+		signal_config_pulse = pulse.new(),
+		state_pulse = pulse.new(),
+		sim_inserted_pulse = pulse.new(),
+		sim_state_ch = channel.new(),
+		control_ch = control_ch
+	}, Modem), ""
 end
 
 ---@class RecoveryModem
@@ -886,15 +1119,15 @@ local RecoveryModem = {}
 RecoveryModem.__index = RecoveryModem
 
 function RecoveryModem:get_device()
-    return self.backend:get_device()
+	return self.backend:get_device()
 end
 
 function RecoveryModem:reset()
-    local ok, err = self.backend:reset()
-    if not ok then
-        return return_error(err, 1)
-    end
-    return true
+	local ok, err = self.backend:reset()
+	if not ok then
+		return return_error(err, 1)
+	end
+	return true
 end
 
 
@@ -902,16 +1135,21 @@ end
 ---@param address ModemAddress
 ---@return RecoveryModem modem
 local function new_recovery(address)
-    local recovery_backend = modem_backend_provider.new_recovery(address)
-    local self = setmetatable({
-        address = address,
-        backend = recovery_backend
-    }, RecoveryModem)
+	local recovery_backend = modem_backend_provider.new_recovery(address)
+	local self = setmetatable({
+		address = address,
+		backend = recovery_backend
+	}, RecoveryModem)
 
-    return self
+	return self
 end
 
 return {
-    new = new,
-    new_recovery = new_recovery
+	new = new,
+	new_recovery = new_recovery,
+	_test = {
+		Modem = Modem,
+		normalise_groups = normalise_groups,
+		signal_polling_active = signal_polling_active,
+	},
 }

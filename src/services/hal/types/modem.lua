@@ -133,11 +133,28 @@ ModemNetworkInfo.__index = ModemNetworkInfo
 local ModemSignalInfo = {}
 ModemSignalInfo.__index = ModemSignalInfo
 
+---@alias ModemInfoValues table<string, any>
+
+---@class ModemInfoSnapshot
+---@field schema string
+---@field values ModemInfoValues
+---@field observed_at table<string, number>
+
+---@class ModemSignalEvent
+---@field schema string
+---@field observed_at number
+---@field access_techs string[]
+---@field signal ModemSignalValues
+
 ---@class ModemTrafficInfo
 ---@field rx_bytes integer
 ---@field tx_bytes integer
 local ModemTrafficInfo = {}
 ModemTrafficInfo.__index = ModemTrafficInfo
+
+---@class ModemModesInfo
+---@field supported_modes ModemModeCombination[]
+---@field current_modes ModemModeCombination
 
 ---@param values any
 ---@return boolean
@@ -514,8 +531,15 @@ end
 ---@field read_ports fun(self: ModemBackend): ModemPortsInfo?, string
 ---@field read_sim_info fun(self: ModemBackend): ModemSimInfo?, string
 ---@field read_network_info fun(self: ModemBackend): ModemNetworkInfo?, string
+---@field read_access_techs fun(self: ModemBackend): string[]?, string
 ---@field read_signal fun(self: ModemBackend): ModemSignalInfo?, string
 ---@field read_traffic fun(self: ModemBackend): ModemTrafficInfo?, string
+---@field read_pdp_contexts fun(self: ModemBackend): ModemPdpContext[]?, string
+---@field read_active_pdp_contexts fun(self: ModemBackend): ModemPdpActivation[]?, string
+---@field read_pdp_info fun(self: ModemBackend): ModemPdpInfo?, string
+---@field set_pdn_type fun(self: ModemBackend, cid: integer, pdp_type: string): ModemPdpCorrectionResult
+---@field read_modes fun(self: ModemBackend): ModemModesInfo?, string
+---@field set_modes fun(self: ModemBackend, preferred: string, allowed: string[]): boolean, string
 ---@field start_state_monitor fun(self: ModemBackend): boolean, string
 ---@field stop_state_monitor_op fun(self: ModemBackend, timeout: number?): Op
 ---@field stop_state_monitor fun(self: ModemBackend, timeout: number?): boolean, string
@@ -539,6 +563,37 @@ end
 ---@field shutdown fun(self: ModemBackend, timeout: number?): boolean, string
 ---@field terminate fun(self: ModemBackend, reason: string?)
 ---@field set_signal_update_interval fun(self: ModemBackend, interval: number): boolean, string
+
+---@class ModemPdpContext
+---@field cid integer
+---@field pdp_type string
+---@field apn string
+---@field pdp_addr string
+---@field definition_tail string Complete context definition following the PDP type.
+---@field active boolean?
+
+---@class ModemPdpActivation
+---@field cid integer
+---@field active boolean
+
+---@class ModemPdpInfo
+---@field pdp_contexts ModemPdpContext[]
+
+---@alias ModemPdpCorrectionOutcome 'rejected'|'applied'|'uncertain'
+
+---@class ModemPdpCorrectionResult
+---@field outcome ModemPdpCorrectionOutcome
+---@field dispatched boolean
+---@field err string
+
+---@alias ModemInfoSnapshot
+---| ModemIdentityInfo
+---| ModemPortsInfo
+---| ModemSimInfo
+---| ModemNetworkInfo
+---| ModemSignalInfo
+---| ModemTrafficInfo
+---| ModemPdpInfo
 
 return {
 	ModemDevice = ModemDevice,

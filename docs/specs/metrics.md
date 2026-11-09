@@ -282,7 +282,29 @@ The delta value block always outputs the difference between the last published v
 - **Calculation**: Returns `current_value - last_published_value`
 - **Reset**: On reset, sets `last_val = current_val` (resets to the current value, not zero)
 - **Reset Trigger**: Only resets after a successful publish cycle (when pipeline completes without short-circuit)
-- **Always Publishes**: Does not short-circuit; always returns a delta value
+- **Publishes Every Sample**: Returns a delta for every sample, except the baseline sample below
+- **Restart Baseline**: If the metrics service starts more than 5 minutes into a boot, devicecode has restarted and the kernel counters have kept their values. An endpoint first seen within 10 minutes of that start takes its first sample as the baseline and publishes nothing for it, so the whole counter isn't reported as new traffic. Traffic during the restart goes uncounted. After a fresh boot, and for endpoints first seen later, the first sample counts in full
+- **Config Replacement**: A new config keeps the state of any pipeline whose definition and template are unchanged, so those counters carry on. A pipeline whose logic changed starts again, so its next sample counts as a first sample
+
+## Crash records
+
+When devicecode exits, the reason would otherwise be lost: logs are in RAM and the next reboot wipes them. `devicecode.crash_record` keeps the reason in a file in `/tmp`, which survives a process restart but not a reboot, and the next process sends it to the cloud.
+
+| Kind | Meaning | Log kept |
+| --- | --- | --- |
+| `service_failed` | A service failed, returned or was cancelled unexpectedly | Recent log lines |
+| `boot_failed` | A service could not be loaded or started | Recent log lines |
+| `main_error` | An error reached the top without an earlier record | Recent log lines |
+| `unknown_exit` | The previous process ended without writing anything, so it was killed | Kernel and procd lines from `logread`, if available |
+| `signal` | A deliberate stop, such as a restart by hand | None |
+
+Each record is sent in its own request once config is loaded and the time is synced, using `system.crash.kind`, `service`, `status`, `reason`, `log`, `seq` and `uptime_s`, timestamped when it happened. It's recorded as soon as the failure happens, because a service that won't finish cancelling can hold up the exit for ever. It stays on file until the cloud accepts it. If a send fails it's tried again after 30 seconds, doubling up to every 10 minutes, because the first attempt is often made while the network is still coming up. It doesn't go through a pipeline, so it can't be lost to the start-up race between metrics and config.
+
+Sends and retries run to their own deadline, not the publish period, so a long publish period can't hold a record back until a reboot clears it. They also have their own publisher, so they don't queue behind telemetry that's being retried. They are always at least 5 seconds apart.
+
+**Limits, for metered SIMs:** the reason is at most 200 characters and the log at most 2 KB. Only the first 3 crashes in a boot keep a log, at most 5 records wait at once, and once past the first crashes, accepted records go at most every 10 minutes. Failed sends follow the retry timing above, which is faster at first, and a refused or timed-out send can cost the full upload. `seq` still shows how many there have been.
+
+**Redaction:** before anything is written, each log record is masked from its first sensitive key onwards, including any continuation lines (passwords, keys, tokens, salts, usernames, hostnames and similar). URL credentials and ports, MAC addresses, UUIDs and long digit runs such as IMEI and ICCID are removed too. Input is bounded so this can't hold up the scheduler, and size limits apply to the result.
 
 ## Timestamping
 

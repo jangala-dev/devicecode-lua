@@ -7,12 +7,13 @@ local M = {}
 
 local ALLOWED = {
 	'enabled', 'members', 'health', 'runtime', 'failover',
-	'load_balancing', 'rules', 'metadata', 'extensions',
+	'load_balancing', 'rules', 'metadata', 'extensions', 'last_resort',
 }
 
 local MEMBER_ALLOWED = {
 	'id', 'interface', 'source', 'metric', 'mwan_metric', 'weight', 'dynamic_weight', 'family',
-	'track_ip', 'health', 'reliability', 'count', 'timeout', 'interval', 'up', 'down',
+	'track_ip', 'health', 'reliability', 'count', 'timeout', 'interval', 'failure_interval', 'recovery_interval',
+	'up', 'down',
 	'enabled', 'disabled', 'speedtest_url', 'speedtest_duration_s', 'shaping', 'metadata', 'extensions',
 }
 
@@ -185,10 +186,15 @@ function M.normalise(v)
 	if not members then return nil, merr end
 	local rules, rerr = normalise_rules(t)
 	if not rules then return nil, rerr end
+	local last_resort = t.last_resort
+	if last_resort ~= nil and last_resort ~= 'default' and last_resort ~= 'unreachable' and last_resort ~= 'blackhole' then
+		return nil, schema.err({ 'net', 'wan', 'last_resort' }, 'must be default, unreachable or blackhole')
+	end
 	local out = {
 		enabled = t.enabled ~= false,
 		members = members,
 		rules = rules,
+		last_resort = last_resort,
 		health = schema.copy(t.health or {}),
 		runtime = schema.copy(t.runtime or {}),
 		failover = schema.copy(t.failover or {}),

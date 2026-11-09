@@ -404,4 +404,76 @@ function tests.test_unknown_route_replies_not_found_once()
 	end)
 end
 
+function tests.test_local_ui_visit_is_anonymous_and_publishes_only_valid_ids()
+	run_fibers.run(function (scope)
+		local sent = {}
+		local deps = { conn = { publish = function (_, topic, payload)
+			sent[#sent + 1] = { topic = topic, payload = payload }
+		end } }
+		local ctx = fake_ctx('POST', '/api/local-ui/visit')
+		ctx.headers = { ['content-type'] = 'application/json' }
+		ctx.body_string = '{"visitor_id":"' .. string.rep('a', 32) .. '","visit_id":"' .. string.rep('b', 32) .. '"}'
+		assert_eq(request.run(scope, ctx, deps).status, 'ok')
+		assert_eq(ctx.replies[1].status, 202)
+		assert_eq(#sent, 1)
+		assert_eq(table.concat(sent[1].topic, '/'), 'obs/v1/ui/metric/local_ui_visits')
+		assert_eq(sent[1].payload.value.visitor_id, string.rep('a', 32))
+		assert_eq(sent[1].payload.value.via, 'other', 'no Host header')
+		-- lua-http turns an HTTP/1 Host header into :authority, as in HTTP/2.
+		local function lua_http_headers(fields)
+			return { get = function (_, name) return fields[name] end }
+		end
+		for _, case in ipairs({
+			{ { host = 'config.bigbox.home' }, 'name' },
+			{ { [':authority'] = '172.28.8.1:80' }, 'ip' },
+			{ lua_http_headers({ [':authority'] = 'config.bigbox.home', ['content-type'] = 'application/json' }), 'name' },
+		}) do
+			local named = fake_ctx('POST', '/api/local-ui/visit')
+			named.headers = case[1]
+			if not case[1].get then case[1]['content-type'] = 'application/json' end
+			named.body_string = ctx.body_string
+			assert_eq(request.run(scope, named, deps).status, 'ok')
+			assert_eq(sent[#sent].payload.value.via, case[2])
+			assert_eq(sent[#sent].payload.value.host, nil, 'the raw host is never sent')
+		end
+		sent = { sent[1] }
+		for _, raw in ipairs({ '{}', 'invalid', string.rep('x', 257), '{"visitor_id":{},"visit_id":5}' }) do
+			local bad = fake_ctx('POST', '/api/local-ui/visit')
+			bad.headers = ctx.headers
+			bad.body_string = raw
+			assert_eq(request.run(scope, bad, deps).status, 'bad_request')
+			assert_eq(bad.replies[1].status, 400)
+		end
+		assert_eq(#sent, 1)
+	end)
+end
+
+function tests.test_local_ui_visit_never_buffers_an_oversized_body()
+	run_fibers.run(function (scope)
+		local valid = '{"visitor_id":"' .. string.rep('a', 32) .. '","visit_id":"' .. string.rep('b', 32) .. '"}'
+		local sent = 0
+		local deps = { conn = { publish = function () sent = sent + 1 end } }
+		local function visit(headers, body)
+			local requested
+			local ctx = fake_ctx('POST', '/api/local-ui/visit')
+			ctx.headers = headers
+			ctx.read_body_as_string_op = function () error('unbounded body read') end
+			ctx.read_chars_op = function (_, n)
+				requested = n
+				return require('fibers.op').always(body:sub(1, n))
+			end
+			return request.run(scope, ctx, deps).status, ctx.replies[1].status, requested
+		end
+		-- lua-http buffers each transfer chunk whole, so chunked bodies are refused unread.
+		local json = 'application/json'
+		local status, code, requested = visit({ ['content-type'] = json, ['transfer-encoding'] = 'chunked' }, valid)
+		assert_eq(status, 'bad_request'); assert_eq(code, 400); assert_eq(requested, nil)
+		status, code, requested = visit({ ['content-type'] = json, ['content-length'] = '65536' }, string.rep('x', 65536))
+		assert_eq(status, 'bad_request'); assert_eq(code, 400); assert_eq(requested, nil)
+		status, code, requested = visit({ ['content-type'] = json, ['content-length'] = tostring(#valid) }, valid)
+		assert_eq(status, 'ok'); assert_eq(code, 202); assert_eq(requested, 257)
+		assert_eq(sent, 1)
+	end)
+end
+
 return tests

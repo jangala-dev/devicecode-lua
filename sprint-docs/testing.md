@@ -1,5 +1,144 @@
 # Testing
 
+## Shared support for physical box tests
+
+Reusable Lua helpers live in `tests/integration/onbox/support/`. Run inside the
+devcontainer and add `tests/integration/?.lua` and `src/?.lua` to `package.path`.
+Imports use the `onbox.support.*` namespace.
+
+| Module | Responsibility |
+| --- | --- |
+| `auth` | Hidden password entry and inherited password pipes. |
+| `process` | Local commands, timeouts, captured output and background process groups. |
+| `ssh` | Remote commands, authentication and uploads over SSH stdin. |
+| `logs` | Continuous syslog capture, configurable filters and failure diagnostics. |
+| `devicecode` | Dependencies, build/package/deploy, service control and config/runtime snapshots. |
+| `runner` | Common arguments, private artifacts, signals, phases and cleanup. |
+| `modem` | Discovery by IMEI, state waits, reset/rediscovery and guarded AT probing. |
+
+`runner.parse_args()` accepts extra defaults, value options and boolean flags
+for each test. `runner.open()` checks local tools, prompts when `--ask-pass` is
+selected, and creates a session exposing `process`, `ssh` and `logs`.
+The file-password and SSH-key modes use `--password-file` and `--ssh-key-auth`.
+Before any test mutation, the runner logs the SSH route, hostname, hardware
+revision, machine ID, device-tree serial when available, and negotiated SSH
+host-key fingerprint to stderr and `box-identity.log`. It then asks the operator
+to confirm the connected box. Pass `--yes` for unattended runs to log the same
+identity and skip only that confirmation prompt. The default route remains
+`root@172.28.100.1`.
+
+Use `box:phase(label, body)` for automatic log capture around a phase and
+`box:run(body, hooks)` for the full test lifecycle. Register resource cleanup
+with `box:defer(callback)`; callbacks run in reverse order, even after failure.
+Failure hooks can collect extra diagnostics and perform test-specific rollback.
+The shared runner does not choose when to deploy, reset devices or restore config.
+Keep assertions and config transformations in the individual test.
+
+Create `devicecode.new(box)` to manage a runtime. `prepare()` conclusively
+snapshots the bootstrap and persistent config before dependency installation;
+SSH, timeout and permission failures are fatal and are not treated as an absent
+persistent file. `backup()` validates a remote archive, downloads it into the
+private artifact directory and atomically commits the local recovery copy before
+mutation is allowed.
+`build(label, config)` optionally replaces only the staged config. `deploy()`
+stops the service and unpacks the archive, while `write_config()` updates both
+config locations. `restore_runtime()` restores the snapshot and leaves the
+service stopped so the caller can recover devices before restarting it.
+`restore_persistent()` also restores the absence of an originally missing file.
+Runtime rollback replaces the deployed tree from the committed backup instead
+of overlaying it, so files introduced by a failed deployment are removed.
+Configuration uploads use a sibling temporary file and same-filesystem rename;
+an interrupted upload cannot truncate the active configuration.
+
+Preparation may run `opkg update` and install missing test dependencies. Those
+package and package-list changes are intentionally non-transactional and persist
+after the test; runtime rollback does not remove packages. Each session removes
+its exact `/tmp/devicecode-<artifact-id>` workspace during cleanup when the box
+remains reachable. An unreachable box can retain that directory and the cleanup
+failure is reported.
+
+`modem.new(box)` is optional for modem tests. It keeps selection policy in the
+caller, waits by stable IMEI across changing mmcli IDs, and accepts a list of AT
+commands for probing. Its helper briefly pauses ModemManager with a trap and
+watchdog to resume it. AT assertions belong in the calling test.
+
+Run the support checks without a box or password file:
+
+```bash
+devcontainer exec --workspace-folder . bash -lc \
+  'luajit tests/integration/onbox/support/test.lua'
+```
+
+## PDP tests on a physical box
+
+Run from the repository root:
+
+```bash
+devcontainer exec --workspace-folder . bash -lc \
+  'luajit tests/integration/onbox/modem_pdp/test_box.lua'
+```
+
+The runner uses `root@172.28.100.1` and passes the root-level `boxkey` password
+file directly to `sshpass`, without displaying or reading its contents itself.
+Use `--host` and `--password-file` for another box, or `--ssh-key-auth` to use
+your SSH agent/key. The box must already have its devicecode init service and
+SIMs installed, with autoconnect enabled for the target Quectel modems.
+
+To enter the password manually, run from an interactive terminal:
+
+```bash
+devcontainer exec --workspace-folder . bash -lc \
+  'luajit tests/integration/onbox/modem_pdp/test_box.lua --ask-pass'
+```
+
+The password is requested once with echo disabled, held in memory for the run,
+and passed to `sshpass` through a fresh anonymous pipe for each connection.
+It is never placed in command arguments, environment variables, files or logs.
+Terminal settings are restored on completion or interruption. `--ask-pass`,
+`--password-file` and `--ssh-key-auth` are mutually exclusive.
+
+The Lua runner executes inside the devcontainer, builds with `make build-all`, transfers the
+build using tar over SSH, stops devicecode, resets and rediscovers the modems,
+and restarts the service. It waits for every target modem to connect, then reads
+`CGDCONT` and `CGACT` and checks every active CID against that modem's effective
+config. It repeats the build/deploy/check cycle with `IP`, then `IPV4V6`.
+The source configs are untouched. Each test phase starts from the config the
+service is actually running (the saved config if there is one, otherwise the
+bootstrap config) and changes only the GSM PDP fields.
+
+By default a final cycle puts the original bootstrap and saved configs back before
+restarting the service, then checks the per-modem config again, keeping the new
+code deployed. `--keep-final-config` instead leaves the
+second test config active. `--first`, `--second`, `--timeout`, `--runtime`,
+`--service`, `--target`, and `--build-command` customize the run.
+
+SFTP and picocom are unnecessary: the probe uses the built Lua AT transport.
+ModemManager is briefly paused during read-only connected-state AT checks to
+avoid competing serial readers, then resumed by a trap and watchdog. If required
+box dependencies are missing, package installation is attempted even when
+`opkg update` returns nonzero; the installed commands/modules are checked afterwards.
+
+Private build, service, AT, and failure logs plus `results.json` are saved under
+`tests/integration/onbox/modem_pdp/artifacts/pdp-box-<timestamp>` in the mounted
+workspace (override with `--artifacts`). This directory is ignored by Git. Config/build
+artifacts may contain credentials: the directory and files have private permissions.
+The original runtime is backed up to `original-runtime.tar.gz` in that artifacts
+directory; the box's temporary workspace is removed during cleanup. Failures print
+relevant logs and attempt to restore the original runtime and config. The saved service stream is included even if the box's syslog ring
+has rolled over. A rollback failure is reported explicitly with the backup path.
+
+Offline checks for the runner:
+
+```bash
+devcontainer exec --workspace-folder . bash -lc \
+  'luajit tests/integration/onbox/modem_pdp/test_runner.lua'
+```
+
+The [cellular generation on-box test](../tests/integration/onbox/cellular_modes/README.md)
+builds and deploys supported, unsupported, and captured-original mode configurations.
+It verifies modes through `mmcli` and warnings through the local UI log API. Its
+offline scenario checks run with `luajit tests/integration/onbox/cellular_modes/test_runner.lua`.
+
 ## Unit Testing
 
 If we want to 100% unit test our code we will need to think about refactoring around local functions within modules that our

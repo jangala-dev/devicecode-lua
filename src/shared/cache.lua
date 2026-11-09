@@ -15,12 +15,12 @@ Cache.__index = Cache
 ---@param separator string?
 ---@return Cache
 local function new(default_timeout, custom_time_func, separator)
-    local self = setmetatable({}, Cache)
-    self.default_timeout = default_timeout or 10
-    self.time_func = custom_time_func or os.time
-    self.separator = separator or string.char(31)
-    self.store = {}
-    return self
+	local self = setmetatable({}, Cache)
+	self.default_timeout = default_timeout or 10
+	self.time_func = custom_time_func or os.time
+	self.separator = separator or string.char(31)
+	self.store = {}
+	return self
 end
 
 --- Setting a value in the cache
@@ -28,49 +28,49 @@ end
 ---@param value any
 ---@param timeout number?
 function Cache:set(key, value, timeout)
-    timeout = timeout or self.default_timeout
-    -- if type(value) == 'table' then
-    --     if is_array(value) then
-    --         self.store[key] = {value=value, timestamp=self.time_func() + timeout, timeout = timeout}
-    --     else
-    --         for k, v in pairs(value) do
-    --             self:set(key .. self.separator .. k, v, timeout)
-    --         end
-    --     end
-    -- else
-    --     self.store[key] = {value = value, timestamp=self.time_func(), timeout = timeout}
-    -- end
-    self.store[key] = {value = value, timestamp=self.time_func(), timeout = timeout}
+	timeout = timeout or self.default_timeout
+	-- if type(value) == 'table' then
+	--     if is_array(value) then
+	--         self.store[key] = {value=value, timestamp=self.time_func() + timeout, timeout = timeout}
+	--     else
+	--         for k, v in pairs(value) do
+	--             self:set(key .. self.separator .. k, v, timeout)
+	--         end
+	--     end
+	-- else
+	--     self.store[key] = {value = value, timestamp=self.time_func(), timeout = timeout}
+	-- end
+	self.store[key] = {value = value, timestamp=self.time_func(), timeout = timeout}
 end
 
 
 --- Delete a value from the cache.
 ---@param key CacheKey
 function Cache:delete(key)
-    if type(key) ~= 'string' then
-        key = table.concat(key, self.separator)
-    end
-    self.store[key] = nil
+	if type(key) ~= 'string' then
+		key = table.concat(key, self.separator)
+	end
+	self.store[key] = nil
 end
 
 --- Delete all cache entries whose string key starts with prefix.
 ---@param prefix string
 function Cache:clear_prefix(prefix)
-    prefix = tostring(prefix or '')
-    local remove = {}
-    for key in pairs(self.store) do
-        if key == prefix or key:sub(1, #prefix) == prefix then
-            remove[#remove + 1] = key
-        end
-    end
-    for _, key in ipairs(remove) do
-        self.store[key] = nil
-    end
+	prefix = tostring(prefix or '')
+	local remove = {}
+	for key in pairs(self.store) do
+		if key == prefix or key:sub(1, #prefix) == prefix then
+			remove[#remove + 1] = key
+		end
+	end
+	for _, key in ipairs(remove) do
+		self.store[key] = nil
+	end
 end
 
 --- Delete all cache entries.
 function Cache:clear()
-    self.store = {}
+	self.store = {}
 end
 
 --- Getting a value from the cache
@@ -78,20 +78,20 @@ end
 ---@param timeout number?
 ---@return any
 function Cache:get(key, timeout)
-    if type(key) ~= 'string' then
-        key = table.concat(key, self.separator)
-    end
-    local item = self.store[key]
-    if item then
-        timeout = timeout or item.timeout
-        if self.time_func() < (item.timestamp + timeout) then
-            return item.value
-        end
-    end
-    return nil -- or a default value
+	if type(key) ~= 'string' then
+		key = table.concat(key, self.separator)
+	end
+	local item = self.store[key]
+	if item then
+		timeout = timeout or item.timeout
+		if self.time_func() < (item.timestamp + timeout) then
+			return item.value
+		end
+	end
+	return nil -- or a default value
 end
 
 return {
-    new = new,
-    Cache = Cache
+	new = new,
+	Cache = Cache
 }

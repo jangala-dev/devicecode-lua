@@ -137,4 +137,73 @@ function T.validate_config_propagates_invalid_template_to_pipeline()
 	assert(saw_metric_invalid_protocol,      "expected warning: sim inherited invalid protocol 'invalid'")
 end
 
+-- bigbox-v1-cm-2 sends the power board's uptime (every 5 minutes) and boot id (on
+-- change), so a computer-only restart can be told from a power loss. bigbox-v1-cm's
+-- legacy power-board protocol carries neither, so it has no such pipelines.
+function T.bigbox_v1_cm2_config_sends_power_board_uptime_and_boot_id()
+	local cjson = require 'cjson.safe'
+	for _, target in ipairs({ 'bigbox-v1-cm-2' }) do
+		local path = 'src/configs/' .. target .. '.json'
+		local f = io.open(path, 'rb') or io.open('../' .. path, 'rb')
+		assert(f, 'unable to read ' .. path)
+		local doc = assert(cjson.decode(f:read('*a')), target .. ' must decode')
+		f:close()
+
+		local ok, _, err = conf.validate_config(doc.metrics)
+		assert(ok == true, target .. ' metrics config invalid: ' .. tostring(err))
+		local pipelines = conf.apply_config(doc.metrics)
+		assert(pipelines.mcu_uptime, target .. ' should have an mcu_uptime pipeline')
+		assert(pipelines.mcu_boot_id, target .. ' should have an mcu_boot_id pipeline')
+
+		local up = doc.metrics.data.pipelines.mcu_uptime.process[1]
+		assert(up.type == 'TimeTrigger' and up.duration == 300, target .. ' uptime should report every 5 minutes')
+
+		local id_state = pipelines.mcu_boot_id.pipeline:new_state()
+		assert(pipelines.mcu_boot_id.pipeline:run('a', id_state) == 'a', target .. ' first boot id passes')
+		local _, same = pipelines.mcu_boot_id.pipeline:run('a', id_state)
+		assert(same == true, target .. ' unchanged boot id is held back')
+		assert(pipelines.mcu_boot_id.pipeline:run('b', id_state) == 'b', target .. ' new boot id passes')
+	end
+end
+
+-- Every BigBox target sends the system service's `temp` (CPU temperature) and
+-- `board_revision`. Both are emitted by services/system.lua; without a pipeline
+-- the metrics service drops them (bigbox-ss lost temp, v0.11 lost board_revision).
+function T.bigbox_configs_send_temp_and_board_revision()
+	local cjson = require 'cjson.safe'
+	for _, target in ipairs({ 'bigbox-v1-cm', 'bigbox-v1-cm-2', 'bigbox-ss' }) do
+		local path = 'src/configs/' .. target .. '.json'
+		local f = io.open(path, 'rb') or io.open('../' .. path, 'rb')
+		assert(f, 'unable to read ' .. path)
+		local doc = assert(cjson.decode(f:read('*a')), target .. ' must decode')
+		f:close()
+
+		local ok, _, err = conf.validate_config(doc.metrics)
+		assert(ok == true, target .. ' metrics config invalid: ' .. tostring(err))
+		local pipelines = conf.apply_config(doc.metrics)
+		assert(pipelines.temp, target .. ' should have a temp pipeline')
+		assert(pipelines.board_revision, target .. ' should have a board_revision pipeline')
+	end
+end
+
+-- Every BigBox target sends the Raspberry Pi power flags (v0.10.6 names).
+function T.bigbox_configs_send_pi_power_flags()
+	local cjson = require 'cjson.safe'
+	for _, target in ipairs({ 'bigbox-v1-cm', 'bigbox-v1-cm-2', 'bigbox-ss' }) do
+		local path = 'src/configs/' .. target .. '.json'
+		local f = io.open(path, 'rb') or io.open('../' .. path, 'rb')
+		assert(f, 'unable to read ' .. path)
+		local doc = assert(cjson.decode(f:read('*a')), target .. ' must decode')
+		f:close()
+
+		local ok, _, err = conf.validate_config(doc.metrics)
+		assert(ok == true, target .. ' metrics config invalid: ' .. tostring(err))
+		local pipelines = conf.apply_config(doc.metrics)
+		for _, key in ipairs({ 'power_undervoltage', 'power_arm_frequency_capped',
+			'power_currently_throttled', 'power_under_voltage_occurred' }) do
+			assert(pipelines[key], target .. ' should have a ' .. key .. ' pipeline')
+		end
+	end
+end
+
 return T
