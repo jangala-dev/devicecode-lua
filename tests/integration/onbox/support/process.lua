@@ -1,10 +1,13 @@
 local bit = require 'bit'
-local posix = require 'posix'
 local clock = require 'posix.time'
+local dirent = require 'posix.dirent'
 local errno = require 'posix.errno'
 local fcntl = require 'posix.fcntl'
 local signals = require 'posix.signal'
 local stat = require 'posix.sys.stat'
+local stdlib = require 'posix.stdlib'
+local unistd = require 'posix.unistd'
+local waitlib = require 'posix.sys.wait'
 local auth = require 'onbox.support.auth'
 local fiber_runtime = require 'onbox.support.fiber_runtime'
 local util = require 'onbox.support.util'
@@ -85,9 +88,14 @@ local function acquire_launch_gate(state, wait)
     local f = fiber_runtime.get()
     token.ready = f.oneshot.new()
     launch_gate.waiters[#launch_gate.waiters + 1] = token
-    local acquired = f.fibers.perform(f.op.choice(
+    local performed, acquired = pcall(f.fibers.perform, f.op.choice(
         fiber_runtime.oneshot_op(token.ready):wrap(function() return true end),
         interrupt_op(state):wrap(function() return false end)))
+    if not performed then
+        if token.state == 'queued' then token.state = 'cancelled'
+        elseif token.state == 'granted' then release_launch_gate(token) end
+        error(acquired, 0)
+    end
     if not acquired or (state and state.interrupted and not state.recovering) then
         if token.state == 'queued' then token.state = 'cancelled'
         elseif token.state == 'granted' then release_launch_gate(token) end
@@ -167,10 +175,10 @@ end
 
 local function read_proc_stat(pid)
     local path = '/proc/' .. tostring(pid) .. '/stat'
-    local fd, open_err, open_errno = posix.open(path, posix.O_RDONLY)
+    local fd, open_err, open_errno = fcntl.open(path, fcntl.O_RDONLY)
     if not fd then return nil, open_err, open_errno end
-    local content, read_err, read_errno = posix.read(fd, 8192)
-    posix.close(fd)
+    local content, read_err, read_errno = unistd.read(fd, 8192)
+    unistd.close(fd)
     if not content then return nil, read_err, read_errno end
     local ok, identity = pcall(M.parse_proc_stat, content)
     if not ok then return nil, identity, nil end
@@ -178,7 +186,8 @@ local function read_proc_stat(pid)
 end
 
 local function capture_group_identity(pgid, background)
-    local deadline, detail = M.now() + 1, 'not observed'
+    local deadline = M.now() + 1
+    local detail
     while true do
         local identity, err, eno = read_proc_stat(pgid)
         if identity and identity.pid == pgid and identity.pgrp == pgid
@@ -198,7 +207,7 @@ end
 local function identity_matches(expected)
     local current, err, eno = read_proc_stat(expected.pid)
     if not current then
-        if eno == errno.ENOENT or not posix.stat('/proc/' .. expected.pid) then return false, 'absent' end
+        if eno == errno.ENOENT or not stat.stat('/proc/' .. expected.pid) then return false, 'absent' end
         return false, 'inconclusive: ' .. tostring(err or eno)
     end
     if current.pid ~= expected.pid or current.pgrp ~= expected.pgrp or current.sid ~= expected.sid
@@ -217,7 +226,7 @@ function M.classify_group(pgid)
     assert(type(pgid) == 'number' and pgid > 1 and pgid == math.floor(pgid), 'Invalid process group')
     local listed, names = pcall(function()
         local result = {}
-        for name in posix.files('/proc') do
+        for name in dirent.files('/proc') do
             if name:match('^[1-9][0-9]*$') then result[#result + 1] = tonumber(name) end
         end
         return result
@@ -227,7 +236,7 @@ function M.classify_group(pgid)
     for _, pid in ipairs(names) do
         local identity, err, eno = read_proc_stat(pid)
         if not identity then
-            if eno ~= errno.ENOENT and posix.stat('/proc/' .. pid) then
+            if eno ~= errno.ENOENT and stat.stat('/proc/' .. pid) then
                 return 'INCONCLUSIVE', zombies, ('Cannot inspect /proc/%d/stat: %s'):format(pid, tostring(err or eno))
             end
         elseif identity.pgrp == pgid then
@@ -242,7 +251,7 @@ function M.classify_group(pgid)
 end
 
 local function assert_proc_supported()
-    local pid = assert(posix.getpid().pid)
+    local pid = assert(unistd.getpid())
     local identity, err = read_proc_stat(pid)
     assert(identity and identity.pid == pid, 'Linux /proc process identity is unavailable: ' .. tostring(err))
 end
@@ -282,11 +291,11 @@ end
 local function open_input_fd(path)
     path = path or '/dev/null'
     local flags = bit.bor(fcntl.O_RDONLY or 0, fcntl.O_NONBLOCK or 2048, fcntl.O_CLOEXEC or 0)
-    local fd, open_err = posix.open(path, flags)
+    local fd, open_err = fcntl.open(path, flags)
     assert(fd, open_err)
     local ok, result = pcall(function()
         set_fd_cloexec(fd, true)
-        local info = assert(posix.fstat(fd), 'Cannot inspect process input descriptor')
+        local info = assert(stat.fstat(fd), 'Cannot inspect process input descriptor')
         assert(stat.S_ISREG(info.st_mode) ~= 0
             or (path == '/dev/null' and stat.S_ISCHR(info.st_mode) ~= 0),
             'Unsupported process input type; expected regular file or /dev/null')
@@ -298,7 +307,7 @@ local function open_input_fd(path)
         end
         return fd, path
     end)
-    if not ok then posix.close(fd); error(result, 0) end
+    if not ok then unistd.close(fd); error(result, 0) end
     return result, path
 end
 
@@ -317,9 +326,9 @@ end
 function Process:_read_handoff(handle)
     local content = read_if_complete(handle.pid_path)
     if not content then return nil end
-    local info = assert(posix.lstat(handle.pid_path), 'Cannot inspect process handoff')
+    local info = assert(stat.lstat(handle.pid_path), 'Cannot inspect process handoff')
     assert(stat.S_ISREG(info.st_mode) ~= 0, 'Invalid process handoff type')
-    assert(info.st_uid == posix.getuid(), 'Invalid process handoff owner')
+    assert(info.st_uid == unistd.getuid(), 'Invalid process handoff owner')
     assert(info.st_nlink == 1, 'Invalid process handoff link count')
     assert(bit.band(info.st_mode, stat.S_IRWXU + stat.S_IRWXG + stat.S_IRWXO) == 384,
         'Invalid process handoff permissions')
@@ -333,10 +342,10 @@ local function remove_workspace(handle)
     local function remove(path, directory)
         if not path then return end
         local ok, err, eno
-        if directory then ok, err, eno = posix.rmdir(path)
+        if directory then ok, err, eno = unistd.rmdir(path)
         else ok, err, eno = os.remove(path) end
         if ok then return end
-        local _, _, stat_errno = posix.lstat(path)
+        local _, _, stat_errno = stat.lstat(path)
         if eno == errno.ENOENT or stat_errno == errno.ENOENT then return end
         errors[#errors + 1] = ('Cannot remove %s: %s'):format(path, tostring(err or eno))
     end
@@ -376,7 +385,7 @@ end
 
 local function reap_group_children(pgid)
     for _ = 1, 256 do
-        local ok, pid = pcall(posix.wait, -pgid, posix.WNOHANG)
+        local ok, pid = pcall(waitlib.wait, -pgid, waitlib.WNOHANG)
         if not ok or not pid or pid == 0 then return end
     end
 end
@@ -595,7 +604,7 @@ function Process:_launch(command, opts, background, on_handle)
     local f = fiber_runtime.get()
     local input_fd, input_path = open_input_fd(opts.input_path)
     local wrapped, input = pcall(f.file.fdopen, input_fd, 'r', input_path)
-    if not wrapped then posix.close(input_fd); error(input, 0) end
+    if not wrapped then unistd.close(input_fd); error(input, 0) end
     local acquired, gate_token = pcall(acquire_launch_gate, self.state, true)
     if not acquired then
         local closed, close_err = close_stream(input, true)
@@ -607,24 +616,26 @@ function Process:_launch(command, opts, background, on_handle)
     local leases_retired = false
     local spawned = false
 
-    local function finish_gate(poison)
+    -- Failed containment poisons this Process in the shutdown helpers, not the
+    -- shared gate: the independent recovery Process must still be able to launch.
+    -- retire_leases() separately poisons the gate when credential FD state is unsafe.
+    local function finish_gate()
         local errors = {}
         if not leases_retired then
             leases_retired = true
             local retired, retire_err = pcall(function() retire_leases(leases) end)
             if not retired then errors[#errors + 1] = tostring(retire_err) end
         end
-        if poison then poison_launch_gate(poison) end
         if gate_held then release_launch_gate(gate_token); gate_held = false end
         if #errors > 0 then error(table.concat(errors, '\n'), 0) end
     end
 
     local launched, launch_err = pcall(function()
         leases = validate_leases(opts.inherit_fds)
-        workspace = assert(posix.mkdtemp(self.artifacts .. '/.process-XXXXXX'))
-        assert(posix.chmod(workspace, 'rwx------'))
+        workspace = assert(stdlib.mkdtemp(self.artifacts .. '/.process-XXXXXX'))
+        assert(stat.chmod(workspace, 448))
         pid_path = workspace .. '/pid'
-        assert(not posix.lstat(pid_path), 'Process handoff already exists')
+        assert(not stat.lstat(pid_path), 'Process handoff already exists')
         local stdout_path = opts.log_path or (self.artifacts .. '/command.stdout')
         local stderr_path = opts.log_path and nil or (self.artifacts .. '/command.stderr')
         local stdout, stdout_err = f.file.open(stdout_path, 'w')
@@ -674,7 +685,7 @@ function Process:_launch(command, opts, background, on_handle)
     if launched then
         local finalized, final_err = pcall(finish_gate)
         if finalized then return handle end
-        launched, launch_err = false, final_err
+        launch_err = final_err
     end
 
     if handle then handle.lifecycle_done:signal() end
@@ -703,8 +714,7 @@ function Process:_launch(command, opts, background, on_handle)
             assert(#cleanup_errors == 0, table.concat(cleanup_errors, '\n'))
         end
     end)
-    local containment_error = spawned and not cleaned and ('Launch containment failed: ' .. tostring(cleanup_err)) or nil
-    local finalized, final_err = pcall(finish_gate, containment_error)
+    local finalized, final_err = pcall(finish_gate)
     local errors = { tostring(launch_err) }
     if not cleaned then errors[#errors + 1] = 'Launch cleanup failed: ' .. tostring(cleanup_err) end
     if not finalized then errors[#errors + 1] = 'Credential cleanup failed: ' .. tostring(final_err) end
@@ -763,35 +773,64 @@ function Process:_run_serialized(command, opts)
 end
 
 function Process:_acquire_foreground()
-    if not self.foreground_busy then self.foreground_busy = true; return end
+    local token = { state = 'queued' }
+    if not self.foreground_busy then
+        token.state = 'granted'
+        self.foreground_owner = token
+        self.foreground_busy = true
+        return token
+    end
     local f = fiber_runtime.get()
-    local waiter = { ready = f.oneshot.new() }
-    self.foreground_waiters[#self.foreground_waiters + 1] = waiter
-    local acquired = f.fibers.perform(f.op.choice(
-        fiber_runtime.oneshot_op(waiter.ready):wrap(function() return true end),
+    token.ready = f.oneshot.new()
+    self.foreground_waiters[#self.foreground_waiters + 1] = token
+    local performed, acquired = pcall(f.fibers.perform, f.op.choice(
+        fiber_runtime.oneshot_op(token.ready):wrap(function() return true end),
         interrupt_op(self.state):wrap(function() return false end)))
-    if not acquired then waiter.cancelled = true; error('Interrupted', 0) end
-    if self.state.interrupted and not self.state.recovering then
-        self:_release_foreground()
+    if not performed then
+        if token.state == 'queued' then token.state = 'cancelled'
+        elseif token.state == 'granted' then self:_release_foreground(token) end
+        error(acquired, 0)
+    end
+    if not acquired then
+        if token.state == 'queued' then token.state = 'cancelled'
+        elseif token.state == 'granted' then self:_release_foreground(token) end
         error('Interrupted', 0)
     end
+    if self.state.interrupted and not self.state.recovering then
+        self:_release_foreground(token)
+        error('Interrupted', 0)
+    end
+    assert(token.state == 'granted' and self.foreground_owner == token,
+        'Foreground process gate grant was lost')
+    return token
 end
 
-function Process:_release_foreground()
+function Process:_release_foreground(token)
     assert(self.foreground_busy, 'Foreground process gate released while idle')
+    if token then
+        assert(self.foreground_owner == token and token.state == 'granted',
+            'Foreground process gate released by a non-owner')
+        token.state = 'released'
+    end
     while #self.foreground_waiters > 0 do
         local waiter = table.remove(self.foreground_waiters, 1)
-        if not waiter.cancelled then waiter.ready:signal(); return end
+        if waiter.state == 'queued' then
+            waiter.state = 'granted'
+            self.foreground_owner = waiter
+            waiter.ready:signal()
+            return
+        end
     end
+    self.foreground_owner = nil
     self.foreground_busy = false
 end
 
 function Process:_run_fiber(command, opts)
     self:check_interrupted()
     opts = opts or {}
-    self:_acquire_foreground()
+    local token = self:_acquire_foreground()
     local ok, result = pcall(function() return self:_run_serialized(command, opts) end)
-    self:_release_foreground()
+    self:_release_foreground(token)
     if not ok then error(result, 0) end
     return result
 end
@@ -802,11 +841,19 @@ function Process:run(command, opts)
     return f.fibers.run(function() return self:_run_fiber(command, opts) end)
 end
 
-local function legacy_start(command, log_path, input_fd)
+local function legacy_start(command, log_path, input_fd, ready_path, release_path)
     assert(type(input_fd) == 'number' and input_fd >= 0 and input_fd == math.floor(input_fd),
         'Invalid legacy input descriptor')
-    local shell = 'setsid ' .. command .. ' > ' .. M.quote(log_path)
-        .. ' 2>&1 <&' .. tostring(input_fd) .. ' & echo $!'
+    local inner = 'umask 077; printf ready > ' .. M.quote(ready_path) .. ' || exit 125'
+        .. '; while test ! -e ' .. M.quote(release_path) .. '; do sleep 0.01; done; exec sh -c '
+        .. M.quote(command)
+    local shell = 'setsid sh -c ' .. M.quote(inner) .. ' > ' .. M.quote(log_path)
+        .. ' 2>&1 < ' .. M.quote('/proc/self/fd/' .. tostring(input_fd))
+        .. ' & onbox_pid=$!; onbox_attempt=0; '
+        .. 'while test "$(cat ' .. M.quote(ready_path) .. ' 2>/dev/null)" != ready '
+        .. '&& kill -0 "$onbox_pid" 2>/dev/null; do '
+        .. 'onbox_attempt=$((onbox_attempt + 1)); test "$onbox_attempt" -le 200 || break; sleep 0.01; done; '
+        .. 'test "$(cat ' .. M.quote(ready_path) .. ' 2>/dev/null)" = ready || exit 1; echo "$onbox_pid"'
     local pipe = assert(io.popen(shell, 'r'))
     local pid = tonumber(pipe:read('*l'))
     pipe:close()
@@ -819,35 +866,42 @@ function Process:start(command, log_path, input_path, opts)
     if not fiber_runtime.in_fiber() then
         local input_fd = open_input_fd(input_path)
         local acquired, gate_token = pcall(acquire_launch_gate, self.state, false)
-        if not acquired then posix.close(input_fd); error(gate_token, 0) end
-        local leases, pid, record
+        if not acquired then unistd.close(input_fd); error(gate_token, 0) end
+        local leases, pid, record, workspace, ready_path, release_path
         local input_inheritable = false
         local prepared, prepare_err = pcall(function()
+            workspace = assert(stdlib.mkdtemp(self.artifacts .. '/.legacy-XXXXXX'))
+            assert(stat.chmod(workspace, 448))
+            ready_path, release_path = workspace .. '/ready', workspace .. '/release'
             leases = validate_leases(opts.inherit_fds)
             assert_proc_supported()
             for _, lease in ipairs(leases) do auth.set_lease_inheritable(lease, true) end
             set_fd_cloexec(input_fd, false)
             input_inheritable = true
-            pid = legacy_start(command, log_path, input_fd)
+            pid = legacy_start(command, log_path, input_fd, ready_path, release_path)
             set_fd_cloexec(input_fd, true)
             input_inheritable = false
+            assert(stat.stat(ready_path), 'Legacy process launch handoff is missing')
         end)
         if pid then
-            record = { pid = pid, pgid = pid, status = 'provisional' }
+            record = { pid = pid, pgid = pid, status = 'provisional', workspace = workspace,
+                ready_path = ready_path, release_path = release_path }
             self.legacy[pid] = record
             managed_active = managed_active + 1
         end
         local captured, capture_err = false, nil
         if record then
-            captured, capture_err = pcall(function() record.identity = capture_group_identity(pid, true) end)
+            captured, capture_err = pcall(function()
+                record.identity = capture_group_identity(pid, true)
+                util.write(release_path, '')
+            end)
         end
         local input_restored, input_restore_err = true, nil
         if input_inheritable then
             input_restored, input_restore_err = pcall(set_fd_cloexec, input_fd, true)
-            input_inheritable = false
         end
         local retired, retire_err = pcall(function() retire_leases(leases) end)
-        local input_closed, input_close_err = posix.close(input_fd)
+        local input_closed, input_close_err = unistd.close(input_fd)
         if not input_restored or not input_closed then
             poison_launch_gate(input_restore_err or input_close_err or 'Legacy input descriptor cleanup failed')
         end
@@ -878,11 +932,18 @@ function Process:start(command, log_path, input_path, opts)
                 self.legacy[pid] = nil
                 self.tombstone[pid] = true
                 managed_active = managed_active - 1
+                os.remove(ready_path)
+                os.remove(release_path)
+                assert(unistd.rmdir(workspace))
             end)
             if not contained then
-                poison_launch_gate(contain_err)
+                self:_poison(contain_err)
                 errors[#errors + 1] = 'Provisional process retained: ' .. tostring(contain_err)
             end
+        elseif workspace then
+            if ready_path then os.remove(ready_path) end
+            if release_path then os.remove(release_path) end
+            unistd.rmdir(workspace)
         end
         error(table.concat(errors, '\n'), 0)
     end
@@ -920,6 +981,9 @@ function Process:stop(pid, grace)
     local record = self.legacy[pid]
     assert(record, 'Unknown or unowned process ID: ' .. pid)
     self:_stop_legacy_record(record, grace)
+    os.remove(record.ready_path)
+    os.remove(record.release_path)
+    assert(unistd.rmdir(record.workspace))
     self.legacy[pid] = nil
     self.tombstone[pid] = true
     managed_active = managed_active - 1

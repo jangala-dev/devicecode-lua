@@ -51,6 +51,7 @@ end
 ---@return nil
 function Logs:start(label)
     assert(not self.pid and not self.pid_path and not self.stopping, 'Log capture is already running')
+    self.ssh:workspace_created(self.remote)
     self.ssh:run('umask 077; mkdir -p ' .. quote(self.remote))
     self.pid_path = self.remote .. '/' .. label .. '-logread.pid'
     self.path = self.artifacts .. '/' .. label .. '-service.log'

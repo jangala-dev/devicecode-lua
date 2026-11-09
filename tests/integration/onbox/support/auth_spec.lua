@@ -125,7 +125,8 @@ exec "$@"
     shim:close()
     assert(posix.chmod(bin .. '/sshpass', 'rwx------'))
     assert(posix.setenv('PATH', bin .. ':' .. original_path, true))
-    local here = assert(posix.realpath(arg[0])):match('^(.*)/[^/]+$')
+    local source = assert(debug.getinfo(1, 'S').source:match('^@(.+)$'))
+    local here = assert(posix.realpath(source)):match('^(.*)/[^/]+$')
     local repo = assert(here:match('^(.*)/tests/integration/onbox/support$'))
     local box = runner.new(runner.parse_args({ '--ask-pass', '--artifacts', temp .. '/logs' }, repo, here),
         dummy_password)
