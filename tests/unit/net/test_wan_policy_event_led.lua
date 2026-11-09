@@ -157,13 +157,13 @@ function tests.test_default_speedtest_interval_is_six_hours()
 end
 
 
-function tests.test_speedtest_request_duration_is_capped_at_one_second()
+function tests.test_speedtest_request_duration_is_capped_at_four_seconds()
 	local s = snapshot()
 	s.wan.configured_members.wan.speedtest_duration_s = 8
 	local uplinks = policy.collect_uplinks(s)
 	local by_uplink = {}
 	for _, u in ipairs(uplinks) do by_uplink[u.uplink_id] = u end
-	eq(by_uplink.wan.request.max_duration_s, 1)
+	eq(by_uplink.wan.request.max_duration_s, 4)
 
 	s.wan.configured_members.wan.speedtest_duration_s = 0.5
 	uplinks = policy.collect_uplinks(s)
@@ -230,6 +230,13 @@ function tests.test_speedtest_retry_delay_uses_configured_exponential_backoff()
     eq(policy.speedtest_retry_delay_s(s, { failure_count = 2 }), 20)
     eq(policy.speedtest_retry_delay_s(s, { failure_count = 3 }), 40)
     eq(policy.speedtest_retry_delay_s(s, { failure_count = 4 }), 60)
+end
+
+function tests.test_speedtest_budget_failure_does_not_retry_every_ten_seconds()
+	local s = snapshot()
+	eq(policy.speedtest_retry_delay_s(s, {failure_count=1, err='insufficient_data_budget'}), 6*60*60)
+	s.wan.load_balancing.speedtests.interval_s = 100
+	eq(policy.speedtest_retry_delay_s(s, {failure_count=1, err='insufficient_data_budget'}), 100)
 end
 
 function tests.test_speedtest_retry_delay_defaults_to_ten_seconds()
