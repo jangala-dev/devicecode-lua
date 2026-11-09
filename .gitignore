@@ -1,4 +1,5 @@
 scratchpad
+/boxkey
 *.DS_Store
 src/services/modem-*
 docs/

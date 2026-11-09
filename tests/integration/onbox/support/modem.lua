@@ -1,4 +1,4 @@
-local posix = require 'posix'
+local stdlib = require 'posix.stdlib'
 local process = require 'onbox.support.process'
 local util = require 'onbox.support.util'
 local quote = process.quote
@@ -136,7 +136,7 @@ function Modems:probe(modem, commands)
         'No AT port reported by ModemManager for modem …' .. (modem.imei or ''):sub(-4))
     if not self.probe_uploaded then
         local module_path = assert(package.searchpath('onbox.support.modem', package.path))
-        local directory = assert(posix.realpath(module_path)):match('^(.*)/[^/]+$')
+        local directory = assert(stdlib.realpath(module_path)):match('^(.*)/[^/]+$')
         self.box.ssh:upload(directory .. '/at_probe.lua', self.box.remote .. '/at_probe.lua')
         self.probe_uploaded = true
     end

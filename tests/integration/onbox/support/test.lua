@@ -1,7 +1,7 @@
 #!/usr/bin/env luajit
 -- Offline checks for shared on-box support; no box or password file is accessed.
-local posix = require 'posix'
-local path = assert(posix.realpath(arg[0]))
+local stdlib = require 'posix.stdlib'
+local path = assert(stdlib.realpath(arg[0]))
 local here = assert(path:match('^(.*)/[^/]+$'))
 local repo = assert(here:match('^(.*)/tests/integration/onbox/support$'))
 package.path = repo .. '/tests/integration/?.lua;' .. repo .. '/src/?.lua;' .. package.path

@@ -12,6 +12,7 @@ local perform      = fibers.perform
 local op           = require 'fibers.op'
 local busmod       = require 'bus'
 local json         = require 'cjson.safe'
+local crash_record = require 'devicecode.crash_record'
 local virtual_time = require 'tests.support.virtual_time'
 local time_harness = require 'tests.support.time_harness'
 local runfibers    = require 'tests.support.run_fibers'
@@ -342,6 +343,244 @@ function T.delta_value_pipeline()
 		stop_scope(svc_scope)
 		clock:restore()
 	end, { timeout = 3.0 })
+end
+
+-- Runs metrics with a stubbed HTTP publisher and a crash record already on file.
+local function with_pending_crash(synced, body, opts)
+	opts = opts or {}
+	local original_http_mod = package.loaded['services.metrics.http']
+	local sent = {}
+	package.loaded['services.metrics.http'] = {
+		start_http_publisher = function()
+			local channel = {}
+			channel.put_op = function(_, data)
+				data.channel = channel
+				sent[#sent + 1] = data
+				return op.always(nil) -- as the real channel does when there's room
+			end
+			return channel
+		end,
+	}
+
+	local path = os.tmpname()
+	os.remove(path)
+	local function new_store(mono)
+		return crash_record.new({
+			path = path, boot_id = 'boot-1',
+			monotonic = function() return mono end,
+			read_system_log = function() return '' end,
+		})
+	end
+	local earlier = new_store(500)
+	earlier:begin_run()
+	earlier:record_failure({ service = 'gsm', status = 'failed', primary = 'gsm.lua:1: boom' })
+	if opts.file then
+		local f = assert(io.open(path, 'w'))
+		f:write(opts.file)
+		f:close()
+	end
+	for i = 2, opts.records or 1 do
+		local later = new_store(500 + i)
+		later:begin_run()
+		later:record_failure({ service = 'gsm', status = 'failed', primary = 'gsm.lua:1: boom' })
+	end
+
+	local ok_run, run_err = pcall(function()
+		runfibers.run(function(scope)
+			local clock = new_test_clock()
+			scope:finally(function() clock:restore() end)
+			local bus       = make_bus()
+			local test_conn = bus:connect()
+
+			test_conn:retain({ 'cap', 'fs', 'credentials', 'state' }, 'added')
+			start_mock_hal(test_conn, scope)
+			test_conn:retain({ 'state', 'time', 'synced' }, synced)
+			test_conn:retain({ 'cfg', 'metrics' }, {
+				data = {
+					schema = METRICS_SCHEMA, publish_period = opts.publish_period or 0.1,
+					cloud_url = 'http://localhost:18080',
+					pipelines = { sim = { protocol = 'http', process = {} } },
+				},
+			})
+
+			local store = new_store(600)
+			store:begin_run()
+			local svc_scope = start_metrics(bus, scope, { name = 'metrics', crash_store = store })
+			flush_ticks()
+			clock:advance(0.3)
+			time_harness.flush_ticks(20)
+
+			body(sent, store, clock, test_conn)
+
+			stop_scope(svc_scope)
+			clock:restore()
+		end, { timeout = opts.timeout or 3.0 })
+	end)
+
+	package.loaded['services.metrics.http'] = original_http_mod
+	os.remove(path)
+	if not ok_run then error(run_err, 0) end
+end
+
+local function senml_field(data, name)
+	for _, rec in ipairs(json.decode(data.body)) do
+		if rec.n == 'system.crash.' .. name then return rec end
+	end
+	return nil
+end
+
+function T.crash_record_is_sent_with_the_time_it_happened()
+	with_pending_crash(true, function(sent)
+		assert(#sent >= 1, 'expected the crash record to be sent')
+		local data = sent[1]
+		assert(data.uri == 'http://localhost:18080/http/channels/ch-data/messages', 'uri: ' .. tostring(data.uri))
+		assert(senml_field(data, 'kind').vs == 'service_failed', 'kind')
+		assert(senml_field(data, 'service').vs == 'gsm', 'service')
+		assert(senml_field(data, 'reason').vs == 'gsm.lua:1: boom', 'reason')
+		assert(senml_field(data, 'uptime_s').v == 500, 'uptime')
+		-- The virtual clock started at monotonic 0, realtime 1700000000.
+		local t = senml_field(data, 'reason').t
+		assert(math.abs(t - 1700000500000) < 2000, 'expected the time of the crash, got ' .. tostring(t))
+	end)
+end
+
+function T.crash_record_is_sent_once_when_accepted()
+	with_pending_crash(true, function(sent, store, clock)
+		assert(#sent == 1, 'expected one send, got ' .. #sent)
+		clock:advance(0.3)
+		time_harness.flush_ticks(20)
+		assert(#sent == 1, 'should not resend while waiting for an answer, got ' .. #sent)
+
+		sent[1].on_result(true)
+		assert(store:next_pending(math.huge) == nil, 'accepted record should be gone')
+		clock:advance(0.3)
+		time_harness.flush_ticks(20)
+		assert(#sent == 1, 'should not send again, got ' .. #sent)
+	end)
+end
+
+function T.crash_record_is_kept_when_the_cloud_refuses_it()
+	with_pending_crash(true, function(sent, store, clock)
+		sent[1].on_result(false)
+		assert(store:next_pending(math.huge) ~= nil, 'refused record should stay on file')
+		clock:advance(0.3)
+		time_harness.flush_ticks(20)
+		assert(#sent == 1, 'should wait before retrying, got ' .. #sent)
+	end)
+end
+
+local function advance_crash_clock(clock, seconds)
+	clock:advance(seconds)
+	time_harness.flush_ticks(20)
+end
+
+-- /tmp is cleared by a reboot, so a retry can't wait for a long publish period.
+function T.crash_retry_does_not_wait_for_the_publish_tick()
+	with_pending_crash(true, function(sent, _, clock)
+		assert(#sent == 1, 'expected the first send, got ' .. #sent)
+		sent[1].on_result(false)
+
+		advance_crash_clock(clock, 29)
+		assert(#sent == 1, 'should wait out the retry delay, got ' .. #sent)
+
+		advance_crash_clock(clock, 2)
+		assert(#sent == 2, 'expected a retry at the crash deadline, got ' .. #sent)
+	end, { timeout = 3000, publish_period = 3600 })
+end
+
+function T.next_crash_record_does_not_wait_for_the_publish_tick()
+	with_pending_crash(true, function(sent, _, clock)
+		assert(#sent == 1, 'expected the first send, got ' .. #sent)
+		sent[1].on_result(true)
+
+		advance_crash_clock(clock, 6)
+		assert(#sent == 2, 'expected the second record, got ' .. #sent)
+	end, { timeout = 3000, publish_period = 3600, records = 2 })
+end
+
+-- Past the first crashes, records are paced to keep the data use down.
+function T.crash_send_interval_does_not_wait_for_the_publish_tick()
+	with_pending_crash(true, function(sent, _, clock)
+		for i = 1, 4 do
+			assert(#sent == i, 'expected send ' .. i .. ', got ' .. #sent)
+			sent[i].on_result(true)
+			if i < 4 then advance_crash_clock(clock, 6) end
+		end
+
+		advance_crash_clock(clock, 599)
+		assert(#sent == 4, 'should wait out the send interval, got ' .. #sent)
+
+		advance_crash_clock(clock, 2)
+		assert(#sent == 5, 'expected the paced send, got ' .. #sent)
+	end, { timeout = 3000, publish_period = 3600, records = 5 })
+end
+
+-- The publisher sends one payload at a time, and retries ordinary telemetry for ever
+-- when the network fails. A crash record behind that wouldn't go out until it got through.
+function T.crash_record_does_not_queue_behind_ordinary_telemetry()
+	with_pending_crash(true, function(sent, _, clock, test_conn)
+		test_conn:publish({ 'obs', 'v1', 'modem', 'metric', 'sim' }, { value = 'x' })
+		advance_crash_clock(clock, 0.3)
+
+		local crash, ordinary
+		for _, data in ipairs(sent) do
+			if data.one_shot then crash = data else ordinary = data end
+		end
+		assert(crash, 'expected a crash send')
+		assert(ordinary, 'expected an ordinary send')
+		assert(crash.channel ~= ordinary.channel, 'expected a crash send to have its own publisher')
+	end)
+end
+
+-- A full /tmp means the wait can't be saved, which mustn't turn into a tight loop.
+function T.crash_sends_stay_spaced_when_the_store_cannot_save()
+	with_pending_crash(true, function(sent, store, clock)
+		store.mark_failed = function() end
+		local answered = 0
+		for _ = 1, 21 do
+			if #sent > answered then
+				answered = #sent
+				sent[answered].on_result(false)
+			end
+			advance_crash_clock(clock, 1)
+		end
+		assert(#sent >= 2, 'expected it to keep trying, got ' .. #sent)
+		assert(#sent <= 5, 'expected sends at least 5s apart, got ' .. #sent)
+	end, { timeout = 3000, publish_period = 3600 })
+end
+
+-- Valid JSON with records of the wrong shape mustn't stop metrics.
+function T.a_damaged_crash_file_does_not_stop_metrics()
+	with_pending_crash(true, function(sent)
+		assert(#sent == 1, 'expected the good record to be sent, got ' .. #sent)
+		assert(senml_field(sent[1], 'seq').v == 5, 'expected the good record')
+		assert(senml_field(sent[1], 'kind').vs == 'service_failed', 'kind')
+	end, {
+		file = '{"boot_id":"boot-1","seq":5,"crashes":1,"next_send":0,'
+			.. '"pending":[true,{"seq":4},{"seq":5,"mono":550,"kind":"service_failed"}]}',
+	})
+end
+
+-- Numbering starts again after a damaged file, so an answer for an older record
+-- mustn't remove a newer one with the same seq.
+function T.an_answer_after_renumbering_keeps_the_new_record()
+	with_pending_crash(true, function(sent, store)
+		assert(#sent == 1, 'expected the old record to be sent, got ' .. #sent)
+		store:record_failure({ service = 'net', status = 'failed', primary = 'x' })
+		sent[1].on_result(true)
+		local rec = store:next_pending(math.huge)
+		assert(rec, 'the new record should still be pending')
+		assert(rec.mono == 600, 'expected the new record, got mono ' .. tostring(rec.mono))
+	end, {
+		file = '{"boot_id":"boot-1","seq":2147483647,"crashes":1,"next_send":0,'
+			.. '"pending":[{"seq":1,"mono":550,"kind":"service_failed"}]}',
+	})
+end
+
+function T.crash_record_waits_for_time_sync()
+	with_pending_crash(false, function(sent)
+		assert(#sent == 0, 'should not send before the clock is synced, got ' .. #sent)
+	end)
 end
 
 -- Shared set-up for the restart baseline specs: metrics starts with the box

@@ -27,9 +27,14 @@ end
 local fibers = require 'fibers'
 local mainmod = require 'devicecode.main'
 local signal_bridge = require 'devicecode.signal_bridge'
+local crash_record = require 'devicecode.crash_record'
+
+local crash_store = crash_record.new()
 
 local ok, err = xpcall(function()
 	return fibers.run(function(scope)
+		crash_store:begin_run()
+
 		local sig_ok, sig_err = signal_bridge.install(scope, {
 			TERM = true,
 			INT = true,
@@ -40,13 +45,16 @@ local ok, err = xpcall(function()
 
 		return mainmod.run(scope, {
 			env = env,
+			crash_store = crash_store,
 		})
 	end)
 end, tostring)
 
 if not ok then
 	if tostring(err):match('signal:TERM') or tostring(err):match('signal:INT') then
+		crash_store:record_signal(tostring(err):match('signal:%u+'))
 		os.exit(0)
 	end
+	crash_store:record_error(err)
 	error(err, 0)
 end
