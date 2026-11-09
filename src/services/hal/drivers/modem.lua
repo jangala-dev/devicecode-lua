@@ -39,14 +39,6 @@ local pulse = require "fibers.pulse"
 local Modem = {}
 Modem.__index = Modem
 
-local function list_to_map(list)
-    local map = {}
-    for _, value in ipairs(list) do
-        map[value] = true
-    end
-    return map
-end
-
 ---- Constant Definitions ----
 local D_LOG_EMITTER = false
 
@@ -72,53 +64,85 @@ local function signal_polling_active(state)
     return SIGNAL_ACTIVE_STATES[state] == true
 end
 
+---@class ModemInfoGroup
+---@field fields string[]
+---@field does_emit boolean
+
+---@type table<string, ModemInfoGroup>
 local GROUP_FIELDS = {
     identity = {
-        "imei",
-        "drivers",
-        "plugin",
-        "model",
-        "revision",
-        "firmware",
+        does_emit = true,
+        fields = {
+            "imei",
+            "drivers",
+            "plugin",
+            "model",
+            "revision",
+            "firmware",
+        },
     },
     ports = {
-        "device",
-        "primary_port",
-        "at_ports",
-        "qmi_ports",
-        "net_ports",
+        does_emit = true,
+        fields = {
+            "device",
+            "primary_port",
+            "at_ports",
+            "qmi_ports",
+            "net_ports",
+        },
     },
     sim = {
-        "sim",
-        "iccid",
-        "imsi",
-        "gid1",
-        "sim_lock",
-        "sim_lock_retries",
-        "modem_state",
+        does_emit = true,
+        fields = {
+            "sim",
+            "iccid",
+            "imsi",
+            "gid1",
+            "sim_lock",
+            "sim_lock_retries",
+            "modem_state",
+        },
     },
     network = {
-        "access_techs",
-        "operator",
-        "mcc",
-        "mnc",
-        "active_band_class",
+        does_emit = true,
+        fields = {
+            "access_techs",
+            "operator",
+            "mcc",
+            "mnc",
+            "active_band_class",
+        },
     },
     signal = {
-        "signal",
+        does_emit = true,
+        fields = {
+            "signal",
+        },
     },
     traffic = {
-        "rx_bytes",
-        "tx_bytes",
+        does_emit = true,
+        fields = {
+            "rx_bytes",
+            "tx_bytes",
+        },
     },
 }
 
-local FIELD_TO_GROUP = {}
-for group_name, fields in pairs(GROUP_FIELDS) do
-    for _, field in ipairs(fields) do
-        FIELD_TO_GROUP[field] = group_name
+---@param groups table<string, ModemInfoGroup>
+---@return table<string, string> field_to_group
+---@return table<string, boolean> valid_groups
+local function normalise_groups(groups)
+    local fields, valid = {}, {}
+    for group_name, group in pairs(groups) do
+        valid[group_name] = true
+        for _, field in ipairs(group.fields) do
+            fields[field] = group_name
+        end
     end
+    return fields, valid
 end
+
+local FIELD_TO_GROUP, VALID_GROUPS = normalise_groups(GROUP_FIELDS)
 
 local GROUP_FETCHERS = {
     identity = "read_identity",
@@ -128,16 +152,6 @@ local GROUP_FETCHERS = {
     signal = "read_signal",
     traffic = "read_traffic",
 }
-
-local VALID_GROUPS = list_to_map {
-    "identity",
-    "ports",
-    "sim",
-    "network",
-    "signal",
-    "traffic",
-}
-
 
 ---- Modem Utility Functions ----
 
@@ -253,7 +267,8 @@ function Modem:_cache_group(group, value, observed_at)
     observed_at = observed_at or fibers.now()
     self.group_observed_at = self.group_observed_at or {}
     local timestamps = {}
-    for _, field in ipairs(GROUP_FIELDS[group] or {}) do
+    local definition = GROUP_FIELDS[group]
+    for _, field in ipairs(definition and definition.fields or {}) do
         -- A timestamp means the field was observed, including when the backend
         -- successfully observed that the field is absent. Failed groups do not
         -- advance these timestamps, so consumers can preserve their last value.
@@ -614,6 +629,7 @@ function Modem:signal_poller()
     end
 end
 
+---@return nil
 function Modem:emitter()
     local timeout_buffer = 0.1
     self.log:debug({ what = 'emitter_started', imei = self.imei })
@@ -636,32 +652,34 @@ function Modem:emitter()
 
         local values = {}
         local observed_at = {}
-        for group_name, fields in pairs(GROUP_FIELDS) do
-            local timescale = STATIC_GROUPS[group_name] and math.huge or 0
-            local snapshot, group_err, timestamps = self:_get_group(group_name, timescale)
-            if group_err ~= "" then
-                if D_LOG_EMITTER then
-                    self.log:warn({
-                        what = 'emitter_group_failed',
-                        imei = self.imei,
-                        group = group_name,
-                        err = tostring(trim_error(group_err))
-                    })
-                end
-            else
-                for _, field in ipairs(fields) do
-                    local value = extract_group_field(snapshot, field)
-                    observed_at[field] = timestamps[field]
-                    if value ~= nil then
-                        values[field] = value
-                        local emit_ok, emit_err = self:_emit_meta(field, value)
-                        if not emit_ok and D_LOG_EMITTER then
-                            self.log:warn({
-                                what = 'emitter_emit_failed',
-                                imei = self.imei,
-                                field = tostring(field),
-                                err = tostring(emit_err)
-                            })
+        for group_name, group in pairs(GROUP_FIELDS) do
+            if group.does_emit then
+                local timescale = STATIC_GROUPS[group_name] and math.huge or 0
+                local snapshot, group_err, timestamps = self:_get_group(group_name, timescale)
+                if group_err ~= "" then
+                    if D_LOG_EMITTER then
+                        self.log:warn({
+                            what = 'emitter_group_failed',
+                            imei = self.imei,
+                            group = group_name,
+                            err = tostring(trim_error(group_err))
+                        })
+                    end
+                else
+                    for _, field in ipairs(group.fields) do
+                        local value = extract_group_field(snapshot, field)
+                        observed_at[field] = timestamps[field]
+                        if value ~= nil then
+                            values[field] = value
+                            local emit_ok, emit_err = self:_emit_meta(field, value)
+                            if not emit_ok and D_LOG_EMITTER then
+                                self.log:warn({
+                                    what = 'emitter_emit_failed',
+                                    imei = self.imei,
+                                    field = tostring(field),
+                                    err = tostring(emit_err)
+                                })
+                            end
                         end
                     end
                 end
@@ -1054,6 +1072,7 @@ return {
     new_recovery = new_recovery,
     _test = {
         Modem = Modem,
+        normalise_groups = normalise_groups,
         signal_polling_active = signal_polling_active,
     },
 }
