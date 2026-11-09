@@ -212,6 +212,87 @@ function tests.rollback_does_not_require_at_ports_and_restarts_after_reset_error
     end
 end
 
+local active = tablex.deep_copy(config)
+active.net.data.preserve = 'active network settings'
+active.gsm.rev = 11
+
+---@return nil
+function tests.prepare_uses_the_active_config_when_one_is_saved()
+    local dir = os.tmpname()
+    os.remove(dir)
+    assert(posix.mkdir(dir))
+    local f = assert(io.open(dir .. '/original-persistent.json', 'w'))
+    f:write(require('onbox.support.util').encode(active))
+    f:close()
+    local instance = runner.from_session({ args = {}, artifacts = dir })
+    instance.runtime = {
+        original = config,
+        persistent_existed = true,
+        prepare = function() end,
+        ensure_dependencies = function() end,
+        backup = function() end,
+    }
+    instance.modems = {
+        inventory = function()
+            return { ['123'] = { imei = '123', state = 'disabled', plugin = 'quectel', model = 'EM06-E' } }
+        end,
+        ensure_at_ports = function() end,
+    }
+    instance:prepare()
+    equal(instance.active, active)
+    os.remove(dir .. '/original-persistent.json')
+    posix.rmdir(dir)
+
+    instance = runner.from_session({ args = {} })
+    instance.runtime.original, instance.runtime.persistent_existed = config, false
+    instance.runtime.prepare = function() end
+    instance.runtime.ensure_dependencies = function() end
+    instance.runtime.backup = function() end
+    instance.modems = {
+        inventory = function()
+            return { ['123'] = { imei = '123', state = 'disabled', plugin = 'quectel', model = 'EM06-E' } }
+        end,
+        ensure_at_ports = function() end,
+    }
+    instance:prepare()
+    equal(instance.active, config)
+end
+
+-- A box whose saved config differs from the bootstrap one must keep its own settings,
+-- and they must be back in place before the service restarts.
+---@return nil
+function tests.phases_use_the_active_config_and_restore_it_before_restarting()
+    local calls, written = {}, {}
+    local instance = runner.from_session({
+        args = { first = 'IP', second = 'IPV4V6', keep_final_config = false },
+        phase = function(_, _, body) body() end,
+        run = function(_, body) body(); return 0 end,
+    })
+    instance.prepare = function(self) self.active = active end
+    instance.inspect = function(_, label, cfg) calls[#calls + 1] = 'inspect ' .. label; written[label] = cfg end
+    instance.runtime = {
+        original = config,
+        build = function(_, label) return label .. '.tar.gz' end,
+        deploy = function() end,
+        write_config = function(_, cfg)
+            calls[#calls + 1] = 'write ' .. (cfg == config and 'bootstrap' or cfg.net.data.preserve)
+        end,
+        restore_persistent = function() calls[#calls + 1] = 'restore persistent' end,
+        service = function(_, action) calls[#calls + 1] = action end,
+    }
+    instance.modems = { clean_boot = function() calls[#calls + 1] = 'reset' end }
+    instance:run()
+    equal(written['01-ip'].net.data.preserve, 'active network settings')
+    equal(written['02-alternate'].net.data.preserve, 'active network settings')
+    equal(written['01-ip'].gsm.rev, 12)
+    equal(written['03-restored-config'], active)
+    equal(calls, {
+        'write active network settings', 'reset', 'restart', 'inspect 01-ip',
+        'write active network settings', 'reset', 'restart', 'inspect 02-alternate',
+        'write bootstrap', 'restore persistent', 'reset', 'restart', 'inspect 03-restored-config',
+    })
+end
+
 local names = {}
 for name in pairs(tests) do names[#names + 1] = name end
 table.sort(names)

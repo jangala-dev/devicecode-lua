@@ -122,8 +122,12 @@ end
 function Runner:prepare()
     self.runtime:prepare()
     self.runtime:ensure_dependencies({ commands = { mmcli = 'modemmanager' } }, 'modem-dependencies')
+    -- The service runs on the saved config when there is one, so phases start from it rather
+    -- than the bootstrap config, which would replace the box's own settings.
+    self.active = self.runtime.persistent_existed
+        and util.decode(util.read(self.box.artifacts .. '/original-persistent.json')) or self.runtime.original
     for imei, info in pairs(self.modems:inventory()) do
-        local cfg = M.effective_config(self.runtime.original, info)
+        local cfg = M.effective_config(self.active, info)
         if cfg.enabled ~= false and cfg.autoconnect then
             assert(info.plugin:lower():find('quectel', 1, true), 'Unsupported modem: ' .. info.model)
             assert(info.state ~= 'locked' and info.state ~= 'failed',
@@ -167,12 +171,13 @@ end
 ---@param label string
 ---@param config table
 ---@param archive string?
+---@param write_config fun()? Puts the phase's configuration in place; defaults to writing config.
 ---@return nil
-function Runner:phase(label, config, archive)
+function Runner:phase(label, config, archive, write_config)
     print('[' .. label .. '] Deploying and resetting modems for a clean-boot test')
     self.box:phase(label, function()
         self.runtime:deploy(archive)
-        self.runtime:write_config(config)
+        if write_config then write_config() else self.runtime:write_config(config) end
         self.modems:clean_boot(self.targets, true)
         self.runtime:service('restart')
         self:inspect(label, config)
@@ -196,12 +201,15 @@ function Runner:run()
     return self.box:run(function()
         self:prepare()
         for _, phase in ipairs({ { '01-ip', args.first }, { '02-alternate', args.second } }) do
-            local config = M.phase_config(self.runtime.original, phase[2])
+            local config = M.phase_config(self.active, phase[2])
             self:phase(phase[1], config, self.runtime:build(phase[1], config))
         end
         if not args.keep_final_config then
-            self:phase('03-restored-config', self.runtime.original)
-            self.runtime:restore_persistent()
+            -- Both configs go back before the restart, so the service starts on the box's own settings.
+            self:phase('03-restored-config', self.active, nil, function()
+                self.runtime:write_config(self.runtime.original)
+                self.runtime:restore_persistent()
+            end)
         end
     end, {
         diagnostics = function()
