@@ -78,6 +78,28 @@ local function path_address(snapshot, iface, ifname, st)
 		or select_path_address(st, 'multiwan-status')
 end
 
+-- The live device record (from ubus network.device status) carries the physical carrier/cable state.
+local function live_device(snapshot, iface, ifname)
+	local live = observed_live(snapshot)
+	local devices = live and live.devices or nil
+	if not is_table(devices) then return nil end
+	local li = live_interface(snapshot, iface, ifname)
+	local dev = (is_table(li) and (li.device or li.l3_device)) or ifname or iface
+	if type(dev) == 'string' and dev ~= '' and is_table(devices[dev]) then return devices[dev] end
+	return nil
+end
+
+-- Physical link/carrier for a wired member: true/false when the carrier is known, nil otherwise. We use the
+-- physical `carrier` (legacy alias `link`), never the administrative `up`, so "cable in" isn't confused with
+-- "interface enabled".
+local function link_up_for(snapshot, iface, ifname)
+	local dev = live_device(snapshot, iface, ifname)
+	if not is_table(dev) then return nil end
+	if type(dev.carrier) == 'boolean' then return dev.carrier end
+	if type(dev.link) == 'boolean' then return dev.link end
+	return nil
+end
+
 local function semantic_state_from_host(st)
 	if not is_table(st) then return 'unknown', false end
 	local state = tostring(st.state or st.status or ''):lower()
@@ -183,6 +205,15 @@ local function reduce_host(snapshot, uplink_id, member, opts)
 	local state, usable = semantic_state_from_host(st)
 	local endpoint = interface_endpoint(snapshot, iface)
 	local ifname = st and st.ifname or member.device or member.ifname or endpoint.ifname or endpoint.device or endpoint.name
+	local pa = path_address(snapshot, iface, ifname, st)
+	-- Granular readings for the UI's wired troubleshooting stages: has_address true/false when we have a
+	-- live interface to judge from (nil = unknown), link_up from the physical carrier (nil = unknown).
+	local has_address
+	if pa ~= nil then
+		has_address = true
+	elseif is_table(live_interface(snapshot, iface, ifname)) then
+		has_address = false
+	end
 	return {
 		id = tostring(uplink_id),
 		role = member.role or uplink_id,
@@ -192,7 +223,9 @@ local function reduce_host(snapshot, uplink_id, member, opts)
 		usable = usable,
 		observed = st ~= nil,
 		metric = member_metric(member),
-		path_address = path_address(snapshot, iface, ifname, st),
+		path_address = pa,
+		has_address = has_address,
+		link_up = link_up_for(snapshot, iface, ifname),
 		uptime_s = st and (tonumber(st.uptime_s) or tonumber(st.uptime)) or nil,
 		age_s = st and (tonumber(st.age_s) or tonumber(st.age)) or nil,
 		source = status_source(snapshot, st),

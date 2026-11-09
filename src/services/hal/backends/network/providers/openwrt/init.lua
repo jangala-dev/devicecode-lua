@@ -1797,8 +1797,11 @@ local function normalise_interface_status(ifid, st)
 		data = copy_plain(st.data or {}),
 		raw = copy_plain(st),
 	}
-	for i = 1, #(st.address or {}) do
-		local a = st.address[i]
+	-- ubus network.interface status reports IPv4 under `ipv4-address` (matching `ipv6-address` below);
+	-- fall back to the legacy `address` key for compatibility.
+	local ipv4_list = st['ipv4-address'] or st.ipv4_address or st.address or {}
+	for i = 1, #ipv4_list do
+		local a = ipv4_list[i]
 		if is_plain_table(a) then
 			out.ipv4[#out.ipv4 + 1] = { address = a.address, mask = a.mask, ptpaddress = a.ptpaddress }
 		end
@@ -1833,6 +1836,8 @@ local function normalise_device_status(name, st)
 		name = name,
 		type = st.type,
 		up = st.up,
+		-- Physical carrier: ubus network.device status reports it as `carrier`; keep `link` as a legacy alias.
+		carrier = st.carrier,
 		link = st.link,
 		mtu = st.mtu,
 		macaddr = st.macaddr,
@@ -2499,6 +2504,8 @@ end
 
 M._test = {
 	normalise_mwan3_status = normalise_mwan3_status,
+	normalise_device_status = normalise_device_status,
+	normalise_interface_status = normalise_interface_status,
 	observer_forward_script = observer_forward_script,
 	mwan3_user_block = mwan3_user_block,
 	strip_observer_block = strip_observer_block,
