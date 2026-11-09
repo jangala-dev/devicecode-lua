@@ -276,7 +276,11 @@ local function http_publish(data, on_result)
 	end
 	if #senml_list == 0 then return false end
 
-	local body = json.encode(senml_list)
+	local body, json_err = json.encode(senml_list)
+	if not body then
+		State.svc:obs_log('error', { what = 'http_publish_encode_failed', err = tostring(json_err) })
+		return false
+	end
 
 	local valid, config_err = conf.validate_http_config(State.cloud_config)
 	if not valid then

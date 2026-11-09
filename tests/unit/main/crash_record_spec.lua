@@ -563,6 +563,31 @@ function T.records_of_the_wrong_shape_are_dropped()
 	os.remove(path)
 end
 
+-- Numbers that are finite but out of range would break the send or the numbering.
+function T.records_with_impossible_numbers_are_dropped()
+	local path = temp_path()
+	local f = assert(io.open(path, 'w'))
+	f:write('{"boot_id":"boot-1","seq":100000000000000,"crashes":1,"next_send":0,'
+		.. '"pending":[{"seq":1,"mono":1e308},{"seq":-1,"mono":5},{"seq":2.5,"mono":5},'
+		.. '{"seq":1e300,"mono":5},{"seq":3,"mono":-5},{"seq":4,"mono":900}]}')
+	f:close()
+
+	local store = restarted(path)
+	local rec = store:next_pending(2000)
+	assert(rec and rec.seq == 4 and rec.mono == 900, 'expected only the good record, got seq ' .. tostring(rec and rec.seq))
+	store:mark_sent(4, 2100)
+	assert(store:next_pending(math.huge) == nil, 'expected nothing else pending')
+
+	for i = 1, 3 do
+		local run = restarted(path)
+		run:record_failure({ service = 'net', status = 'failed', primary = 'x' })
+		local got = restarted(path):next_pending(math.huge)
+		assert(got and got.seq == 4 + i, 'expected seq ' .. (4 + i) .. ', got ' .. tostring(got and got.seq))
+		restarted(path):mark_sent(got.seq, 2100)
+	end
+	os.remove(path)
+end
+
 function T.pending_that_is_not_a_list_counts_as_empty()
 	local path = temp_path()
 	local f = assert(io.open(path, 'w'))

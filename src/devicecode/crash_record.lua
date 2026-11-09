@@ -192,8 +192,15 @@ local function finite(v)
 	return type(v) == 'number' and v == v and v > -math.huge and v < math.huge
 end
 
+-- Counters stay well inside what cjson writes back exactly (14 significant digits).
+local MAX_COUNT = 2 ^ 31
+
+local function whole(v)
+	return finite(v) and v >= 0 and v < MAX_COUNT and math.floor(v) == v
+end
+
 local function count(v)
-	return finite(v) and v >= 0 and math.floor(v) or 0
+	return whole(v) and v or 0
 end
 
 local RECORD_TEXT = { kind = M.MAX_REASON, service = M.MAX_REASON, status = M.MAX_REASON,
@@ -202,7 +209,9 @@ local RECORD_TEXT = { kind = M.MAX_REASON, service = M.MAX_REASON, status = M.MA
 --- A record from file, in the shape add() writes, or nil. The file is only JSON, so
 --- anything else in it must not reach the sender.
 local function clean_record(rec)
-	if type(rec) ~= 'table' or not finite(rec.seq) or not finite(rec.mono) then return nil end
+	if type(rec) ~= 'table' or not whole(rec.seq) or rec.seq < 1 then return nil end
+	-- Seconds since boot: anything negative or past about 68 years isn't real.
+	if not finite(rec.mono) or rec.mono < 0 or rec.mono >= MAX_COUNT then return nil end
 	local out = { seq = rec.seq, mono = rec.mono }
 	for field, max in pairs(RECORD_TEXT) do
 		if type(rec[field]) == 'string' then out[field] = rec[field]:sub(1, max) end
@@ -234,7 +243,7 @@ function Store:load()
 		rec = clean_record(rec)
 		if rec and #out.pending < M.MAX_PENDING then
 			out.pending[#out.pending + 1] = rec
-			if rec.seq > out.seq then out.seq = math.floor(rec.seq) end
+			if rec.seq > out.seq then out.seq = rec.seq end
 		end
 	end
 	out.next_send = finite(state.next_send) and state.next_send or 0
