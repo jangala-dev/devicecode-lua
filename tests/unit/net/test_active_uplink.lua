@@ -172,14 +172,18 @@ function tests.test_unrecognised_or_empty_policy_falls_back_to_metric_order()
 	end
 end
 
-function tests.test_policy_members_with_zero_percent_are_not_in_use()
+function tests.test_listed_policy_members_carry_traffic_even_at_zero_percent()
+	-- mwan3's rpcd truncates percentages to integers and lists only the members
+	-- of the tier carrying traffic, so a 200:1 weighting reports 99:0 while the
+	-- small member still carries traffic. Percent only orders the members.
 	local mw = multiwan_with_policies(nil, { ipv4 = { balanced = {
 		{ interface = 'wan', percent = 0 },
-		{ interface = 'modem_primary', percent = 100 },
+		{ interface = 'modem_primary', percent = 99 },
 	} } })
 	local a = active_uplink.select(snapshot({ multiwan = mw }), uplinks('online', 'online', 'offline'))
-	eq(a.uplink_id, 'modem_primary')
-	ok(not has(a.uplink_ids, 'wan'), 'zero-percent member is not carrying traffic')
+	eq(a.uplink_id, 'modem_primary', 'the largest share leads')
+	ok(has(a.uplink_ids, 'wan'), 'a listed member at 0% still carries traffic')
+	eq(#a.uplink_ids, 2)
 end
 
 function tests.test_load_balanced_tier_lists_every_member_and_picks_deterministically()

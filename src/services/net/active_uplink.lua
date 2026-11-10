@@ -123,7 +123,9 @@ local function from_policy(snapshot, uplinks)
 			local pct = tonumber(m.percent)
 			local id = uplink_for(m.interface, uplinks, mw, semantic)
 			if id then
-				if (pct == nil or pct > 0) and percent[id] == nil then
+				-- mwan3 lists only members carrying traffic; its integer percent
+				-- can round a small share down to 0, so it only orders them.
+				if percent[id] == nil then
 					carrying[#carrying + 1] = id
 					percent[id] = pct or 0
 				end
