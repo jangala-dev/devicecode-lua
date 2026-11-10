@@ -375,19 +375,28 @@ function M.active_speedtest_due(snapshot, uplink, opts)
 	return true, 'active_uplink_changed'
 end
 
--- When the active uplink's cached success stops being fresh, so the service
--- can keep a timer armed for it (observations alone may never arrive).
-function M.active_speedtest_expiry(snapshot)
+-- The next time the active uplink may become due: its cached success
+-- expiring, or a failure's retry_after passing, whichever comes first after
+-- `now`.  The service keeps a timer armed for it, since observations alone
+-- may never arrive.
+function M.active_speedtest_next_wake(snapshot, now)
 	if not M.speedtest_enabled(snapshot) or M.speedtest_scope(snapshot) ~= 'active' then return nil end
 	local active = M.active_uplink(snapshot)
 	local id = active and active.status == 'uplink' and active.uplink_id or nil
 	if not id then return nil end
 	local runtime = snapshot.wan_runtime or {}
 	local rec = runtime.speedtests and runtime.speedtests[id]
+	local wake
+	local function consider(at)
+		at = tonumber(at)
+		if at ~= nil and at > now and (wake == nil or at < wake) then wake = at end
+	end
 	local mbps, completed = speedtest_last_success(rec)
 	local ttl = speedtest_ttl(snapshot)
-	if mbps == nil or completed == nil or not ttl or ttl <= 0 then return nil end
-	return id, completed + ttl
+	if mbps ~= nil and completed ~= nil and ttl and ttl > 0 then consider(completed + ttl) end
+	if type(rec) == 'table' then consider(rec.retry_after) end
+	if wake == nil then return nil end
+	return id, wake
 end
 
 local function member_fingerprint(m)

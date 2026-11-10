@@ -1073,16 +1073,15 @@ local function schedule_speedtest_retry(state, uplink_id, generation, delay_s, r
 end
 
 -- Observations only arrive on link events, so in active scope a stable
--- uplink needs a timer to be re-tested when its cached result expires.
+-- uplink needs a timer for the next time it can become due: its cached result
+-- expiring or a failure retry. Deadlines already passed were handled by this
+-- reconcile (a test launched, or one is running and its completion re-arms).
 function ensure_active_interval_timer(state)
 	local snap = state.model:snapshot()
-	local uplink_id, due_at = wan_policy.active_speedtest_expiry(snap)
+	local tnow = now()
+	local uplink_id, wake_at = wan_policy.active_speedtest_next_wake(snap, tnow)
 	if not uplink_id then return true, nil end
-	local delay_s = due_at - now()
-	-- Already expired: this reconcile launched the test, or one is running and
-	-- its completion re-arms the timer.
-	if delay_s <= 0 then return true, nil end
-	return schedule_speedtest_retry(state, uplink_id, snap.generation, delay_s, 'speedtest_interval')
+	return schedule_speedtest_retry(state, uplink_id, snap.generation, wake_at - tnow, 'speedtest_interval')
 end
 
 local function handle_speedtest_retry_due(state, ev)

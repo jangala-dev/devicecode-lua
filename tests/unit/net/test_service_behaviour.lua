@@ -1370,4 +1370,24 @@ function tests.test_apply_that_moves_the_active_uplink_reports_the_change()
 	end)
 end
 
+
+function tests.test_failure_retry_is_not_lost_behind_an_earlier_interval_timer()
+	fibers.run(function (scope)
+		local h = start_active_scope_service(scope, { interval_s = 1, retry_after_s = 2 })
+		h.observe(true, true)
+		ok(h.tested(1), 'active WAN tested')
+		sleep.sleep(0.3)
+		h.fail_next = true
+		h.addresses.wan_a = '198.51.100.7'
+		h.observe(true, true)
+		ok(h.tested(2), 'path change re-test fails')
+		-- The interval timer fires first and finds the retry not yet due; the
+		-- retry must still run once retry_after_s has passed.
+		ok(h.tested(3, 3.5), 'failure retry must survive an earlier interval wake-up')
+		local gap = h.speedtests[3].at - h.speedtests[2].at
+		ok(gap >= 1.5, 'retry must still honour retry_after_s, ran after ' .. tostring(gap))
+		h.stop()
+	end)
+end
+
 return tests
