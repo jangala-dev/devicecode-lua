@@ -588,4 +588,25 @@ function tests.test_speedtest_scope_rejects_unknown_values()
 	end
 end
 
+function tests.test_speedtest_scope_is_validated_wherever_speedtests_are_read()
+	-- wan_policy reads speedtest settings from load_balancing and from runtime,
+	-- under both spellings; a bad scope in any of them must be rejected.
+	for _, where in ipairs({
+		{ 'load_balancing', 'speedtest' }, { 'runtime', 'speedtests' }, { 'runtime', 'speedtest' },
+	}) do
+		local cfg = sample_cfg()
+		cfg.wan[where[1]] = cfg.wan[where[1]] or {}
+		cfg.wan[where[1]][where[2]] = { enabled = true, scope = 'actvie' }
+		local intent, err = config.normalise(cfg, { rev = 1 })
+		local label = where[1] .. '.' .. where[2]
+		eq(intent, nil, label)
+		ok(err and err:find(where[1] .. '%.' .. where[2] .. '%.scope', 1, false), label .. ': got ' .. tostring(err))
+
+		cfg = sample_cfg()
+		cfg.wan[where[1]] = cfg.wan[where[1]] or {}
+		cfg.wan[where[1]][where[2]] = { enabled = true, scope = 'active' }
+		ok(config.normalise(cfg, { rev = 1 }), label .. ' accepts active')
+	end
+end
+
 return tests

@@ -154,15 +154,27 @@ function M.collect_uplinks(snapshot)
 	return out
 end
 
-local function status_by_interface(snapshot, iface)
+local function observed_record(rec)
+	if type(rec) ~= 'table' or rec.observed == false then return nil end
+	return rec
+end
+
+-- Backhaul records are keyed by member id, so a member's own record wins.
+-- Otherwise match on interface before falling back to an id alias: member ids
+-- and interface names are separate namespaces and may collide.
+local function status_for_uplink(snapshot, uplink_id, iface)
 	local bh = snapshot and snapshot.backhaul or nil
 	local uplinks = type(bh) == 'table' and bh.uplinks or nil
 	if type(uplinks) ~= 'table' then return nil end
-	for id, rec in pairs(uplinks) do
-		if type(rec) == 'table' and (rec.interface == iface or rec.id == iface or id == iface) then
-			if rec.observed == false then return nil end
-			return rec
-		end
+	if uplink_id ~= nil and type(uplinks[uplink_id]) == 'table' then return observed_record(uplinks[uplink_id]) end
+	local keys = sorted_keys(uplinks)
+	for _, id in ipairs(keys) do
+		local rec = uplinks[id]
+		if type(rec) == 'table' and rec.interface == iface then return observed_record(rec) end
+	end
+	for _, id in ipairs(keys) do
+		local rec = uplinks[id]
+		if type(rec) == 'table' and (rec.id == iface or id == iface) then return observed_record(rec) end
 	end
 	return nil
 end
@@ -174,7 +186,7 @@ local function status_online(st)
 end
 
 function M.uplink_observed_status(snapshot, uplink)
-	return status_by_interface(snapshot, uplink and uplink.request and uplink.request.interface)
+	return status_for_uplink(snapshot, uplink and uplink.uplink_id, uplink and uplink.request and uplink.request.interface)
 end
 
 function M.uplink_online(snapshot, uplink)

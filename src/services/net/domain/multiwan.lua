@@ -181,13 +181,19 @@ local SPEEDTEST_SCOPES = { all = true, active = true }
 
 -- `scope = "active"` tests only the uplink carrying traffic and leaves
 -- mwan3 weights alone; `all` (the default) tests every online uplink and
--- feeds the results into live weights.
-local function check_speedtest_scope(lb)
-	if not schema.is_plain_table(lb) then return true, nil end
-	for _, key in ipairs({ 'speedtests', 'speedtest' }) do
-		local sp = lb[key]
-		if schema.is_plain_table(sp) and sp.scope ~= nil and not SPEEDTEST_SCOPES[sp.scope] then
-			return nil, schema.err({ 'net', 'wan', 'load_balancing', key, 'scope' }, 'must be all or active')
+-- feeds the results into live weights.  wan_policy reads speedtest settings
+-- from load_balancing and runtime under both spellings, so a mistyped scope is
+-- rejected in all of them rather than silently falling back to `all`.
+local function check_speedtest_scope(t)
+	for _, section in ipairs({ 'load_balancing', 'runtime' }) do
+		local sec = t[section]
+		if schema.is_plain_table(sec) then
+			for _, key in ipairs({ 'speedtests', 'speedtest' }) do
+				local sp = sec[key]
+				if schema.is_plain_table(sp) and sp.scope ~= nil and not SPEEDTEST_SCOPES[sp.scope] then
+					return nil, schema.err({ 'net', 'wan', section, key, 'scope' }, 'must be all or active')
+				end
+			end
 		end
 	end
 	return true, nil
@@ -206,7 +212,7 @@ function M.normalise(v)
 	if last_resort ~= nil and last_resort ~= 'default' and last_resort ~= 'unreachable' and last_resort ~= 'blackhole' then
 		return nil, schema.err({ 'net', 'wan', 'last_resort' }, 'must be default, unreachable or blackhole')
 	end
-	local scope_ok, scope_err = check_speedtest_scope(t.load_balancing)
+	local scope_ok, scope_err = check_speedtest_scope(t)
 	if not scope_ok then return nil, scope_err end
 	local out = {
 		enabled = t.enabled ~= false,

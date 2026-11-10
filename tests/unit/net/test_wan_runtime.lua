@@ -693,4 +693,34 @@ function tests.test_apply_keeps_active_scope_acknowledgement_for_current_members
 	eq(out.active_speedtest, nil, 'acknowledgement for a removed member is dropped')
 end
 
+function tests.test_active_scope_tests_the_active_member_when_ids_and_interfaces_collide()
+	runfibers.run(function(scope)
+		local clock, extra = { t = 100 }, {}
+		local model = model_mod.new('net-test')
+		model:update(function(s)
+			s.generation = 2
+			s.wan = {
+				load_balancing = { speedtests = { enabled = true, scope = 'active' } },
+				configured_members = {
+					primary = { interface = 'wan', metric = 1 },
+					wan = { interface = 'modem_primary', metric = 2 },
+				},
+			}
+			s.backhaul = { uplinks = {
+				primary = { id = 'primary', interface = 'wan', state = 'online', usable = true, metric = 1,
+					path_address = { family = 'ipv4', address = '203.0.113.10' } },
+				wan = { id = 'wan', interface = 'modem_primary', state = 'offline', usable = false, metric = 2 },
+			} }
+			s.backhaul.active_uplink = active_uplink.select(s, s.backhaul.uplinks)
+			s.wan_runtime = { uplinks = {}, live_weights = {}, speedtests = {} }
+			return s
+		end)
+		eq(model:snapshot().backhaul.active_uplink.uplink_id, 'primary')
+		local state = active_scope_state(scope, model, clock, extra)
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		local id = only_active(state)
+		eq(id, 'primary', 'the member carrying traffic must be tested')
+	end)
+end
+
 return tests

@@ -264,4 +264,36 @@ function tests.test_retry_backoff_only_suppresses_same_path()
 	eq(reason, 'due')
 end
 
+function tests.test_uplink_status_uses_the_members_own_record_when_ids_and_interfaces_collide()
+	-- Member "primary" uses interface "wan"; member "wan" uses interface "modem_primary".
+	local s = {
+		generation = 1,
+		wan = {
+			configured_members = {
+				primary = { interface = 'wan', metric = 1 },
+				wan = { interface = 'modem_primary', metric = 2 },
+			},
+			load_balancing = { speedtests = { enabled = true, scope = 'active' } },
+		},
+		backhaul = { uplinks = {
+			primary = { id = 'primary', interface = 'wan', state = 'online', usable = true },
+			wan = { id = 'wan', interface = 'modem_primary', state = 'offline', usable = false },
+		} },
+		wan_runtime = { speedtests = {} },
+	}
+	local by_id = uplinks_by_id(s)
+	eq(policy.uplink_observed_status(s, by_id.primary).id, 'primary')
+	eq(policy.uplink_online(s, by_id.primary), true, 'primary carries traffic on interface wan')
+	eq(policy.uplink_observed_status(s, by_id.wan).id, 'wan')
+	eq(policy.uplink_online(s, by_id.wan), false)
+
+	-- Without a record keyed by the member id, an interface match wins over an id alias.
+	s.backhaul.uplinks = {
+		a = { id = 'x', interface = 'wan', state = 'online', usable = true },
+		b = { id = 'wan', interface = 'other', state = 'offline', usable = false },
+	}
+	local stray = { uplink_id = 'stray', request = { interface = 'wan' } }
+	eq(policy.uplink_observed_status(s, stray).interface, 'wan')
+end
+
 return tests
