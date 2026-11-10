@@ -331,6 +331,54 @@ function M.speedtest_due(snapshot, uplink, opts)
 	return true, 'due'
 end
 
+-- Active scope ---------------------------------------------------------------
+--
+-- `speedtests.scope = "active"` tests only the uplink carrying traffic
+-- (backhaul.active_uplink) and never changes mwan3 weights.  It re-tests on
+-- interval_s and whenever traffic moves to a different uplink, unless that
+-- uplink already has a successful result younger than failover_retest_min_s
+-- (so a flapping link does not spend modem data on every flap).
+
+local DEFAULT_FAILOVER_RETEST_MIN_S = 300
+
+function M.speedtest_scope(snapshot)
+	local scope = runtime_opts(snapshot).scope
+	if scope == 'active' then return 'active' end
+	return 'all'
+end
+
+function M.failover_retest_min_s(snapshot)
+	local v = tonumber(runtime_opts(snapshot).failover_retest_min_s)
+	if v == nil or v < 0 then return DEFAULT_FAILOVER_RETEST_MIN_S end
+	return v
+end
+
+function M.active_uplink(snapshot)
+	local bh = snapshot and snapshot.backhaul or nil
+	local a = type(bh) == 'table' and bh.active_uplink or nil
+	return type(a) == 'table' and a or nil
+end
+
+function M.active_speedtest_due(snapshot, uplink, opts)
+	local due, reason = M.speedtest_due(snapshot, uplink, opts)
+	if due or (reason ~= 'fresh_same_path' and reason ~= 'fresh_weak_path') then return due, reason end
+	local runtime = snapshot and snapshot.wan_runtime or {}
+	local acked = type(runtime.active_speedtest) == 'table' and runtime.active_speedtest.uplink_id or nil
+	if acked == nil or acked == uplink.uplink_id then return due, reason end
+	local rec = runtime.speedtests and runtime.speedtests[uplink.uplink_id]
+	local _, completed = speedtest_last_success(rec)
+	local now = now_from_opts(opts)
+	if now ~= nil and completed ~= nil and now - completed < M.failover_retest_min_s(snapshot) then
+		-- Recent enough: keep the fresh result rather than re-test a flapping link.
+		return due, reason
+	end
+	return true, 'active_uplink_changed'
+end
+
+function M.speedtest_interval_s(snapshot)
+	return speedtest_ttl(snapshot)
+end
+
 local function member_fingerprint(m)
 	if type(m) ~= 'table' then return '' end
 	return table.concat({ tostring(m.id), tostring(m.interface), tostring(m.metric), tostring(m.weight) }, ':')

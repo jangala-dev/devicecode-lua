@@ -1858,6 +1858,44 @@ local function duration_seconds(v)
 	return nil
 end
 
+local function semantic_name(name_ctx, class, generated)
+	if name_ctx and type(name_ctx.semantic_for) == 'function' then
+		return name_ctx:semantic_for(class, generated) or generated
+	end
+	return generated
+end
+
+-- mwan3 reports each policy's live members as
+-- { <family> = { <policy> = { { interface = <mwan3 iface>, percent = n }, ... } } }.
+-- Translate policy and member names back to product ids.  Routing fallbacks
+-- such as "default" or "unreachable" have no product id and keep their name.
+local function semantic_mwan3_policies(policies, name_ctx)
+	local out = {}
+	if not is_plain_table(policies) then return out end
+	for family, by_policy in pairs(policies) do
+		if type(family) == 'string' and is_plain_table(by_policy) then
+			local fam = {}
+			for policy, members in pairs(by_policy) do
+				if type(policy) == 'string' and is_plain_table(members) then
+					local list = {}
+					for i = 1, #members do
+						local m = members[i]
+						if is_plain_table(m) and type(m.interface) == 'string' and m.interface ~= '' then
+							list[#list + 1] = {
+								interface = semantic_name(name_ctx, 'mwan_iface', m.interface),
+								percent = tonumber(m.percent),
+							}
+						end
+					end
+					fam[semantic_name(name_ctx, 'mwan_policy', policy)] = list
+				end
+			end
+			out[family] = fam
+		end
+	end
+	return out
+end
+
 local function normalise_mwan3_status(st, name_ctx)
 	local out = {
 		schema = 'devicecode.hal.network.multiwan/1',
@@ -1868,6 +1906,7 @@ local function normalise_mwan3_status(st, name_ctx)
 		interfaces = {},
 		interfaces_by_semantic = {},
 		policies = {},
+		policies_by_semantic = {},
 		connected = {},
 		raw = copy_plain(st or {}),
 	}
@@ -1931,6 +1970,7 @@ local function normalise_mwan3_status(st, name_ctx)
 		end
 	end
 	out.policies = copy_plain(st.policies or {})
+	out.policies_by_semantic = semantic_mwan3_policies(st.policies, name_ctx)
 	out.connected = copy_plain(st.connected or {})
 	return out
 end

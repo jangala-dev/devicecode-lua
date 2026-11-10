@@ -1139,4 +1139,151 @@ function tests.test_wan_members_trigger_speedtests_and_live_weights()
 end
 
 
+local function start_active_scope_service(scope, speedtest_opts)
+	local mailbox = require 'fibers.mailbox'
+	local b = busmod.new()
+	local conn = b:connect()
+	local h = { speedtests = {}, weights = {}, reader = b:connect() }
+	local obs_tx, obs_rx = mailbox.new(8, { full = 'drop_oldest' })
+	local hal = success_hal({})
+	hal.speedtest_op = function (_, req)
+		h.speedtests[#h.speedtests + 1] = { interface = req.interface, at = fibers.now() }
+		return op.always({ ok = true, interface = req.interface, device = req.device,
+			peak_mbps = 10, data_mib = 1, duration_s = 0.1 })
+	end
+	hal.apply_live_weights_op = function (_, req)
+		h.weights[#h.weights + 1] = req
+		return op.always({ ok = true, changed = true, applied = true })
+	end
+	hal.open_observed_subscription = function () return obs_rx end
+	hal.start_observation_op = function () return op.always({ ok = true, backend = 'test', watching = true }) end
+	local c = cfg()
+	local sp = { enabled = true, scope = 'active' }
+	for k, v in pairs(speedtest_opts or {}) do sp[k] = v end
+	c.wan = {
+		load_balancing = { policy = 'balanced', speedtests = sp },
+		members = {
+			wan_a = { interface = 'wan_a', mwan_metric = 1, weight = 1 },
+			wan_b = { interface = 'wan_b', mwan_metric = 2, weight = 1 },
+		},
+	}
+	local dhcp = { ipv4 = { mode = 'dhcp' } }
+	c.interfaces.wan_a = { kind = 'ethernet', role = 'wan', segment = 'wan',
+		endpoint = { ifname = 'eth1' }, addressing = dhcp }
+	c.interfaces.wan_b = { kind = 'cellular', role = 'wan', segment = 'wan',
+		endpoint = { ifname = 'wwan1' }, addressing = dhcp }
+	c.segments.wan = { kind = 'wan', firewall = { zone = 'wan' } }
+	retain_network_config_status(conn, 'available')
+	retain_network_state_status_payload(conn, { schema = 'devicecode.cap.status/1', state = 'running', available = true })
+	h.child = start_service(scope, conn, { conn = conn, config = c, rev = 22, hal = hal })
+	function h.observe(a_online, b_online)
+		obs_tx:send({ payload = {
+			schema = 'devicecode.net.observation/1',
+			kind = 'snapshot_done', source = 'test', subject = 'network',
+			observed = {
+				multiwan = { interfaces_by_semantic = {
+					wan_a = { interface = 'wan_a', state = a_online and 'online' or 'offline', online = a_online, usable = a_online },
+					wan_b = { interface = 'wan_b', state = b_online and 'online' or 'offline', online = b_online, usable = b_online },
+				} },
+				live = { interfaces = {
+					wan_a = { ipv4 = { { address = '203.0.113.10' } } },
+					wan_b = { ipv4 = { { address = '10.1.2.3' } } },
+				} },
+			},
+		} })
+	end
+	function h.tested(n, timeout)
+		return probe.wait_until(function () return #h.speedtests >= n end, { timeout = timeout or 0.5 })
+	end
+	function h.stop()
+		h.child:cancel('test complete')
+		fibers.perform(h.child:join_op())
+	end
+	return h
+end
+
+function tests.test_active_scope_speedtests_follow_failover_without_weights()
+	fibers.run(function (scope)
+		local h = start_active_scope_service(scope, { interval_s = 1 })
+		local reader = h.reader
+		local sub_opts = { queue_len = 8, full = 'drop_oldest' }
+		local metric_sub = reader:subscribe({ 'obs', 'v1', 'net', 'metric', 'speedtest' }, sub_opts)
+		local changed_sub = reader:subscribe({ 'obs', 'v1', 'net', 'event', 'active_uplink_changed' }, sub_opts)
+		local backhaul_view = reader:retained_view(topics.domain('backhaul'))
+		local function wait_active(id)
+			return probe.wait_versioned_until('net active uplink ' .. id,
+				function () return backhaul_view:version() end,
+				function (seen) return backhaul_view:changed_op(seen) end,
+				function ()
+					local msg = backhaul_view:get(topics.domain('backhaul'))
+					local a = msg and msg.payload and msg.payload.active_uplink
+					return a and a.uplink_id == id and a or nil
+				end,
+				{ timeout = 1.0 })
+		end
+
+		h.observe(true, true)
+		local active = wait_active('wan_a')
+		eq(active.status, 'uplink')
+		ok(h.tested(1), 'active uplink should be tested')
+		eq(h.speedtests[1].interface, 'wan_a')
+		local which, msg = fibers.perform(op.named_choice({ metric = metric_sub:recv_op(), timeout = sleep.sleep_op(0.5) }))
+		ok(which == 'metric' and msg and msg.payload, 'speedtest telemetry expected')
+		eq(msg.payload.namespace[2], 'wan_a')
+		eq(msg.payload.value, 10)
+
+		-- WAN fails over to the modem: the modem is now tested.
+		h.observe(false, true)
+		wait_active('wan_b')
+		ok(h.tested(2), 'failover should re-test')
+		eq(h.speedtests[2].interface, 'wan_b')
+		local seen_change = false
+		for _ = 1, 3 do
+			local cwhich, cmsg = fibers.perform(op.named_choice({ ev = changed_sub:recv_op(), timeout = sleep.sleep_op(0.3) }))
+			if cwhich ~= 'ev' then break end
+			if cmsg.payload and cmsg.payload.uplink_id == 'wan_b' and cmsg.payload.previous_uplink_id == 'wan_a' then
+				seen_change = true
+			end
+		end
+		ok(seen_change, 'active_uplink_changed event from wan_a to wan_b expected')
+
+		-- interval_s re-tests the uplink still carrying traffic, with no new observation.
+		ok(h.tested(3, 2.5), 'interval should re-test')
+		eq(h.speedtests[3].interface, 'wan_b')
+		for i = 2, #h.speedtests do
+			if h.speedtests[i].interface == 'wan_a' then fail('standby WAN must not be tested after failover') end
+		end
+		eq(#h.weights, 0, 'active scope must never apply live weights')
+
+		metric_sub:unsubscribe()
+		changed_sub:unsubscribe()
+		backhaul_view:close()
+		h.stop()
+	end)
+end
+
+function tests.test_active_scope_interval_timer_follows_the_latest_result()
+	fibers.run(function (scope)
+		-- Re-test on every change of active uplink, so a failback re-test lands
+		-- while the first interval timer is still pending.
+		local h = start_active_scope_service(scope, { interval_s = 1, failover_retest_min_s = 0 })
+		h.observe(true, true)
+		ok(h.tested(1), 'active WAN tested')
+		sleep.sleep(0.3)
+		h.observe(false, true)
+		ok(h.tested(2), 'failover re-test')
+		sleep.sleep(0.3)
+		h.observe(true, true)
+		ok(h.tested(3), 'failback re-test')
+		eq(h.speedtests[3].interface, 'wan_a')
+		-- The interval runs from the failback result, not the first one.
+		ok(h.tested(4, 2.0), 'interval re-test after the latest result')
+		eq(h.speedtests[4].interface, 'wan_a')
+		local gap = h.speedtests[4].at - h.speedtests[3].at
+		ok(gap >= 0.9, 'interval measured from the latest result, got ' .. tostring(gap))
+		eq(#h.weights, 0)
+		h.stop()
+	end)
+end
+
 return tests

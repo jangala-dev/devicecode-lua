@@ -201,4 +201,35 @@ function tests.test_gsm_member_stays_present_without_gsm_details()
 	eq(uplink.ifname, 'wwan0')
 end
 
+function tests.test_reduce_publishes_active_uplink_lowest_metric_online()
+	local function host(st) return { interface = st.iface, state = st.state, usable = st.state == 'online' } end
+	local model = backhaul.reduce({
+		wan = {
+			configured_members = {
+				wan = { interface = 'wan', metric = 1 },
+				modem_primary = { interface = 'modem_primary', metric = 2 },
+			},
+		},
+		observed = { snapshot = { multiwan = { interfaces_by_semantic = {
+			wan = host({ iface = 'wan', state = 'online' }),
+			modem_primary = host({ iface = 'modem_primary', state = 'online' }),
+		} } } },
+	}, { now = 1 })
+	local active = ok(model.active_uplink, 'active_uplink expected on backhaul')
+	eq(active.status, 'uplink')
+	eq(active.uplink_id, 'wan')
+	eq(active.source, 'lowest_metric')
+end
+
+function tests.test_reduce_reports_last_resort_when_every_uplink_is_offline()
+	local model = backhaul.reduce({
+		wan = { configured_members = { wan = { interface = 'wan', metric = 1 } } },
+		observed = { snapshot = { multiwan = { interfaces_by_semantic = {
+			wan = { interface = 'wan', state = 'offline', usable = false },
+		} } } },
+	}, { now = 1 })
+	eq(model.active_uplink.status, 'last_resort')
+	eq(model.active_uplink.uplink_id, nil)
+end
+
 return tests

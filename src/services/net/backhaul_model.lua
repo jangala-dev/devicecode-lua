@@ -6,6 +6,7 @@
 -- this model.
 
 local tablex = require 'shared.table'
+local active_uplink = require 'services.net.active_uplink'
 
 local M = {}
 local copy = tablex.deep_copy
@@ -231,6 +232,7 @@ function M.reduce(snapshot, opts)
 	else out.state = 'down' end
 	out.total = total
 	out.online = online
+	out.active_uplink = active_uplink.select(snapshot, out.uplinks)
 	return out
 end
 

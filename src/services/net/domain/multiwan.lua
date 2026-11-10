@@ -177,6 +177,22 @@ local function normalise_members(t)
 	return out, nil
 end
 
+local SPEEDTEST_SCOPES = { all = true, active = true }
+
+-- `scope = "active"` tests only the uplink carrying traffic and leaves
+-- mwan3 weights alone; `all` (the default) tests every online uplink and
+-- feeds the results into live weights.
+local function check_speedtest_scope(lb)
+	if not schema.is_plain_table(lb) then return true, nil end
+	for _, key in ipairs({ 'speedtests', 'speedtest' }) do
+		local sp = lb[key]
+		if schema.is_plain_table(sp) and sp.scope ~= nil and not SPEEDTEST_SCOPES[sp.scope] then
+			return nil, schema.err({ 'net', 'wan', 'load_balancing', key, 'scope' }, 'must be all or active')
+		end
+	end
+	return true, nil
+end
+
 function M.normalise(v)
 	local t, err = schema.optional_plain_table(v, { 'net', 'wan' })
 	if not t then return nil, err end
@@ -190,6 +206,8 @@ function M.normalise(v)
 	if last_resort ~= nil and last_resort ~= 'default' and last_resort ~= 'unreachable' and last_resort ~= 'blackhole' then
 		return nil, schema.err({ 'net', 'wan', 'last_resort' }, 'must be default, unreachable or blackhole')
 	end
+	local scope_ok, scope_err = check_speedtest_scope(t.load_balancing)
+	if not scope_ok then return nil, scope_err end
 	local out = {
 		enabled = t.enabled ~= false,
 		members = members,

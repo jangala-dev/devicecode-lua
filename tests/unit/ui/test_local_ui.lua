@@ -158,4 +158,47 @@ function tests.test_local_model_keeps_logs_out_of_default_stream_and_bootstrap()
 	if boot.items['obs/v1/net/event/log'] then fail('log event leaked into local-ui bootstrap') end
 end
 
+local function backhaul_with_active_uplink()
+	return {
+		schema = 'devicecode.net.backhaul/1',
+		state = 'ok',
+		uplinks = {
+			wan = { id = 'wan', interface = 'wan', state = 'online', usable = true, metric = 1 },
+			modem_primary = { id = 'modem_primary', interface = 'modem_primary', state = 'online', usable = true, metric = 2 },
+		},
+		active_uplink = {
+			status = 'uplink', uplink_id = 'wan', uplink_ids = { 'wan' },
+			interface = 'wan', metric = 1, source = 'mwan3_policy',
+		},
+	}
+end
+
+function tests.test_bootstrap_carries_net_active_uplink()
+	local model = read_model.new()
+	model:set({ 'state', 'net', 'backhaul' }, backhaul_with_active_uplink())
+	local boot = local_model.bootstrap(model:snapshot())
+	local item = boot.items['state/net/backhaul']
+	ok(item, 'backhaul expected in local-ui bootstrap')
+	local active = item.payload.active_uplink
+	ok(active, 'active_uplink expected in bootstrap backhaul')
+	eq(active.status, 'uplink')
+	eq(active.uplink_id, 'wan')
+	eq(active.uplink_ids[1], 'wan')
+	eq(active.source, 'mwan3_policy')
+end
+
+function tests.test_event_stream_carries_net_active_uplink()
+	local ev = local_model.project_event({
+		kind = 'read_model_event',
+		op = 'set',
+		topic = { 'state', 'net', 'backhaul' },
+		payload = backhaul_with_active_uplink(),
+	})
+	ok(ev, 'backhaul event should pass the local-ui projection')
+	local decoded, err = cjson.decode(sse_data(sse.frame_event(ev)))
+	ok(decoded, err)
+	eq(decoded.payload.active_uplink.uplink_id, 'wan')
+	eq(decoded.payload.active_uplink.uplink_ids[1], 'wan')
+end
+
 return tests

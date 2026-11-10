@@ -526,6 +526,31 @@ Speedtests apply to WAN members generally, not only cellular/GSM members. The cu
 
 Live weight application is also scoped work and is stale-checked before reduction into the model.
 
+### Active uplink
+
+`state/net/backhaul` carries `active_uplink`, the uplink currently carrying traffic:
+
+```lua
+active_uplink = {
+	status = 'uplink' | 'last_resort' | 'none' | 'unknown',
+	uplink_id = 'wan',          -- member carrying most traffic; nil unless status is 'uplink'
+	uplink_ids = { 'wan' },     -- every member carrying traffic (several when load-balanced)
+	interface = 'wan', metric = 1,
+	source = 'mwan3_policy' | 'lowest_metric',
+}
+```
+
+HAL translates mwan3's live policy into `observed.multiwan.policies_by_semantic`. When the configured load-balancing policy (default `balanced`) lists members, those are active. Otherwise the lowest-metric online members are active, which is what mwan3 does under strict failover. With nothing online the status follows `wan.last_resort`: `default` gives `last_resort` (clients use the main routing table), `unreachable` or `blackhole` gives `none`. Before any observation it is `unknown`. Each change emits an `active_uplink_changed` event.
+
+### Speedtest scope
+
+`wan.load_balancing.speedtests.scope` chooses which uplinks are tested:
+
+- `all` (default): every online uplink is tested in turn and the results feed live weights.
+- `active`: only `active_uplink.uplink_id` is tested, and live weights are never changed (`live_weights.reason = 'speedtest_scope_active'`). Standby uplinks are skipped with `not_active_uplink`, and a test still running on an uplink that stops carrying traffic is cancelled. The active uplink is re-tested every `interval_s` (a timer, since observations are event-led) and when traffic moves to a different uplink. A move does not re-test an uplink whose last success is younger than `failover_retest_min_s` (default 300), so a flapping link does not spend modem data on every flap.
+
+Both scopes publish the `speedtest` metric for each successful test.
+
 ## Observation and drift
 
 Observation is event-led.

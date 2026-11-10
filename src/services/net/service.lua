@@ -31,6 +31,8 @@ local backpressure = require 'services.net.backpressure'
 local gsm_uplink_watch = require 'services.net.gsm_uplink_watch'
 local intent_realiser = require 'services.net.intent_realiser'
 local backhaul_model = require 'services.net.backhaul_model'
+local active_uplink_mod = require 'services.net.active_uplink'
+local wan_policy = require 'services.net.wan_policy'
 
 local perform = fibers.perform
 
@@ -210,6 +212,29 @@ local function log_mwan_backhaul_transitions(state, before, after, trigger)
 	end
 end
 
+local function report_active_uplink_change(state, before, after, trigger)
+	local prev = type(before) == 'table' and before.active_uplink or nil
+	local cur = type(after) == 'table' and after.active_uplink or nil
+	if type(cur) ~= 'table' or not active_uplink_mod.changed(prev, cur) then return end
+	local from = type(prev) == 'table' and (prev.uplink_id or prev.status) or nil
+	local to = cur.uplink_id or cur.status
+	local payload = {
+		from = from,
+		to = to,
+		status = cur.status,
+		uplink_id = cur.uplink_id,
+		previous_uplink_id = type(prev) == 'table' and prev.uplink_id or nil,
+		previous_status = type(prev) == 'table' and prev.status or nil,
+		source = cur.source,
+		trigger = trigger,
+	}
+	obs_event(state.svc, 'active_uplink_changed', model_mod.deep_copy(payload))
+	payload.what = 'active_uplink_changed'
+	payload.summary = string.format('active uplink %s -> %s (%s)',
+		tostring(from or '-'), tostring(to or '-'), tostring(cur.source or 'no source'))
+	obs_log(state.svc, 'info', payload)
+end
+
 local function set_model_state(state, service_state, reason)
 	state.model:update(function (s)
 		s.state = service_state
@@ -347,6 +372,11 @@ local function carry_forward_wan_runtime(previous, intent, generation)
 		end
 	end
 	out.last_weight_apply = model_mod.deep_copy(previous.last_weight_apply)
+	-- Keep the active-scope acknowledgement so a failover during an apply is still re-tested.
+	local acked = previous.active_speedtest
+	if type(acked) == 'table' and type(members[acked.uplink_id]) == 'table' then
+		out.active_speedtest = model_mod.deep_copy(acked)
+	end
 	return out
 end
 
@@ -726,6 +756,7 @@ local function handle_observed_state(state, ev)
 	state.model:update(function (s) return merge_observation(state, s, observed_event) end)
 	local after = state.model and state.model:snapshot().backhaul or nil
 	log_mwan_backhaul_transitions(state, before, after, observed_event)
+	report_active_uplink_change(state, before, after, 'observed_state')
 	mark_domain_dirty(state, 'observed')
 	mark_domain_dirty(state, 'backhaul')
 	mark_wan_member_interfaces_dirty(state)
@@ -820,6 +851,7 @@ local function handle_gsm_uplink_changed(state, ev)
 	payload.updated_at = now()
 	local prev = (realised_sources(state).gsm_uplinks or {})[role]
 	local reconnected = prev ~= nil and prev.connected ~= true and payload.connected == true
+	local backhaul_before = state.model:snapshot().backhaul
 	state.model:update(function (s)
 		s.sources = s.sources or { gsm_uplinks = {} }
 		s.sources.gsm_uplinks = s.sources.gsm_uplinks or {}
@@ -833,6 +865,7 @@ local function handle_gsm_uplink_changed(state, ev)
 	mark_domain_dirty(state, 'backhaul')
 	mark_wan_member_interfaces_dirty(state)
 	mark_summary_dirty(state)
+	report_active_uplink_change(state, backhaul_before, state.model:snapshot().backhaul, 'gsm_uplink_changed')
 	local ifname = payload.linux and payload.linux.ifname or payload.interface
 	obs_event(state.svc, 'gsm_uplink_changed', {
 		role = role,
@@ -973,7 +1006,7 @@ local function handle_dependency_status(state, ev)
 end
 
 
-local function schedule_speedtest_retry(state, uplink_id, generation, delay_s, reason)
+local function schedule_speedtest_retry(state, uplink_id, generation, delay_s, reason, replace)
 	if not state or not state.scope or not state.done_tx then return true, nil end
 	if type(uplink_id) ~= 'string' or uplink_id == '' then return true, nil end
 	delay_s = tonumber(delay_s) or 10
@@ -981,7 +1014,9 @@ local function schedule_speedtest_retry(state, uplink_id, generation, delay_s, r
 	state.speedtest_retries = state.speedtest_retries or {}
 	local existing = state.speedtest_retries[uplink_id]
 	local tnow = now()
-	if type(existing) == 'table' and (existing.due_at or 0) > tnow then return true, nil end
+	-- A replaced timer still fires, but its retry_id no longer matches and
+	-- handle_speedtest_retry_due ignores it.
+	if not replace and type(existing) == 'table' and (existing.due_at or 0) > tnow then return true, nil end
 	local retry_id = state.next_speedtest_retry_id or 1
 	state.next_speedtest_retry_id = retry_id + 1
 	state.speedtest_retries[uplink_id] = {
@@ -1067,6 +1102,17 @@ local function handle_speedtest_done(state, ev)
 				value = rec.peak_mbps,
 				namespace = { 'net', rec.interface or ev.uplink_id, 'speedtest' },
 			})
+		end
+		if rec and rec.ok == true and wan_policy.speedtest_scope(snap) == 'active' then
+			-- Observations only arrive on link events, so a stable active uplink
+			-- needs a timer to be re-tested every interval_s.
+			local interval_s = tonumber(wan_policy.speedtest_interval_s(snap))
+			if interval_s and interval_s > 0 then
+				-- Replace any pending timer so the interval runs from this result.
+				local rok, rerr = schedule_speedtest_retry(state, tostring(ev.uplink_id or ''), ev.generation,
+					interval_s, 'speedtest_interval', true)
+				if rok ~= true then return nil, rerr end
+			end
 		end
 		if rec and rec.ok ~= true and rec.retry_after then
 			local delay_s = math.max(1, (tonumber(rec.retry_after) or (now() + (tonumber(rec.retry_delay_s) or 10))) - now())
@@ -1376,5 +1422,9 @@ function M.start(conn, opts)
 	opts.conn = conn
 	return M.run(fibers.current_scope(), opts)
 end
+
+M._test = {
+	carry_forward_wan_runtime = carry_forward_wan_runtime,
+}
 
 return M

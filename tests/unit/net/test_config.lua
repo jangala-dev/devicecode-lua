@@ -568,4 +568,24 @@ function tests.test_section_one_semantics_reach_hal_unchanged()
 	eq(captured.dns.service_discovery.shared_devices.backend, nil)
 end
 
+function tests.test_speedtest_scope_accepts_all_and_active()
+	for _, scope in ipairs({ 'all', 'active' }) do
+		local cfg = sample_cfg()
+		cfg.wan.load_balancing.speedtests = { enabled = true, scope = scope }
+		local intent, err = config.normalise(cfg, { rev = 1 })
+		ok(intent, tostring(err))
+		eq(intent.wan.load_balancing.speedtests.scope, scope)
+	end
+end
+
+function tests.test_speedtest_scope_rejects_unknown_values()
+	for _, scope in ipairs({ 'standby', 1, true }) do
+		local cfg = sample_cfg()
+		cfg.wan.load_balancing.speedtests = { enabled = true, scope = scope }
+		local intent, err = config.normalise(cfg, { rev = 1 })
+		eq(intent, nil, 'scope ' .. tostring(scope))
+		ok(err and err:find('speedtests%.scope', 1, false), 'scope error expected, got ' .. tostring(err))
+	end
+end
+
 return tests
