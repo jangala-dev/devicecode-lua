@@ -215,4 +215,26 @@ function tests.test_changed_compares_status_and_ids()
 	eq(active_uplink.changed(nil, nil), false)
 end
 
+function tests.test_policy_interface_names_resolve_by_interface_before_member_id()
+	-- Member ids and interface names are separate namespaces: here member "wan"
+	-- uses the modem interface and member "primary" uses the wired "wan" interface.
+	local ups = {
+		primary = { id = 'primary', interface = 'wan', metric = 1, state = 'online', usable = true },
+		wan = { id = 'wan', interface = 'modem_primary', metric = 2, state = 'online', usable = true },
+	}
+	local mw = { interfaces_by_semantic = {
+		wan = { interface = 'wan' }, modem_primary = { interface = 'mopri79e' },
+	} }
+	mw.policies_by_semantic = { ipv4 = { balanced = { { interface = 'wan', percent = 100 } } } }
+	local a = active_uplink.select(snapshot({ multiwan = mw }), ups)
+	eq(a.uplink_id, 'primary', 'semantic policy names are interfaces')
+	eq(a.interface, 'wan')
+
+	mw.policies_by_semantic = nil
+	mw.policies = { ipv4 = { balanced = { { interface = 'mopri79e', percent = 100 } } } }
+	a = active_uplink.select(snapshot({ multiwan = mw }), ups)
+	eq(a.uplink_id, 'wan', 'raw mwan3 names map to interfaces, then to members')
+	eq(a.interface, 'modem_primary')
+end
+
 return tests

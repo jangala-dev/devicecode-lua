@@ -85,7 +85,9 @@ local function policy_members(policies, name)
 	return list
 end
 
--- Map a policy member's interface name to a configured uplink id.
+-- Map a policy member's interface name to a configured uplink id.  Policy
+-- members name interfaces, which need not match member ids, so interfaces are
+-- matched first; the id is only a fallback for records without an interface.
 local function uplink_for(name, uplinks, mw, semantic)
 	if type(name) ~= 'string' or name == '' then return nil end
 	if not semantic then
@@ -94,10 +96,11 @@ local function uplink_for(name, uplinks, mw, semantic)
 			if is_table(st) and st.interface == name then name = tostring(sem); break end
 		end
 	end
-	if is_table(uplinks[name]) then return name end
-	for _, id in ipairs(sorted_ids(uplinks)) do
+	local ids = sorted_ids(uplinks)
+	for _, id in ipairs(ids) do
 		if uplinks[id].interface == name then return id end
 	end
+	if is_table(uplinks[name]) and uplinks[name].interface == nil then return name end
 	return nil
 end
 

@@ -1139,30 +1139,13 @@ function tests.test_wan_members_trigger_speedtests_and_live_weights()
 end
 
 
-local function start_active_scope_service(scope, speedtest_opts)
-	local mailbox = require 'fibers.mailbox'
-	local b = busmod.new()
-	local conn = b:connect()
-	local h = { speedtests = {}, weights = {}, reader = b:connect() }
-	local obs_tx, obs_rx = mailbox.new(8, { full = 'drop_oldest' })
-	local hal = success_hal({})
-	hal.speedtest_op = function (_, req)
-		h.speedtests[#h.speedtests + 1] = { interface = req.interface, at = fibers.now() }
-		return op.always({ ok = true, interface = req.interface, device = req.device,
-			peak_mbps = 10, data_mib = 1, duration_s = 0.1 })
-	end
-	hal.apply_live_weights_op = function (_, req)
-		h.weights[#h.weights + 1] = req
-		return op.always({ ok = true, changed = true, applied = true })
-	end
-	hal.open_observed_subscription = function () return obs_rx end
-	hal.start_observation_op = function () return op.always({ ok = true, backend = 'test', watching = true }) end
+local function active_scope_cfg(speedtest_opts, members)
 	local c = cfg()
 	local sp = { enabled = true, scope = 'active' }
 	for k, v in pairs(speedtest_opts or {}) do sp[k] = v end
 	c.wan = {
 		load_balancing = { policy = 'balanced', speedtests = sp },
-		members = {
+		members = members or {
 			wan_a = { interface = 'wan_a', mwan_metric = 1, weight = 1 },
 			wan_b = { interface = 'wan_b', mwan_metric = 2, weight = 1 },
 		},
@@ -1173,9 +1156,40 @@ local function start_active_scope_service(scope, speedtest_opts)
 	c.interfaces.wan_b = { kind = 'cellular', role = 'wan', segment = 'wan',
 		endpoint = { ifname = 'wwan1' }, addressing = dhcp }
 	c.segments.wan = { kind = 'wan', firewall = { zone = 'wan' } }
+	return c
+end
+
+local function start_active_scope_service(scope, speedtest_opts)
+	local mailbox = require 'fibers.mailbox'
+	local b = busmod.new()
+	local conn = b:connect()
+	local h = { speedtests = {}, weights = {}, reader = b:connect(), fail_next = false, rev = 22,
+		addresses = { wan_a = '203.0.113.10', wan_b = '10.1.2.3' } }
+	local obs_tx, obs_rx = mailbox.new(8, { full = 'drop_oldest' })
+	local hal = success_hal({})
+	hal.speedtest_op = function (_, req)
+		h.speedtests[#h.speedtests + 1] = { interface = req.interface, at = fibers.now() }
+		if h.fail_next then
+			h.fail_next = false
+			return op.always({ ok = false, err = 'test_failure', interface = req.interface })
+		end
+		return op.always({ ok = true, interface = req.interface, device = req.device,
+			peak_mbps = 10, data_mib = 1, duration_s = 0.1 })
+	end
+	hal.apply_live_weights_op = function (_, req)
+		h.weights[#h.weights + 1] = req
+		return op.always({ ok = true, changed = true, applied = true })
+	end
+	hal.open_observed_subscription = function () return obs_rx end
+	hal.start_observation_op = function () return op.always({ ok = true, backend = 'test', watching = true }) end
 	retain_network_config_status(conn, 'available')
 	retain_network_state_status_payload(conn, { schema = 'devicecode.cap.status/1', state = 'running', available = true })
-	h.child = start_service(scope, conn, { conn = conn, config = c, rev = 22, hal = hal })
+	local params = { conn = conn, config = active_scope_cfg(speedtest_opts), rev = h.rev, hal = hal }
+	h.child = start_service(scope, conn, params)
+	function h.reconfigure(opts, members)
+		h.rev = h.rev + 1
+		conn:retain(topics.config(), { rev = h.rev, data = active_scope_cfg(opts, members) })
+	end
 	function h.observe(a_online, b_online)
 		obs_tx:send({ payload = {
 			schema = 'devicecode.net.observation/1',
@@ -1186,8 +1200,8 @@ local function start_active_scope_service(scope, speedtest_opts)
 					wan_b = { interface = 'wan_b', state = b_online and 'online' or 'offline', online = b_online, usable = b_online },
 				} },
 				live = { interfaces = {
-					wan_a = { ipv4 = { { address = '203.0.113.10' } } },
-					wan_b = { ipv4 = { { address = '10.1.2.3' } } },
+					wan_a = { ipv4 = { { address = h.addresses.wan_a } } },
+					wan_b = { ipv4 = { { address = h.addresses.wan_b } } },
 				} },
 			},
 		} })
@@ -1282,6 +1296,76 @@ function tests.test_active_scope_interval_timer_follows_the_latest_result()
 		local gap = h.speedtests[4].at - h.speedtests[3].at
 		ok(gap >= 0.9, 'interval measured from the latest result, got ' .. tostring(gap))
 		eq(#h.weights, 0)
+		h.stop()
+	end)
+end
+
+
+function tests.test_switching_to_active_scope_with_a_fresh_result_still_retests_on_interval()
+	fibers.run(function (scope)
+		local h = start_active_scope_service(scope, { scope = 'all', interval_s = 1 })
+		h.observe(true, true)
+		ok(h.tested(2), 'scope all tests both uplinks')
+		h.reconfigure({ interval_s = 1 })
+		h.observe(true, true)
+		ok(h.tested(3, 2.5), 'the cached result must still expire into an interval re-test')
+		eq(h.speedtests[3].interface, 'wan_a')
+		h.stop()
+	end)
+end
+
+function tests.test_raising_interval_rearms_the_timer_for_the_cached_result()
+	fibers.run(function (scope)
+		local h = start_active_scope_service(scope, { interval_s = 1 })
+		h.observe(true, true)
+		ok(h.tested(1), 'active WAN tested')
+		sleep.sleep(0.3)
+		h.reconfigure({ interval_s = 2 })
+		h.observe(true, true)
+		sleep.sleep(1.2)
+		eq(#h.speedtests, 1, 'the old one-second timer must not re-test a result that is still fresh')
+		ok(h.tested(2, 1.5), 'the timer must be re-armed for the new interval')
+		eq(h.speedtests[2].interface, 'wan_a')
+		h.stop()
+	end)
+end
+
+function tests.test_failure_retry_is_not_held_back_by_a_later_interval_timer()
+	fibers.run(function (scope)
+		local h = start_active_scope_service(scope, { interval_s = 3, retry_after_s = 1 })
+		h.observe(true, true)
+		ok(h.tested(1), 'active WAN tested')
+		-- A new address re-tests the path; that test fails.
+		h.fail_next = true
+		h.addresses.wan_a = '198.51.100.7'
+		h.observe(true, true)
+		ok(h.tested(2), 'path change re-test')
+		ok(h.tested(3, 2.0), 'failure retry must not wait for the interval timer')
+		local gap = h.speedtests[3].at - h.speedtests[2].at
+		ok(gap < 1.8, 'retry should follow retry_after_s, waited ' .. tostring(gap))
+		h.stop()
+	end)
+end
+
+function tests.test_apply_that_moves_the_active_uplink_reports_the_change()
+	fibers.run(function (scope)
+		local h = start_active_scope_service(scope, { interval_s = 60 })
+		local sub = h.reader:subscribe({ 'obs', 'v1', 'net', 'event', 'active_uplink_changed' },
+			{ queue_len = 8, full = 'drop_oldest' })
+		h.observe(true, true)
+		ok(h.tested(1), 'active WAN tested')
+		h.reconfigure({ interval_s = 60 }, {
+			wan_a = { interface = 'wan_a', mwan_metric = 1, weight = 1, enabled = false },
+			wan_b = { interface = 'wan_b', mwan_metric = 2, weight = 1 },
+		})
+		local seen = false
+		for _ = 1, 6 do
+			local which, msg = fibers.perform(op.named_choice({ ev = sub:recv_op(), timeout = sleep.sleep_op(0.4) }))
+			if which ~= 'ev' then break end
+			if msg.payload and msg.payload.uplink_id == 'wan_b' then seen = true; break end
+		end
+		ok(seen, 'disabling the active member must report the move to wan_b')
+		sub:unsubscribe()
 		h.stop()
 	end)
 end
