@@ -921,4 +921,35 @@ function tests.test_mwan3_interfaces_start_online_unless_configured()
 end
 
 
+function tests.test_interface_status_reads_netifd_ipv4_address_field()
+	-- netifd reports IPv4 as "ipv4-address" (as `ifstatus wan` shows on a box).
+	local live = openwrt_provider._test.normalise_interface_status('wan', {
+		up = true, l3_device = 'eth1',
+		['ipv4-address'] = { { address = '203.0.113.10', mask = 24 } },
+		['ipv6-address'] = {},
+	})
+	eq(#live.ipv4, 1)
+	eq(live.ipv4[1].address, '203.0.113.10')
+	eq(live.ipv4[1].mask, 24)
+
+	local legacy = openwrt_provider._test.normalise_interface_status('wan', { address = { { address = '198.51.100.1' } } })
+	eq(legacy.ipv4[1].address, '198.51.100.1', 'the older field is still accepted')
+end
+
+function tests.test_live_interfaces_are_indexed_by_product_interface()
+	local ctx = ok(names.allocate({
+		interfaces = { wan = {}, modem_primary = {} },
+		wan = { members = { wan = { interface = 'wan' }, modem_primary = { interface = 'modem_primary' } } },
+	}))
+	local generated = ctx:iface('modem_primary')
+	ok(generated ~= 'modem_primary', 'long ids are shortened for OpenWrt')
+	local by_sem = openwrt_provider._test.live_interfaces_by_semantic({
+		wan = { id = 'wan' },
+		[generated] = { id = generated },
+	}, ctx)
+	eq(by_sem.modem_primary.id, generated)
+	eq(by_sem.wan.id, 'wan')
+	eq(by_sem[generated], nil)
+end
+
 return tests

@@ -39,6 +39,10 @@ end
 
 local function live_interface(snapshot, iface, ifname)
 	local live = observed_live(snapshot)
+	-- HAL keys live records by generated OpenWrt names and indexes them by
+	-- product interface; use that index first.
+	local by_sem = live and live.interfaces_by_semantic or nil
+	if is_table(by_sem) and type(iface) == 'string' and is_table(by_sem[iface]) then return by_sem[iface] end
 	local interfaces = live and live.interfaces or nil
 	if not is_table(interfaces) then return nil end
 	if type(iface) == 'string' and iface ~= '' and is_table(interfaces[iface]) then return interfaces[iface] end
