@@ -25,16 +25,23 @@ local function flag_enabled(v)
 	return false
 end
 
-local function runtime_opts(snapshot)
+-- Speedtest settings may sit under wan.load_balancing or wan.runtime, spelt
+-- speedtests or speedtest. The first entry present decides both whether
+-- speedtests are enabled and their options, so the two never disagree (config
+-- validation also rejects more than one entry).
+local function speedtest_entry(snapshot)
 	local wan = snapshot and snapshot.wan or {}
 	local lb = type(wan.load_balancing) == 'table' and wan.load_balancing or {}
 	local rt = type(wan.runtime) == 'table' and wan.runtime or {}
-	local sp = type(lb.speedtests) == 'table' and lb.speedtests
-		or type(lb.speedtest) == 'table' and lb.speedtest
-		or type(rt.speedtests) == 'table' and rt.speedtests
-		or type(rt.speedtest) == 'table' and rt.speedtest
-		or {}
-	return sp
+	if lb.speedtests ~= nil then return lb.speedtests end
+	if lb.speedtest ~= nil then return lb.speedtest end
+	if rt.speedtests ~= nil then return rt.speedtests end
+	return rt.speedtest
+end
+
+local function runtime_opts(snapshot)
+	local sp = speedtest_entry(snapshot)
+	return type(sp) == 'table' and sp or {}
 end
 
 
@@ -69,13 +76,7 @@ function M.speedtest_retry_delay_s(snapshot, rec)
 end
 
 function M.speedtest_enabled(snapshot)
-	local wan = snapshot and snapshot.wan or {}
-	local lb = type(wan.load_balancing) == 'table' and wan.load_balancing or {}
-	local rt = type(wan.runtime) == 'table' and wan.runtime or {}
-	return flag_enabled(lb.speedtest)
-		or flag_enabled(lb.speedtests)
-		or flag_enabled(rt.speedtest)
-		or flag_enabled(rt.speedtests)
+	return flag_enabled(speedtest_entry(snapshot))
 end
 
 function M.live_weight_policy(snapshot)

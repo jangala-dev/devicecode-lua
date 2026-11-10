@@ -540,11 +540,13 @@ active_uplink = {
 }
 ```
 
-HAL translates mwan3's live policy into `observed.multiwan.policies_by_semantic`. When the configured load-balancing policy (default `balanced`) lists members, those are active. Otherwise the lowest-metric online members are active, which is what mwan3 does under strict failover. With nothing online the status follows `wan.last_resort`: `default` gives `last_resort` (clients use the main routing table), `unreachable` or `blackhole` gives `none`. Before any observation it is `unknown`. Each change emits an `active_uplink_changed` event.
+HAL translates mwan3's live policy into `observed.multiwan.policies_by_semantic`. Policy members name interfaces; where several members share one, the lowest metric owns it. When the configured load-balancing policy (default `balanced`) lists members, those are active. Otherwise the lowest-metric online members are active, which is what mwan3 does under strict failover. With nothing online the status follows `wan.last_resort`: `default` gives `last_resort` (clients use the main routing table), `unreachable` or `blackhole` gives `none`. Before any observation it is `unknown`. Each change emits an `active_uplink_changed` event.
 
 ### Speedtest scope
 
-`wan.load_balancing.speedtests.scope` chooses which uplinks are tested:
+Speedtest settings live in one place, normally `wan.load_balancing.speedtests` (the older `wan.load_balancing.speedtest`, `wan.runtime.speedtests` and `wan.runtime.speedtest` are still read). Config rejects settings in more than one of them, so enablement and options always come from the same entry.
+
+`scope` chooses which uplinks are tested:
 
 - `all` (default): every online uplink is tested in turn and the results feed live weights.
 - `active`: only `active_uplink.uplink_id` is tested, and live weights are never changed (`live_weights.reason = 'speedtest_scope_active'`). Standby uplinks are skipped with `not_active_uplink`, and a test still running on an uplink that stops carrying traffic is cancelled. The active uplink is re-tested every `interval_s` (a timer, since observations are event-led) and when traffic moves to a different uplink. A move does not re-test an uplink whose last success is younger than `failover_retest_min_s` (default 300), so a flapping link does not spend modem data on every flap.

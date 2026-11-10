@@ -96,10 +96,14 @@ local function uplink_for(name, uplinks, mw, semantic)
 			if is_table(st) and st.interface == name then name = tostring(sem); break end
 		end
 	end
-	local ids = sorted_ids(uplinks)
-	for _, id in ipairs(ids) do
-		if uplinks[id].interface == name then return id end
+	-- Several members may share an interface: the lowest metric owns it.
+	local best
+	for _, id in ipairs(sorted_ids(uplinks)) do
+		if uplinks[id].interface == name and (best == nil or metric_of(uplinks[id]) < metric_of(uplinks[best])) then
+			best = id
+		end
 	end
+	if best then return best end
 	if is_table(uplinks[name]) and uplinks[name].interface == nil then return name end
 	return nil
 end

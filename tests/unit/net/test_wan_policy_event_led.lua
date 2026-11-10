@@ -265,19 +265,21 @@ function tests.test_retry_backoff_only_suppresses_same_path()
 end
 
 function tests.test_uplink_status_uses_the_members_own_record_when_ids_and_interfaces_collide()
-	-- Member "primary" uses interface "wan"; member "wan" uses interface "modem_primary".
+	-- Cyclic collision: each member's id is the other member's interface, so a
+	-- lookup that accepts id and interface matches in one hash-order pass reads
+	-- the wrong record for one of the two members whatever the order.
 	local s = {
 		generation = 1,
 		wan = {
 			configured_members = {
 				primary = { interface = 'wan', metric = 1 },
-				wan = { interface = 'modem_primary', metric = 2 },
+				wan = { interface = 'primary', metric = 2 },
 			},
 			load_balancing = { speedtests = { enabled = true, scope = 'active' } },
 		},
 		backhaul = { uplinks = {
 			primary = { id = 'primary', interface = 'wan', state = 'online', usable = true },
-			wan = { id = 'wan', interface = 'modem_primary', state = 'offline', usable = false },
+			wan = { id = 'wan', interface = 'primary', state = 'offline', usable = false },
 		} },
 		wan_runtime = { speedtests = {} },
 	}
@@ -294,6 +296,21 @@ function tests.test_uplink_status_uses_the_members_own_record_when_ids_and_inter
 	}
 	local stray = { uplink_id = 'stray', request = { interface = 'wan' } }
 	eq(policy.uplink_observed_status(s, stray).interface, 'wan')
+end
+function tests.test_speedtest_enabled_and_options_come_from_the_same_entry()
+	local s = snapshot()
+	s.wan.load_balancing.speedtests = { enabled = false }
+	s.wan.runtime = { speedtests = { enabled = true, scope = 'active' } }
+	eq(policy.speedtest_enabled(s), false, 'the first entry decides enablement as it decides options')
+	eq(policy.speedtest_scope(s), 'all')
+
+	s.wan.load_balancing.speedtests = nil
+	eq(policy.speedtest_enabled(s), true)
+	eq(policy.speedtest_scope(s), 'active')
+
+	s.wan.load_balancing.speedtests = true
+	eq(policy.speedtest_enabled(s), true, 'a boolean entry still enables')
+	eq(policy.speedtest_scope(s), 'all', 'a boolean entry carries no options')
 end
 
 return tests

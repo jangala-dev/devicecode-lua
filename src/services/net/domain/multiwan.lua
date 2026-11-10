@@ -185,6 +185,22 @@ local SPEEDTEST_SCOPES = { all = true, active = true }
 -- from load_balancing and runtime under both spellings, so a mistyped scope is
 -- rejected in all of them rather than silently falling back to `all`.
 local function check_speedtest_scope(t)
+	local seen
+	for _, section in ipairs({ 'load_balancing', 'runtime' }) do
+		local sec = t[section]
+		if schema.is_plain_table(sec) then
+			for _, key in ipairs({ 'speedtests', 'speedtest' }) do
+				if sec[key] ~= nil then
+					local here = section .. '.' .. key
+					if seen then
+						return nil, schema.err({ 'net', 'wan', section, key },
+							'speedtest settings may only be set in one place (also set at net.wan.' .. seen .. ')')
+					end
+					seen = here
+				end
+			end
+		end
+	end
 	for _, section in ipairs({ 'load_balancing', 'runtime' }) do
 		local sec = t[section]
 		if schema.is_plain_table(sec) then

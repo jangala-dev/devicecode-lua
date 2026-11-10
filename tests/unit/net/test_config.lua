@@ -609,4 +609,18 @@ function tests.test_speedtest_scope_is_validated_wherever_speedtests_are_read()
 	end
 end
 
+function tests.test_speedtest_settings_may_only_be_set_in_one_place()
+	local cfg = sample_cfg()
+	cfg.wan.load_balancing.speedtests = { enabled = false }
+	cfg.wan.runtime = { speedtests = { enabled = true, scope = 'active' } }
+	local intent, err = config.normalise(cfg, { rev = 1 })
+	eq(intent, nil)
+	ok(err and err:find('speedtest', 1, true) and err:find('one place', 1, true), 'got ' .. tostring(err))
+
+	cfg = sample_cfg()
+	cfg.wan.load_balancing.speedtests = { enabled = true }
+	cfg.wan.load_balancing.speedtest = { scope = 'active' }
+	eq(config.normalise(cfg, { rev = 1 }), nil, 'both spellings in one section also conflict')
+end
+
 return tests

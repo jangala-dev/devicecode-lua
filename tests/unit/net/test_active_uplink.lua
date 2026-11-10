@@ -237,4 +237,16 @@ function tests.test_policy_interface_names_resolve_by_interface_before_member_id
 	eq(a.interface, 'modem_primary')
 end
 
+function tests.test_members_sharing_an_interface_resolve_to_the_lowest_metric()
+	local ups = {
+		a_backup = { id = 'a_backup', interface = 'wan', metric = 2, state = 'online', usable = true },
+		z_main = { id = 'z_main', interface = 'wan', metric = 1, state = 'online', usable = true },
+	}
+	local mw = { interfaces_by_semantic = { wan = { interface = 'wan' } },
+		policies_by_semantic = { ipv4 = { balanced = { { interface = 'wan', percent = 100 } } } } }
+	local a = active_uplink.select(snapshot({ multiwan = mw }), ups)
+	eq(a.uplink_id, 'z_main', 'the lower-metric member owns a shared interface')
+	eq(a.metric, 1)
+end
+
 return tests
