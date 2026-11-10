@@ -952,4 +952,58 @@ function tests.test_live_interfaces_are_indexed_by_product_interface()
 	eq(by_sem[generated], nil)
 end
 
+function tests.test_live_snapshot_carries_netifd_addresses_to_backhaul_under_product_ids()
+	-- Drive the real snapshot path against a fake `ubus` on PATH that answers
+	-- `ubus call network.interface.<name> status` with netifd-shaped JSON.
+	local stdlib = require 'posix.stdlib'
+	local dir = os.tmpname(); os.remove(dir); assert(os.execute('mkdir -p ' .. dir))
+	local script = assert(io.open(dir .. '/ubus', 'w'))
+	script:write('#!/bin/sh\n[ -f "' .. dir .. '/$4.json" ] && cat "' .. dir .. '/$4.json" || echo "{}"\n')
+	script:close()
+	assert(os.execute('chmod +x ' .. dir .. '/ubus'))
+	local function reply(object, address)
+		local f = assert(io.open(dir .. '/' .. object .. '.json', 'w'))
+		f:write('{"up":true,"l3_device":"wwan0","ipv4-address":[{"address":"' .. address
+			.. '","mask":30}],"ipv6-address":[]}')
+		f:close()
+	end
+	local old_path = os.getenv('PATH')
+	stdlib.setenv('PATH', dir .. ':' .. old_path)
+
+	local ctx = ok(names.allocate({
+		interfaces = { modem_primary = {} },
+		wan = { members = { modem_primary = { interface = 'modem_primary' } } },
+	}))
+	local generated = ctx:iface('modem_primary')
+	local backhaul = require 'services.net.backhaul_model'
+	local function snapshot_address()
+		local observed = { interfaces = { [generated] = {} } }
+		fibers.run(function()
+			openwrt_provider._test.augment_with_live_snapshot({}, observed, {}, 'network', nil, ctx)
+		end)
+		local model = backhaul.reduce({
+			wan = { configured_members = { modem_primary = { interface = 'modem_primary', metric = 2 } } },
+			observed = { snapshot = {
+				multiwan = { interfaces_by_semantic = {
+					modem_primary = { interface = generated, state = 'online', usable = true },
+				} },
+				live = observed.live,
+			} },
+		}, { now = 1 })
+		return model.uplinks.modem_primary.path_address
+	end
+
+	local ok_run, err = pcall(function()
+		reply('network.interface.' .. generated, '10.1.2.3')
+		local first = snapshot_address()
+		eq(first and first.address, '10.1.2.3', 'live address under generated name ' .. generated)
+		eq(first.source, 'hal-network-live')
+		reply('network.interface.' .. generated, '10.9.8.7')
+		eq(snapshot_address().address, '10.9.8.7', 'a new address is picked up by the next snapshot')
+	end)
+	stdlib.setenv('PATH', old_path)
+	os.execute('rm -rf ' .. dir)
+	if not ok_run then error(err, 0) end
+end
+
 return tests

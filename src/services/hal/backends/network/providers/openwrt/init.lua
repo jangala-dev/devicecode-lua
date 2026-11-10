@@ -2519,6 +2519,7 @@ M._test = {
 	normalise_mwan3_status = normalise_mwan3_status,
 	normalise_interface_status = normalise_interface_status,
 	live_interfaces_by_semantic = live_interfaces_by_semantic,
+	augment_with_live_snapshot = augment_with_live_snapshot,
 	observer_forward_script = observer_forward_script,
 	mwan3_user_block = mwan3_user_block,
 	strip_observer_block = strip_observer_block,
