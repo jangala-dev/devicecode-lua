@@ -2676,6 +2676,7 @@ end
 GsmService._test = {
 	normalize_config = normalize_config,
 	get_modem_config = get_modem_config,
+	wait_for_connection = wait_for_connection,
 	GsmModem = GsmModem,
 	build_sim_payload = build_sim_payload,
 	derive_access_tech = derive_access_tech,

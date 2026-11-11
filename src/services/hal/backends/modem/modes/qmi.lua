@@ -110,47 +110,47 @@ end
 ---@return string?
 ---@return string error
 local function parse_spn(out)
-    if not out or out == "" then
-        return nil, "Command closed"
-    end
+	if not out or out == "" then
+		return nil, "Command closed"
+	end
 
-    -- Do not fall back to "Operator Name" or PLMN/NITZ names: those describe
-    -- the network, whereas MVNO APN records must match the SIM's SPN.
-    local service_provider_section = out:match("Service Provider Name:?%s*\n(.-)\n%S")
-        or out:match("Service Provider Name:?%s*\n(.*)$")
-    local spn = service_provider_section
-        and service_provider_section:match("Name%s*:%s*'([^']+)'")
-    if not spn then
-        return nil, "Failed to parse qmicli Service Provider Name: " .. tostring(out)
-    end
-    return spn, ""
+	-- Do not fall back to "Operator Name" or PLMN/NITZ names: those describe
+	-- the network, whereas MVNO APN records must match the SIM's SPN.
+	local service_provider_section = out:match("Service Provider Name:?%s*\n(.-)\n%S")
+		or out:match("Service Provider Name:?%s*\n(.*)$")
+	local spn = service_provider_section
+		and service_provider_section:match("Name%s*:%s*'([^']+)'")
+	if not spn then
+		return nil, "Failed to parse qmicli Service Provider Name: " .. tostring(out)
+	end
+	return spn, ""
 end
 
 ---@param identity ModemIdentity
 ---@return string?
 ---@return string error
 local function read_spn(identity)
-    local st, _, spn_or_err = fibers.run_scope(function()
-        local cmd = exec.command {
-            "qmicli", "-p", "-d", identity.mode_port, "--nas-get-operator-name",
-            stdin = "null",
-            stdout = "pipe",
-            stderr = "stdout"
-        }
-        local out, status, code, _, err = fibers.perform(cmd:combined_output_op())
-        if status ~= "exited" or code ~= 0 then
-            error("Failed to execute qmicli command: --nas-get-operator-name, reason: " .. tostring(err))
-        end
+	local st, _, spn_or_err = fibers.run_scope(function()
+		local cmd = exec.command {
+			"qmicli", "-p", "-d", identity.mode_port, "--nas-get-operator-name",
+			stdin = "null",
+			stdout = "pipe",
+			stderr = "stdout"
+		}
+		local out, status, code, _, err = fibers.perform(cmd:combined_output_op())
+		if status ~= "exited" or code ~= 0 then
+			error("Failed to execute qmicli command: --nas-get-operator-name, reason: " .. tostring(err))
+		end
 
-        local spn, parse_err = parse_spn(out)
-        if not spn then error(parse_err) end
-        return spn
-    end)
+		local spn, parse_err = parse_spn(out)
+		if not spn then error(parse_err) end
+		return spn
+	end)
 
-    if st == "ok" then
-        return spn_or_err, ""
-    end
-    return nil, spn_or_err or "Unknown error"
+	if st == "ok" then
+		return spn_or_err, ""
+	end
+	return nil, spn_or_err or "Unknown error"
 end
 
 ---@param identity ModemIdentity

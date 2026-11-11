@@ -336,6 +336,110 @@ function tests.test_apn_connect_continues_when_gid1_is_unavailable()
 	end)
 end
 
+function tests.test_apn_connect_continues_when_spn_is_unavailable()
+	fibers.run(function()
+		local values = {
+			mcc = '655',
+			mnc = '10',
+			imsi = '655100000000000',
+			gid1 = '00',
+		}
+		local connect_string
+		local spn_log
+		local state_sub = {
+			recv = function() return { payload = 'registered' } end,
+			unsubscribe = function() end,
+		}
+		local cap = {
+			call_control_op = function(_, method, args)
+				if method == 'get' then
+					if args.field == 'spn' then
+						return op.always({ ok = false, reason = 'field unavailable: spn' })
+					end
+					return op.always({ ok = true, reason = values[args.field] })
+				end
+				if method == 'connect' then
+					connect_string = args.connection_string
+					return op.always({ ok = true, reason = '' })
+				end
+				return op.always({ ok = false, reason = 'unexpected method: ' .. tostring(method) })
+			end,
+			get_state_sub = function() return state_sub end,
+		}
+		local svc = {
+			custom_apns = {
+				{ carrier = 'MTN Data', mcc = '655', mnc = '10', apn = 'myMTN' },
+			},
+			obs_log = function(_, level, payload)
+				if type(payload) == 'table' and payload.what == 'spn_unavailable' then
+					spn_log = { level = level, payload = payload }
+				end
+			end,
+		}
+		local modem = setmetatable({ cap = cap, svc = svc, cfg = {}, name = 'primary' }, gsm._test.GsmModem)
+
+		local active_apn, connect_err, retry_timeout = modem:_apn_connect()
+
+		eq(connect_err, '')
+		eq(retry_timeout, nil)
+		eq(active_apn.apn, 'myMTN')
+		eq(connect_string, 'apn=myMTN')
+		ok(spn_log, 'expected unavailable SPN to be logged')
+		eq(spn_log.level, 'warn')
+		eq(spn_log.payload.modem, 'primary')
+		eq(spn_log.payload.err, 'field unavailable: spn')
+	end)
+end
+
+function tests.test_apn_connect_continues_when_imsi_is_unavailable()
+	fibers.run(function()
+		local values = { mcc = '655', mnc = '10', spn = 'MTN', gid1 = '00' }
+		local connect_string
+		local imsi_log
+		local state_sub = {
+			recv = function() return { payload = 'registered' } end,
+			unsubscribe = function() end,
+		}
+		local cap = {
+			call_control_op = function(_, method, args)
+				if method == 'get' then
+					if args.field == 'imsi' then
+						return op.always({ ok = false, reason = 'field unavailable: imsi' })
+					end
+					return op.always({ ok = true, reason = values[args.field] })
+				end
+				if method == 'connect' then
+					connect_string = args.connection_string
+					return op.always({ ok = true, reason = '' })
+				end
+				return op.always({ ok = false, reason = 'unexpected method: ' .. tostring(method) })
+			end,
+			get_state_sub = function() return state_sub end,
+		}
+		local svc = {
+			custom_apns = {
+				{ carrier = 'MTN Data', mcc = '655', mnc = '10', apn = 'myMTN' },
+			},
+			obs_log = function(_, level, payload)
+				if type(payload) == 'table' and payload.what == 'imsi_unavailable' then
+					imsi_log = { level = level, payload = payload }
+				end
+			end,
+		}
+		local modem = setmetatable({ cap = cap, svc = svc, cfg = {}, name = 'primary' }, gsm._test.GsmModem)
+
+		local active_apn, connect_err, retry_timeout = modem:_apn_connect()
+
+		eq(connect_err, '')
+		eq(retry_timeout, nil)
+		eq(active_apn.apn, 'myMTN')
+		eq(connect_string, 'apn=myMTN')
+		ok(imsi_log, 'expected unavailable IMSI to be logged')
+		eq(imsi_log.level, 'warn')
+		eq(imsi_log.payload.err, 'field unavailable: imsi')
+	end)
+end
+
 function tests.test_scrub_removes_the_exact_connection_string_and_password()
 	local apns = require 'services.gsm.apn'
 	local conn = 'apn=a,user=me,password=p.%s (x, y)'

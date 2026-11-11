@@ -83,6 +83,25 @@ function tests.test_parse_keeps_records_v09_would_have_used()
 	end
 end
 
+function tests.test_parse_preserves_credential_variants_in_order()
+	local records, skipped = import.parse(user_cfg({
+		rec('same', { user = 'first', password = 'one' }),
+		rec('same', { user = 'second', password = 'two' }),
+	}))
+	assert(#records == 2, 'credential variants imported: ' .. tostring(#records))
+	assert(skipped == 0, 'skipped ' .. tostring(skipped))
+	assert(records[1].user == 'first' and records[2].user == 'second')
+end
+
+function tests.test_parse_uses_apn_as_fallback_carrier_for_legacy_records()
+	local records, skipped = import.parse(user_cfg({
+		{ mcc = '234', mnc = '10', apn = 'carrierless.net', user = 'legacy' },
+	}))
+	assert(#records == 1, 'carrier-less legacy APN was discarded')
+	assert(skipped == 0, 'skipped ' .. tostring(skipped))
+	assert(records[1].carrier == 'carrierless.net', tostring(records[1].carrier))
+end
+
 function tests.test_parse_treats_no_apns_as_an_empty_list()
 	for _, body in ipairs({ '{}', '{"default":{}}', '{"addn":{"apns":[]}}', '{"default":{"apns":[]}}' }) do
 		local records, skipped = import.parse(body)
