@@ -853,6 +853,10 @@ local function merge_pdp_scopes(target, source)
 			for cid in pairs(incoming.cids or {}) do episode.cids[cid] = true end
 			episode.pending_fail_open = episode.pending_fail_open or incoming.pending_fail_open
 			episode.restart_inflight = episode.restart_inflight or incoming.restart_inflight
+			local state_rank = { pending = 1, awaiting_transition = 2, awaiting_reinspection = 3 }
+			if (state_rank[incoming.state] or 0) > (state_rank[episode.state] or 0) then
+				episode.state = incoming.state
+			end
 		end
 	end
 	for _, episode in ipairs(source.history or {}) do target.history[#target.history + 1] = episode end
@@ -901,7 +905,18 @@ function GsmModem:_reconcile_pdp_reservations(modem_state)
 			end
 		end
 		local episode = scope_state.active_episode
-		if episode and episode.restart_inflight then episode.restart_inflight = nil end
+		if episode then
+			local inflight = episode.restart_inflight
+			-- A replacement while the reset RPC is running, or while its caller is
+			-- waiting for a state transition, is itself evidence that the reset took
+			-- effect.  The replacement must inspect the resulting context before it
+			-- can justify another correction or reset.
+			if (inflight and inflight.stage == 'rpc_started')
+				or episode.state == 'awaiting_transition' then
+				episode.state = 'awaiting_reinspection'
+			end
+			episode.restart_inflight = nil
+		end
 	end
 	for _, type_state in pairs(modem_state.types or {}) do
 		if type_state.fallback and not type_state.fallback.tombstone then reconcile_scope(type_state.fallback) end
@@ -1507,6 +1522,7 @@ function GsmModem:_restart_after_pdp(scope_state, episode, generation)
 		local _, err = call_modem_rpc(self.cap, 'restart', {}, REQUEST_TIMEOUT)
 		if not self:_pdp_owner_active(generation) then return false, 'pdp_owner_stale' end
 		episode.restart_inflight = nil
+		episode.state = err == '' and 'awaiting_transition' or 'pending'
 		local safe_err = err == '' and '' or pdp_safe_error(err)
 		self.svc:obs_log(err == "" and 'info' or 'warn', {
 			what = 'pdp_restart', modem = self.name, err = safe_err,
@@ -1656,7 +1672,9 @@ function GsmModem:_configure_pdp()
 		self:_finish_pdp_operation(generation, pdp_type)
 		return restarted, err, state, enable_decision
 	end
-	if scope_state.active_episode then
+	if scope_state.active_episode and scope_state.active_episode.state == 'awaiting_reinspection' then
+		archive_pdp_episode(scope_state, scope_state.active_episode, 'completed_restart_requires_inspection')
+	elseif scope_state.active_episode then
 		local restarted, episode_err, next_state = self:_service_pdp_episode(scope_state, pdp_type, generation)
 		if not self:_pdp_owner_active(generation) then
 			return done(false, 'pdp_owner_stale', next_state)

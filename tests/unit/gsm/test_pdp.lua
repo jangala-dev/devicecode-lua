@@ -1207,24 +1207,135 @@ function tests.test_pdp_owner_replacement_at_restart_return_completes_without_fa
 		eq(count(old_calls, 'restart'), 1)
 
 		local restarted, err = replacement:_configure_pdp()
-		eq(restarted, true)
+		eq(restarted, false)
 		eq(err, '')
-		eq(count(replacement_calls, 'restart'), 1)
+		eq(count(replacement_calls, 'restart'), 0)
 
 		prepare_autoconnect(replacement)
 		replacement:_autoconnect_loop()
-		eq(count(replacement_calls, 'restart'), 1)
+		eq(count(replacement_calls, 'restart'), 0)
 		eq(count(replacement_calls, 'enable'), 1)
 		eq(count(replacement_calls, 'connect'), 1)
-		local restart_index, inspect_index, enable_index, connect_index
+		local inspect_index, enable_index, connect_index
 		for index, call in ipairs(replacement_calls) do
-			if call.method == 'restart' then restart_index = restart_index or index end
 			if call.method == 'get' and call.opts.field == 'pdp_contexts' then inspect_index = inspect_index or index end
 			if call.method == 'enable' then enable_index = enable_index or index end
 			if call.method == 'connect' then connect_index = connect_index or index end
 		end
-		assert(restart_index < inspect_index and inspect_index < enable_index and enable_index < connect_index)
+		assert(inspect_index < enable_index and enable_index < connect_index)
 		eq(count_logs(logs, 'autoconnect_failed'), 0)
+	end)
+end
+
+function tests.test_pdp_owner_replacement_after_successful_reset_reinspects_before_another_reset()
+	runfibers.run(function()
+		local contexts = { context(1, 'IPV6', true) }
+		local svc = { obs_log = function() end }
+		local replacement, replacement_calls
+		local old, old_calls = fixture(contexts, {
+			svc = svc,
+			call = function(method, opts)
+				if method == 'set_pdn_type' then
+					contexts[1].pdp_type = opts.pdp_type
+				elseif method == 'restart' then
+					replacement, replacement_calls = fixture(contexts, { svc = svc })
+					replacement:_claim_pdp_owner()
+					return reply(true)
+				end
+			end,
+		})
+
+		local restarted, err = old:_configure_pdp()
+		eq(restarted, false)
+		eq(err, 'pdp_owner_stale')
+		eq(count(old_calls, 'set_pdn_type'), 1)
+		eq(count(old_calls, 'restart'), 1)
+
+		-- The successful write survived the reset.  A replacement owner must inspect
+		-- that fact before deciding whether another correction or reset is necessary.
+		restarted, err = replacement:_configure_pdp()
+		eq(restarted, false)
+		eq(err, '')
+		eq(count(replacement_calls, 'get'), 1)
+		eq(replacement_calls[1].opts.field, 'pdp_contexts')
+		eq(count(replacement_calls, 'set_pdn_type'), 0)
+		eq(count(replacement_calls, 'restart'), 0)
+	end)
+end
+
+function tests.test_pdp_owner_replacement_while_waiting_for_reset_transition_reinspects()
+	runfibers.run(function(scope)
+		local contexts = { context(1, 'IPV6', true) }
+		local svc = { obs_log = function() end }
+		local old, old_calls = fixture(contexts, {
+			svc = svc,
+			call = function(method, opts)
+				if method == 'set_pdn_type' then
+					contexts[1].pdp_type = opts.pdp_type
+				elseif method == 'restart' then
+					-- The RPC succeeds, but this owner never observes a card-state
+					-- transition because ModemManager replaces it.
+					return reply(true)
+				end
+			end,
+		})
+		local invocation = assert(scope:child())
+		assert(invocation:spawn(function() old:_configure_pdp() end))
+		while not old.pdp_restart_waiting do sleep.sleep(0.001) end
+		eq(count(old_calls, 'restart'), 1)
+
+		local replacement, replacement_calls = fixture(contexts, { svc = svc })
+		replacement:_claim_pdp_owner()
+		local restarted, err = replacement:_configure_pdp()
+		eq(restarted, false)
+		eq(err, '')
+		eq(count(replacement_calls, 'get'), 1)
+		eq(replacement_calls[1].opts.field, 'pdp_contexts')
+		eq(count(replacement_calls, 'restart'), 0)
+
+		invocation:cancel('owner replaced')
+		eq(select(1, fibers.perform(invocation:join_op())), 'cancelled')
+	end)
+end
+
+function tests.test_pdp_owner_replacement_recorrects_a_reverted_context_before_second_reset()
+	runfibers.run(function()
+		local contexts = { context(1, 'IPV6', true) }
+		local svc = { obs_log = function() end }
+		local replacement, replacement_calls
+		local old, old_calls = fixture(contexts, {
+			svc = svc,
+			call = function(method, opts)
+				if method == 'set_pdn_type' then
+					contexts[1].pdp_type = opts.pdp_type
+				elseif method == 'restart' then
+					-- Model firmware/carrier state restoring the old definition while the
+					-- ModemManager object is replaced by the reset.
+					contexts[1].pdp_type = 'IPV6'
+					replacement, replacement_calls = fixture(contexts, {
+						svc = svc,
+						call = function(replacement_method, replacement_opts)
+							if replacement_method == 'set_pdn_type' then
+								contexts[1].pdp_type = replacement_opts.pdp_type
+							end
+						end,
+					})
+					replacement:_claim_pdp_owner()
+					return reply(true)
+				end
+			end,
+		})
+
+		eq(select(2, old:_configure_pdp()), 'pdp_owner_stale')
+		eq(count(old_calls, 'restart'), 1)
+
+		local restarted, err = replacement:_configure_pdp()
+		eq(restarted, true)
+		eq(err, '')
+		eq(count(replacement_calls, 'get'), 1)
+		eq(replacement_calls[1].opts.field, 'pdp_contexts')
+		eq(count(replacement_calls, 'set_pdn_type'), 1)
+		eq(count(replacement_calls, 'restart'), 1)
 	end)
 end
 

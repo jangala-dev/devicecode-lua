@@ -99,6 +99,41 @@ function tests.invalid_contexts_fail()
 end
 
 ---@return nil
+function tests.restart_order_requires_post_reset_inspection()
+	runner.check_restart_order([[
+[INFO] gsm: pdp_contexts_checked modem=primary contexts=1:IPV4V6:active pdp_type=IP
+[INFO] gsm: pdp_restart modem=primary count=1 limit=2
+[INFO] gsm: pdp_contexts_checked modem=primary contexts=1:IP:active pdp_type=IP
+]])
+	runner.check_restart_order([[
+[INFO] gsm: pdp_restart modem=primary count=1 limit=2
+[INFO] gsm: pdp_contexts_checked modem=secondary contexts=1:IP:active pdp_type=IP
+[INFO] gsm: pdp_contexts_checked modem=primary contexts=1:IPV4V6:active pdp_type=IP
+[INFO] gsm: pdp_restart modem=primary count=2 limit=2
+[INFO] gsm: pdp_contexts_checked modem=primary contexts=1:IP:active pdp_type=IP
+]])
+	rejects(function()
+		runner.check_restart_order([[
+[INFO] gsm: pdp_restart modem=primary count=1 limit=2
+[INFO] gsm: primary detected
+[INFO] gsm: pdp_restart modem=primary count=2 limit=2
+]])
+	end, 'restarted twice without an intervening context inspection')
+	rejects(function()
+		runner.check_restart_order([[
+[INFO] gsm: pdp_restart modem=primary count=1 limit=2
+[ERROR] gsm: pdp_enforcement_exhausted modem=primary budget_kind=restart count=2
+]])
+	end, 'exhausted its restart budget before post-reset inspection')
+	rejects(function()
+		runner.check_restart_order([[
+[INFO] gsm: pdp_restart modem=primary count=1 limit=2
+[INFO] gsm: primary modem state -> connected
+]])
+	end, 'reached the end of the phase without post-reset inspection')
+end
+
+---@return nil
 function tests.arguments()
 	local args = runner.parse_args({}, repo, here)
 	equal(args.first, 'IP')

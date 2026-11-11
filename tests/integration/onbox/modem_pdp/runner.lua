@@ -73,6 +73,34 @@ function M.check_contexts(response, expected)
 	return active
 end
 
+---@param content string
+---@return nil
+function M.check_restart_order(content)
+	-- A reset may replace the ModemManager object, but the next owner must establish
+	-- the current PDP facts before it spends another restart reservation or fails open.
+	local awaiting_inspection = {}
+	for line in content:gmatch('[^\n]+') do
+		local inspected = line:match('gsm:%s+pdp_contexts_checked%s+modem=([^%s]+)')
+		if inspected then awaiting_inspection[inspected] = nil end
+
+		local restarted = line:match('gsm:%s+pdp_restart%s+modem=([^%s]+)')
+		if restarted then
+			assert(not awaiting_inspection[restarted],
+				('PDP modem %s restarted twice without an intervening context inspection'):format(restarted))
+			awaiting_inspection[restarted] = true
+		end
+
+		local exhausted = line:match('gsm:%s+pdp_enforcement_exhausted%s+modem=([^%s]+)')
+		if exhausted and line:find('budget_kind=restart', 1, true) then
+			assert(not awaiting_inspection[exhausted],
+				('PDP modem %s exhausted its restart budget before post-reset inspection'):format(exhausted))
+		end
+	end
+	for modem in pairs(awaiting_inspection) do
+		error(('PDP modem %s reached the end of the phase without post-reset inspection'):format(modem), 0)
+	end
+end
+
 ---@class PdpBoxArgs: OnboxArgs
 ---@field first string
 ---@field second string
@@ -164,6 +192,7 @@ function Runner:inspect(label, config)
 			label, self.targets[imei].name, imei:sub(-4), table.concat(cids, ','), expected))
 	end
 	self.modems:wait(self.targets, 'connected')
+	M.check_restart_order(util.read(self.box.logs.path))
 	self.summary[#self.summary + 1] = { phase = label, modems = results }
 	util.write(self.box.artifacts .. '/results.json', util.encode(self.summary))
 end
