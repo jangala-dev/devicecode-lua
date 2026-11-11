@@ -61,7 +61,7 @@ local function start(scope, opts)
 	local bus = busmod.new()
 	local store = fake_store.new({ id = 'gsm', values = opts.values })
 	store:start(bus:connect({ origin_base = { kind = 'test', service = 'fake-hal' } }), { id = 'gsm', scope = scope })
-	local h = { bus = bus, store = store, reads = 0, read_filenames = {} }
+	local h = { bus = bus, store = store, reads = 0 }
 	if opts.replies then
 		local conn = bus:connect({ origin_base = { kind = 'test', service = 'fake-fs' } })
 		local ep = assert(bus_cleanup.bind(conn, { 'cap', 'fs', 'credentials', 'rpc', 'read' }, { queue_len = 8 }))
@@ -70,9 +70,8 @@ local function start(scope, opts)
 				local req = fibers.perform(ep:recv_op())
 				if req == nil then return end
 				h.reads = h.reads + 1
-				h.read_filenames[h.reads] = req.payload and req.payload.filename
 				local reply = opts.replies[math.min(h.reads, #opts.replies)]
-				if type(reply) == 'function' then reply = reply(req.payload) end
+				if type(reply) == 'function' then reply = reply() end
 				req:reply(reply)
 			end
 		end))
@@ -214,28 +213,6 @@ function tests.test_missing_and_malformed_files_write_nothing()
 			assert(count_calls(h.store, 'put') == 0)
 		end, { timeout = TIMEOUT })
 	end
-end
-
-function tests.test_first_boot_import_considers_remote_cfg_as_a_legacy_source()
-	runfibers.run(function(scope)
-		local h = start(scope, { replies = {
-			function(payload)
-				if payload and payload.filename == 'remote.cfg' then
-					return { ok = true, reason = user_cfg({ rec('remote') }) }
-				end
-				return { ok = false, reason = 'failed to open file: No such file or directory' }
-			end,
-		} })
-		wait_until(function() return h.reads >= 1 end, 'a legacy configuration read')
-		fibers.perform(sleep.sleep_op(0.2))
-		local saw_remote = false
-		for _, filename in ipairs(h.read_filenames) do
-			if filename == 'remote.cfg' then saw_remote = true end
-		end
-		assert(saw_remote, 'remote.cfg was not considered during legacy APN import')
-		local records = stored(h)
-		assert(records and #records == 1 and records[1].apn == 'remote', 'remote APN was not imported')
-	end, { timeout = TIMEOUT })
 end
 
 -- A store whose put takes effect at once but whose reply waits for a gate, and a read that

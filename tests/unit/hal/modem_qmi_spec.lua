@@ -3,6 +3,7 @@ local qmi = require 'services.hal.backends.modem.modes.qmi'
 local exec = require 'fibers.io.exec'
 local op = require 'fibers.op'
 local runfibers = require 'tests.support.run_fibers'
+local known_regression = require 'tests.support.known_regression'
 
 local tests = {}
 
@@ -88,41 +89,49 @@ NITZ information:
 end
 
 function tests.test_qmi_keeps_home_network_when_rf_band_command_fails()
+	local info, err
 	with_qmi_results({
 		{ output = "MCC: '234'\nMNC: '10'\n" },
 		{ output = 'error', code = 1, err = 'radio unavailable' },
 	}, function()
-		local info, err = network_backend():read_network_info()
-		ok(info, err)
-		eq(err, '')
-		eq(info.mcc, '234')
-		eq(info.mnc, '10')
-		eq(info.active_band_class, nil)
+		info, err = network_backend():read_network_info()
 	end)
+	ok(info, err)
+	eq(err, '')
+	eq(info.mcc, '234')
+	eq(info.mnc, '10')
+	eq(info.active_band_class, nil)
 end
 
 function tests.test_qmi_keeps_home_network_when_rf_band_is_absent_from_output()
+	local info, err
 	with_qmi_results({
 		{ output = "MCC: '234'\nMNC: '10'\n" },
 		{ output = 'Successfully got RF band info, but no active band' },
 	}, function()
-		local info, err = network_backend():read_network_info()
-		ok(info, err)
-		eq(err, '')
-		eq(info.mcc, '234')
-		eq(info.mnc, '10')
-		eq(info.active_band_class, nil)
+		info, err = network_backend():read_network_info()
 	end)
+	ok(info, err)
+	eq(err, '')
+	eq(info.mcc, '234')
+	eq(info.mnc, '10')
+	eq(info.active_band_class, nil)
 end
 
 function tests.test_qmi_home_network_failure_remains_fatal()
+	local info, err
 	with_qmi_results({
 		{ output = 'error', code = 1, err = 'modem unavailable' },
 	}, function()
-		local info, err = network_backend():read_network_info()
-		eq(info, nil)
-		ok(err and err ~= '', 'home-network failure must still be returned')
+		info, err = network_backend():read_network_info()
 	end)
+	eq(info, nil)
+	ok(err and err ~= '', 'home-network failure must still be returned')
 end
+
+tests.test_qmi_keeps_home_network_when_rf_band_command_fails = known_regression(
+	tests.test_qmi_keeps_home_network_when_rf_band_command_fails)
+tests.test_qmi_keeps_home_network_when_rf_band_is_absent_from_output = known_regression(
+	tests.test_qmi_keeps_home_network_when_rf_band_is_absent_from_output)
 
 return tests

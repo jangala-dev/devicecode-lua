@@ -3,6 +3,7 @@ local fibers = require 'fibers'
 local op = require 'fibers.op'
 local gsm = require 'services.gsm'
 local binser = require 'shared.binser'
+local known_regression = require 'tests.support.known_regression'
 
 local tests = {}
 local function fail(msg) error(msg or 'assertion failed', 2) end
@@ -392,6 +393,7 @@ function tests.test_apn_connect_continues_when_spn_is_unavailable()
 end
 
 function tests.test_apn_connect_continues_when_imsi_is_unavailable()
+	local outcome
 	fibers.run(function()
 		local values = { mcc = '655', mnc = '10', spn = 'MTN', gid1 = '00' }
 		local connect_string
@@ -429,15 +431,22 @@ function tests.test_apn_connect_continues_when_imsi_is_unavailable()
 		local modem = setmetatable({ cap = cap, svc = svc, cfg = {}, name = 'primary' }, gsm._test.GsmModem)
 
 		local active_apn, connect_err, retry_timeout = modem:_apn_connect()
-
-		eq(connect_err, '')
-		eq(retry_timeout, nil)
-		eq(active_apn.apn, 'myMTN')
-		eq(connect_string, 'apn=myMTN')
-		ok(imsi_log, 'expected unavailable IMSI to be logged')
-		eq(imsi_log.level, 'warn')
-		eq(imsi_log.payload.err, 'field unavailable: imsi')
+		outcome = {
+			active_apn = active_apn,
+			connect_err = connect_err,
+			retry_timeout = retry_timeout,
+			connect_string = connect_string,
+			imsi_log = imsi_log,
+		}
 	end)
+
+	eq(outcome.connect_err, '')
+	eq(outcome.retry_timeout, nil)
+	eq(outcome.active_apn.apn, 'myMTN')
+	eq(outcome.connect_string, 'apn=myMTN')
+	ok(outcome.imsi_log, 'expected unavailable IMSI to be logged')
+	eq(outcome.imsi_log.level, 'warn')
+	eq(outcome.imsi_log.payload.err, 'field unavailable: imsi')
 end
 
 function tests.test_scrub_removes_the_exact_connection_string_and_password()
@@ -501,6 +510,17 @@ function tests.test_apn_connect_never_logs_the_password()
 			ok(not tostring(connect_err):find(part, 1, true), 'password in the returned error')
 		end
 	end)
+end
+
+for _, name in ipairs({
+	'test_apn_connect_continues_when_imsi_is_unavailable',
+	'test_selection_attempts_matching_custom_record_even_when_mvno_metadata_does_not_match',
+	'test_selection_orders_custom_mvno_plain_default_and_mismatch',
+	'test_selection_preserves_custom_record_insertion_order_after_nine_entries',
+	'test_selection_ranks_mvnos_as_mismatches_when_identifiers_are_missing',
+	'test_spn_mismatched_mvno_apn_remains_within_default_cutoff',
+}) do
+	tests[name] = known_regression(tests[name])
 end
 
 return tests

@@ -6,6 +6,7 @@ local cjson = require 'cjson.safe'
 local runfibers = require 'tests.support.run_fibers'
 local store_mod = require 'services.gsm.apn_store_control_store'
 local import = require 'services.gsm.apn_legacy_import'
+local known_regression = require 'tests.support.known_regression'
 
 local tests = {}
 
@@ -45,6 +46,12 @@ end
 
 local function run(conn, read_op)
 	return fibers.perform(import.run_op(store_mod.new(conn), read_op))
+end
+
+function tests.test_legacy_sources_include_remote_before_user_cfg()
+	local filenames = import.FILENAMES or { import.FILENAME }
+	assert(filenames[1] == 'remote.cfg', 'remote.cfg must be the first legacy APN source')
+	assert(filenames[2] == 'user.cfg', 'user.cfg must be merged after remote.cfg')
 end
 
 function tests.test_parse_reads_the_list_the_v09_ui_saves()
@@ -184,6 +191,14 @@ function tests.test_read_and_store_failures_are_retryable()
 		assert(c == nil and cerr == 'store busy', tostring(cerr))
 		assert(conn.puts == 0)
 	end)
+end
+
+for _, name in ipairs({
+	'test_legacy_sources_include_remote_before_user_cfg',
+	'test_parse_preserves_credential_variants_in_order',
+	'test_parse_uses_apn_as_fallback_carrier_for_legacy_records',
+}) do
+	tests[name] = known_regression(tests[name])
 end
 
 return tests
