@@ -402,7 +402,9 @@ local function add_mode_funcs(ModemBackend)
 
 		local active_band_class, band_err = read_rf_band_info(self.identity)
 		if band_err ~= "" then
-			return nil, band_err
+			-- RF-band data is optional enrichment. A modem can provide a valid home
+			-- network while temporarily failing (or omitting) this NAS response.
+			active_band_class = nil
 		end
 
 		return modem_types.new.ModemNetworkInfo(

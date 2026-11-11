@@ -97,8 +97,19 @@ function M.normalise_list(records)
 	for i, rec in ipairs(records) do
 		local item, err = M.normalise_record(rec)
 		if not item then return nil, 'apns[' .. tostring(i) .. ']: ' .. tostring(err) end
-		local key = table.concat({ item.carrier, item.mcc, item.mnc, item.apn }, '\0')
-		if seen[key] then return nil, 'duplicate APN: ' .. item.carrier .. '/' .. item.mcc .. '/' .. item.mnc .. '/' .. item.apn end
+		local fields = {}
+		for key in pairs(item) do fields[#fields + 1] = key end
+		table.sort(fields)
+		local identity = {}
+		for _, key in ipairs(fields) do
+			identity[#identity + 1] = key
+			identity[#identity + 1] = item[key]
+		end
+		local key = table.concat(identity, '\0')
+		if seen[key] then
+			return nil, 'duplicate APN: '
+				.. item.carrier .. '/' .. item.mcc .. '/' .. item.mnc .. '/' .. item.apn
+		end
 		seen[key] = true
 		out[#out + 1] = item
 	end

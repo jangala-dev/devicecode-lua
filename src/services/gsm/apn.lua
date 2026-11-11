@@ -79,17 +79,6 @@ local function custom_matches(apn, mcc, mnc)
 		and normalise_mnc(apn.mnc) == normalise_mnc(mnc)
 end
 
-local function custom_apns_for(custom_records, mcc, mnc)
-	local out = {}
-	if type(custom_records) ~= 'table' then return out end
-	for i, apn in ipairs(custom_records) do
-		if custom_matches(apn, mcc, mnc) then
-			out['custom-' .. tostring(i)] = apn
-		end
-	end
-	return out
-end
-
 local function add_default(apns, rankings)
 	apns.default = { apn = 'internet' }
 	table.insert(rankings, { name = 'default', rank = 4 })
@@ -127,25 +116,36 @@ local function get_ranked_apns(mcc, mnc, imsi, spn, gid1, custom_records)
 
 	local ranked_apns, rankings = {}, {}
 
-	local custom_map = custom_apns_for(custom_records, mcc, mnc)
-	local custom_apns, custom_rankings = rank(custom_map, imsi, spn, gid1, '', {
-		match = 1,
-		plain = 1,
-		mismatch = 5,
-	})
-	merge_into(ranked_apns, rankings, custom_apns, custom_rankings)
+	-- Legacy custom APNs are explicit operator choices: matching MCC/MNC records are
+	-- attempted first and in the order entered. v0.9 did not use MVNO metadata for
+	-- custom records, so it must not make one unreachable now.
+	for i, custom_apn in ipairs(custom_records or {}) do
+		if custom_matches(custom_apn, mcc, mnc) then
+			local name = 'custom-' .. tostring(i)
+			ranked_apns[name] = copy(custom_apn)
+			rankings[#rankings + 1] = { name = name, rank = 1 }
+		end
+	end
 
 	local builtin = get_apns(mcc, mnc)
 	local builtin_apns, builtin_rankings = rank(builtin, imsi, spn, gid1, 'builtin-', {
 		match = 2,
 		plain = 3,
-		mismatch = 5,
+		mismatch = 4,
 	})
 	merge_into(ranked_apns, rankings, builtin_apns, builtin_rankings)
 
 	add_default(ranked_apns, rankings)
 	table.sort(rankings, function (k1, k2)
-		if k1.rank == k2.rank then return tostring(k1.name) < tostring(k2.name) end
+		if k1.rank == k2.rank then
+			-- Keep the generic fallback ahead of mismatched bundled MVNOs at rank 4.
+			if k1.name == 'default' then return k2.name ~= 'default' end
+			if k2.name == 'default' then return false end
+			local custom1 = tostring(k1.name):match('^custom%-(%d+)$')
+			local custom2 = tostring(k2.name):match('^custom%-(%d+)$')
+			if custom1 and custom2 then return tonumber(custom1) < tonumber(custom2) end
+			return tostring(k1.name) < tostring(k2.name)
+		end
 		return k1.rank < k2.rank
 	end)
 	return ranked_apns, rankings
