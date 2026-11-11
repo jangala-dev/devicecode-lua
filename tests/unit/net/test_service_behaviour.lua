@@ -327,13 +327,16 @@ function tests.test_gsm_reconnect_restarts_member_interface()
 	end)
 end
 
-function tests.test_gsm_first_connect_after_startup_does_not_restart_member_interface()
+-- net starts with the uplink disconnected, then the modem connects. Returns
+-- the restarts seen after the first connect, and after a drop and reconnect.
+local function first_connect_restarts(boot_window_s)
+	local restarts = {}
+	local after_first
 	fibers.run(function (scope)
 		local b = busmod.new()
 		local conn = b:connect()
 		local reader = b:connect()
 		local calls = {}
-		local restarts = {}
 
 		local hal = success_hal(calls)
 		hal.restart_interface_op = function (_, req)
@@ -358,7 +361,6 @@ function tests.test_gsm_first_connect_after_startup_does_not_restart_member_inte
 			while #restarts < n and fibers.now() < deadline do fibers.perform(sleep.sleep_op(0.01)) end
 		end
 
-		-- At boot the modem is still registering when net starts.
 		uplink(false, nil)
 		retain_network_config_status(conn, 'available')
 		local child = start_service(scope, conn, {
@@ -367,6 +369,7 @@ function tests.test_gsm_first_connect_after_startup_does_not_restart_member_inte
 			rev = 35,
 			hal = hal,
 			observe = false,
+			boot_window_s = boot_window_s,
 		})
 
 		local view = reader:retained_view(topics.summary())
@@ -380,22 +383,36 @@ function tests.test_gsm_first_connect_after_startup_does_not_restart_member_inte
 			{ timeout = 0.5 })
 		view:close()
 
-		-- First connect since startup: the interface's lease is the first one, so
-		-- there is no stale address to replace and no restart.
 		uplink(true, 'wwan0')
 		wait_restarts(1, 0.2)
-		eq(#restarts, 0, 'no restart on the first connect after startup')
+		after_first = #restarts
 
-		-- A later drop and reconnect is a real reconnect: restart once.
 		uplink(false, 'wwan0')
 		uplink(true, 'wwan0')
-		wait_restarts(1, 0.5)
-		eq(#restarts, 1, 'one restart expected after a reconnect')
-		eq(restarts[1].interface, 'modem_primary')
+		wait_restarts(after_first + 1, 0.5)
 
 		child:cancel('test complete')
 		fibers.perform(child:join_op())
 	end)
+	return after_first, restarts
+end
+
+function tests.test_gsm_first_connect_after_boot_does_not_restart_member_interface()
+	-- net started with the box: the first connect gives the interface its first
+	-- lease, so there is no old address to replace and no restart.
+	local after_first, restarts = first_connect_restarts(math.huge)
+	eq(after_first, 0, 'no restart on the first connect after boot')
+	-- A later drop and reconnect is a real reconnect: restart once.
+	eq(#restarts, 1, 'one restart expected after a reconnect')
+	eq(restarts[1].interface, 'modem_primary')
+end
+
+function tests.test_gsm_first_connect_after_a_later_net_restart_restarts_member_interface()
+	-- net restarted long after boot, during an outage: the interface may still
+	-- hold the lease from before, so the first connect it sees restarts it.
+	local after_first, restarts = first_connect_restarts(0)
+	eq(after_first, 1, 'restart on the first connect after a later net restart')
+	eq(#restarts, 2, 'and again after a reconnect')
 end
 
 function tests.test_gsm_reconnect_restart_retries_until_success_while_connected()

@@ -502,7 +502,7 @@ function tests.test_restart_interface_resends_connected_when_mwan3_hotplug_state
 	eq(#repairs, 1, 'one repair expected')
 	eq(table.concat(repairs[1], ' ', 1, 2), 'sh -c')
 	eq(table.concat(repairs[1], ' ', 4), 'mwan3-hotplug-repair mopri79e wwan0 /var/run/mwan3track /var/run/mwan3'
-		.. ' /sbin/hotplug-call /var/lock/procd_mwan3.lock')
+		.. ' /etc/hotplug.d/iface/15-mwan3 /lib/functions.sh /var/lock/procd_mwan3.lock')
 	eq(ok(logged(logs, 'mwan3_hotplug_state_repaired')).level, 'warn')
 
 	-- No hotplug state file at all also reads as offline in mwan3.
@@ -546,7 +546,7 @@ function tests.test_restart_interface_leaves_consistent_mwan3_state_alone()
 end
 
 -- Runs the real repair script against temporary mwan3 state files and a fake
--- hotplug-call that records what it was given.
+-- mwan3 handler that records what it was given.
 function tests.test_mwan3_repair_script_rechecks_under_the_lock()
 	local t = openwrt_provider._test
 	local dir = os.tmpname()
@@ -564,20 +564,21 @@ function tests.test_mwan3_repair_script_rechecks_under_the_lock()
 		f:close()
 		return text
 	end
-	-- Records its env, and whether the lock is still held by the repair while it runs.
-	write('hotplug-call', table.concat({
-		'#!/bin/sh',
-		'echo "$1 $ACTION $INTERFACE $DEVICE" > "' .. dir .. '/called"',
+	write('functions.sh', 'FUNCTIONS_LOADED=1\n')
+	-- Sourced like a hotplug.d hook. Records its env, and whether the repair
+	-- still holds the lock while it runs.
+	write('handler', table.concat({
+		'echo "$HOTPLUG_TYPE $ACTION $INTERFACE $DEVICE $FUNCTIONS_LOADED $PATH" > "' .. dir .. '/called"',
 		-- mwan3's handler takes the lock with procd_lock: `flock -n 1000` on the inherited fd.
 		'( flock -n 1000 && echo reentrant || echo blocked ) >> "' .. dir .. '/called"',
 		'( flock -n 9 && echo free || echo held ) 9>"' .. dir .. '/lock" >> "' .. dir .. '/called"',
 		'',
 	}, '\n'))
-	assert(os.execute('chmod +x ' .. dir .. '/hotplug-call') == 0)
 	local cfg = {
 		mwan3track_status_dir = dir .. '/track',
 		mwan3_status_dir = dir .. '/status',
-		mwan3_hotplug_call = dir .. '/hotplug-call',
+		mwan3_hotplug_handler = dir .. '/handler',
+		mwan3_functions = dir .. '/functions.sh',
 		mwan3_lock = dir .. '/lock',
 		-- dash, a common /bin/sh on dev hosts, can't redirect fd 1000.
 		mwan3_repair_shell = 'bash',
@@ -597,7 +598,7 @@ function tests.test_mwan3_repair_script_rechecks_under_the_lock()
 
 		write('status/iface_state/mopri79e', 'offline\n')
 		eq(t.run_for_exit_code(argv), 0, 'stale state repaired')
-		eq(read('called'), 'iface connected mopri79e wwan0\nreentrant\nheld\n')
+		eq(read('called'), 'iface connected mopri79e wwan0 1 /usr/sbin:/usr/bin:/sbin:/bin\nreentrant\nheld\n')
 		os.remove(dir .. '/called')
 
 		-- A disconnect handler holds the lock when the repair starts, and the
@@ -627,8 +628,10 @@ function tests.test_mwan3_repair_command_stops_its_descendants()
 		f:close()
 		return os.execute('kill -0 ' .. pid .. ' 2>/dev/null') == 0
 	end
+	-- The script exits on TERM, but its descendant ignores TERM, as a stuck hook
+	-- might: exec's shutdown then sees the direct child exit and stops there.
 	local function argv(name)
-		return { 'bash', '-c', 'sleep 30 & echo $! > "' .. dir .. '/' .. name .. '"; wait' }
+		return { 'bash', '-c', '(trap "" TERM; exec sleep 30) & echo $! > "' .. dir .. '/' .. name .. '"; wait' }
 	end
 	fibers.run(function()
 		local sleep = require 'fibers.sleep'
@@ -652,6 +655,44 @@ function tests.test_mwan3_repair_command_stops_its_descendants()
 		eq(alive(dir .. '/cancel.pid'), false, 'descendant stopped after cancellation')
 	end)
 	os.execute('rm -rf ' .. dir)
+end
+
+function tests.test_terminate_stops_a_superseded_repair()
+	local finished, cancelled = 0, 0
+	fibers.run(function()
+		local sleep = require 'fibers.sleep'
+		local provider = ok(provider_loader.new({
+			provider = 'openwrt', allow_fake_uci = true, mwan3_guard_interval_s = 0.01, mwan3_guard_checks = 6,
+		}, {}))
+		provider.shaper_run_cmd = function() return true, nil end
+		provider.mwan3_guard_read = function(path)
+			return path:find('/mwan3track/', 1, true) and 'online\n' or 'offline\n'
+		end
+		provider.mwan3_guard_device = function() return 'wwan0' end
+		local runs = 0
+		provider.mwan3_guard_run = function()
+			runs = runs + 1
+			local first = runs == 1
+			if first then
+				-- A newer restart arrives mid-repair, then the provider goes away.
+				eq(fibers.perform(provider:restart_interface_op({ interface = 'modem_primary' })).ok, true)
+				provider:terminate('test terminate')
+			end
+			local ok_sleep = pcall(fibers.perform, sleep.sleep_op(0.5))
+			if not ok_sleep then cancelled = cancelled + 1; error('cancelled', 0) end
+			finished = finished + 1
+			return 0, nil
+		end
+		provider._last_name_ctx = ok(names.allocate({
+			interfaces = { modem_primary = { kind = 'direct', role = 'wan', endpoint = { ifname = 'wwan0' } } },
+			wan = { members = { modem_primary = { interface = 'modem_primary' } } },
+		}))
+		eq(fibers.perform(provider:restart_interface_op({ interface = 'modem_primary' })).ok, true)
+		fibers.perform(sleep.sleep_op(0.3))
+		eq(runs, 1, 'no repair after terminate')
+		eq(next(provider._mwan3_checks), nil, 'no live checks after terminate')
+	end)
+	eq(finished, 0, 'the superseded repair was stopped by terminate')
 end
 
 function tests.test_restart_during_a_repair_lets_the_repair_finish()

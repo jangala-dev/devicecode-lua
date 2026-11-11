@@ -38,6 +38,9 @@ local M = {}
 
 local function now() return fibers.now() end
 
+-- net counts as started with the box when it starts this soon after boot.
+local BOOT_WINDOW_S = 300
+
 local function elapsed_ms(t0)
 	if not t0 then return nil end
 	return math.floor(((now() - t0) * 1000) + 0.5)
@@ -819,12 +822,13 @@ local function handle_gsm_uplink_changed(state, ev)
 	payload.role = payload.role or role
 	payload.updated_at = now()
 	local prev = (realised_sources(state).gsm_uplinks or {})[role]
-	-- Only a reconnect can leave the interface holding an old lease. The first
-	-- connect since startup (the modem registering at boot) gives the interface
-	-- its first lease, and restarting it then races mwan3's hotplug handlers
-	-- and can leave mwan3 treating the uplink as offline.
+	-- Only a reconnect can leave the interface holding an old lease. When net
+	-- started with the box, the modem's first connect gives the interface its
+	-- first lease, and restarting it then races mwan3's hotplug handlers and can
+	-- leave mwan3 treating the uplink as offline. After a later restart of net,
+	-- the interface may still hold a lease from before, so restart as before.
 	state.gsm_uplink_seen_connected = state.gsm_uplink_seen_connected or {}
-	local reconnected = state.gsm_uplink_seen_connected[role] == true
+	local reconnected = (state.gsm_uplink_seen_connected[role] == true or not state.started_with_box)
 		and prev ~= nil and prev.connected ~= true and payload.connected == true
 	if payload.connected == true then state.gsm_uplink_seen_connected[role] = true end
 	state.model:update(function (s)
@@ -1324,6 +1328,8 @@ function M.run(scope, params)
 		counter_poll_interval_s = params.counter_poll_interval_s or params.counter_metrics_interval_s or 60,
 		counter_poll_timeout_s = params.counter_poll_timeout_s or 5,
 		interface_restart_retry_s = params.interface_restart_retry_s or INTERFACE_RESTART_RETRY_S,
+		-- The scheduler clock is CLOCK_MONOTONIC: seconds since the box booted.
+		started_with_box = now() < (params.boot_window_s or BOOT_WINDOW_S),
 		current_generation = nil,
 		active_apply = nil,
 		pending_intent = nil,

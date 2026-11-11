@@ -2468,25 +2468,30 @@ end
 -- process. If a stale `disconnected` handler finishes last, mwan3's hotplug
 -- state stays offline while its tracker reports online. The tracker only
 -- reports changes, so mwan3 would keep the uplink out of its policies until the
--- next one. Watch for that for a short while and resend `connected` the way
--- mwan3track does.
+-- next one. Watch for that for a short while and repair it.
 local function trimmed(s)
 	return type(s) == 'string' and s:match('^%s*(.-)%s*$') or nil
 end
 
 -- mwan3's iface hotplug handler holds procd's mwan3 lock (`procd_lock`, fd
 -- 1000) while it changes state. Take the same lock and check again before
--- resending `connected`, so a disconnect that happens meanwhile is either seen
--- here or applied after this repair, never overwritten by it. The handler runs
--- with fd 1000 inherited, and `flock -n 1000` on a lock we already hold succeeds.
+-- running the handler for `connected`, so a disconnect that happens meanwhile
+-- is either seen here or applied after this repair, never overwritten by it.
+-- The handler inherits fd 1000, and `flock -n 1000` on a lock we hold succeeds.
+--
+-- Only mwan3's own handler runs, with the environment hotplug-call gives each
+-- hook: the other iface hooks already had the tracker's `connected` event, and
+-- would otherwise inherit the lock too.
 -- Exit 10: tracker no longer online. Exit 11: hotplug state already online.
 local MWAN3_REPAIR_SCRIPT = table.concat({
-	'iface=$1 device=$2 track_dir=$3 status_dir=$4 hotplug_call=$5 lock=$6',
+	'iface=$1 device=$2 track_dir=$3 status_dir=$4 handler=$5 functions=$6 lock=$7',
 	'exec 1000>"$lock" || exit 2',
 	'flock 1000 || exit 2',
 	'[ "$(cat "$track_dir/$iface/STATUS" 2>/dev/null)" = online ] || exit 10',
 	'[ "$(cat "$status_dir/iface_state/$iface" 2>/dev/null)" = online ] && exit 11',
-	'env -i ACTION=connected INTERFACE="$iface" DEVICE="$device" "$hotplug_call" iface',
+	'exec env -i HOTPLUG_TYPE=iface PATH=/usr/sbin:/usr/bin:/sbin:/bin LOGNAME=root USER=root DEVICENAME= \\',
+	'	ACTION=connected INTERFACE="$iface" DEVICE="$device" \\',
+	'	sh -c \'. "$1"; . "$2"\' mwan3-connected "$functions" "$handler"',
 }, '\n')
 
 local function mwan3_repair_argv(cfg, name, device)
@@ -2495,28 +2500,45 @@ local function mwan3_repair_argv(cfg, name, device)
 		cfg.mwan3_repair_shell or 'sh', '-c', MWAN3_REPAIR_SCRIPT, 'mwan3-hotplug-repair', name, device,
 		cfg.mwan3track_status_dir or '/var/run/mwan3track',
 		cfg.mwan3_status_dir or '/var/run/mwan3',
-		cfg.mwan3_hotplug_call or '/sbin/hotplug-call',
+		cfg.mwan3_hotplug_handler or '/etc/hotplug.d/iface/15-mwan3',
+		cfg.mwan3_functions or '/lib/functions.sh',
 		cfg.mwan3_lock or '/var/lock/procd_mwan3.lock',
 	}
 end
 
--- Returns the command's exit code, or nil and an error. The command runs in its
--- own process group, so a timeout or cancellation also stops the hotplug hooks
--- it started, which inherit the mwan3 lock.
-local function run_for_exit_code(argv, timeout_s)
-	local flags = { process_group = true }
-	if type(exec.supports) == 'function' and exec.supports('parent_death_signal') then
-		flags.parent_death_signal = 'TERM'
+local function kill_process_group(pgid)
+	local ok, psig = pcall(require, 'posix.signal')
+	if ok and type(psig) == 'table' and type(psig.kill) == 'function' then
+		psig.kill(-pgid, psig.SIGKILL or 9)
 	end
-	local cmd = exec.command(exec_spec(argv, { flags = flags, shutdown_grace = 1 }))
-	local which, status, code = perform(op.named_choice({
-		done = cmd:run_op(),
-		timeout = sleep.sleep_op(timeout_s or 30),
-	}))
-	perform(cmd:shutdown_op(1))
-	if which ~= 'done' then return nil, 'timed out after ' .. tostring(timeout_s or 30) .. 's' end
-	if status == 'exited' then return tonumber(code), nil end
-	return nil, table.concat(argv, ' ', 1, 2) .. ' ended with status=' .. tostring(status) .. ' code=' .. tostring(code)
+end
+
+-- Returns the command's exit code, or nil and an error. The command runs in its
+-- own process group. However it ends, whatever is left of that group is killed:
+-- anything still in it holds the inherited mwan3 lock, and exec's own shutdown
+-- only escalates against the direct child.
+local function run_for_exit_code(argv, timeout_s)
+	timeout_s = timeout_s or 30
+	local status, _, code, err = perform(fibers.run_scope_op(function (scope)
+		local flags = { process_group = true }
+		if type(exec.supports) == 'function' and exec.supports('parent_death_signal') then
+			flags.parent_death_signal = 'TERM'
+		end
+		local cmd = exec.command(exec_spec(argv, { flags = flags, shutdown_grace = 1 }))
+		scope:finally(function ()
+			local pid = cmd:pid()
+			if pid then kill_process_group(pid) end
+		end)
+		local which, st, exit_code = perform(op.named_choice({
+			done = cmd:run_op(),
+			timeout = sleep.sleep_op(timeout_s),
+		}))
+		if which ~= 'done' then return nil, 'timed out after ' .. tostring(timeout_s) .. 's' end
+		if st == 'exited' then return tonumber(exit_code), nil end
+		return nil, 'ended with status=' .. tostring(st) .. ' code=' .. tostring(exit_code)
+	end))
+	if status ~= 'ok' then return nil, tostring(status) .. ': ' .. tostring(code) end
+	return code, err
 end
 
 local function mwan3_interface_device(self, name)
@@ -2527,7 +2549,7 @@ local function mwan3_interface_device(self, name)
 end
 
 local MWAN3_REPAIR_OUTCOME = {
-	[0] = 'resent connected',
+	[0] = 'ran the connected handler',
 	[10] = 'tracker went offline',
 	[11] = 'hotplug state already online',
 }
@@ -2563,7 +2585,8 @@ local function mwan3_hotplug_check(self, name, token)
 				return
 			end
 			-- Not cancelled by a newer restart from here: stopping mwan3's handler
-			-- part way would leave its rules half changed.
+			-- part way would leave its rules half changed. Provider shutdown still
+			-- cancels it.
 			token.repairing = true
 			local code, err = run(mwan3_repair_argv(cfg, name, device), tonumber(cfg.mwan3_repair_timeout_s) or 30)
 			token.repairing = nil
@@ -2586,20 +2609,24 @@ local function start_mwan3_hotplug_check(self, name)
 	if (self.config or {}).mwan3_hotplug_guard == false then return end
 	local scope = self:_owner()
 	if not scope then return end
-	self._mwan3_guards = self._mwan3_guards or {}
+	self._mwan3_guards = self._mwan3_guards or {}  -- interface name -> current check
+	self._mwan3_checks = self._mwan3_checks or {}  -- every live check, for terminate()
 	local previous = self._mwan3_guards[name]
 	if previous and previous.scope and not previous.repairing then
 		previous.scope:cancel('superseded by a newer restart')
 	end
 	local token = {}
 	self._mwan3_guards[name] = token
+	self._mwan3_checks[token] = true
 	-- Its own scope: a fault here must not fail the provider's owner scope.
 	scope:spawn(function ()
 		local status, _, err = fibers.perform(fibers.run_scope_op(function ()
 			token.scope = fibers.current_scope()
+			if self.terminated then return end
 			mwan3_hotplug_check(self, name, token)
 		end))
-		if self._mwan3_guards and self._mwan3_guards[name] == token then self._mwan3_guards[name] = nil end
+		self._mwan3_checks[token] = nil
+		if self._mwan3_guards[name] == token then self._mwan3_guards[name] = nil end
 		if status == 'failed' then
 			log_provider(self, 'warn', { what = 'mwan3_hotplug_check_failed', interface = name, err = tostring(err) })
 		end
@@ -2635,10 +2662,10 @@ function Provider:terminate(reason)
 	end
 	self._observer = nil
 	self.terminated = reason or true
-	for name, token in pairs(self._mwan3_guards or {}) do
+	for token in pairs(self._mwan3_checks or {}) do
 		if token.scope then token.scope:cancel(reason or 'provider terminated') end
-		self._mwan3_guards[name] = nil
 	end
+	self._mwan3_guards = {}
 	if self._uci_manager and type(self._uci_manager.terminate) == 'function' then
 		self._uci_manager:terminate(reason or 'terminated')
 	end
