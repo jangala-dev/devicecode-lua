@@ -38,8 +38,27 @@ local M = {}
 
 local function now() return fibers.now() end
 
--- net counts as started with the box when it starts this soon after boot.
+-- net counts as started with the box only on its first start since boot, and
+-- no later than this after boot.
 local BOOT_WINDOW_S = 300
+-- tmpfs: survives restarts of net and of devicecode, but not a reboot.
+local START_MARKER = '/var/run/devicecode-net-started'
+
+-- True on net's first start since the box booted. Records the start, so any
+-- later start in the same boot returns false. If the marker can't be written,
+-- returns false: restarting on a first connect is the safe default.
+local function first_start_since_boot(path)
+	local f = io.open(path, 'r')
+	if f then
+		f:close()
+		return false
+	end
+	f = io.open(path, 'w')
+	if not f then return false end
+	local ok = f:write(tostring(os.time()), '\n')
+	f:close()
+	return ok ~= nil
+end
 
 local function elapsed_ms(t0)
 	if not t0 then return nil end
@@ -825,8 +844,9 @@ local function handle_gsm_uplink_changed(state, ev)
 	-- Only a reconnect can leave the interface holding an old lease. When net
 	-- started with the box, the modem's first connect gives the interface its
 	-- first lease, and restarting it then races mwan3's hotplug handlers and can
-	-- leave mwan3 treating the uplink as offline. After a later restart of net,
-	-- the interface may still hold a lease from before, so restart as before.
+	-- leave mwan3 treating the uplink as offline. After any later start of net in
+	-- the same boot, the interface may still hold a lease from before, so restart
+	-- as before.
 	state.gsm_uplink_seen_connected = state.gsm_uplink_seen_connected or {}
 	local reconnected = (state.gsm_uplink_seen_connected[role] == true or not state.started_with_box)
 		and prev ~= nil and prev.connected ~= true and payload.connected == true
@@ -1329,7 +1349,8 @@ function M.run(scope, params)
 		counter_poll_timeout_s = params.counter_poll_timeout_s or 5,
 		interface_restart_retry_s = params.interface_restart_retry_s or INTERFACE_RESTART_RETRY_S,
 		-- The scheduler clock is CLOCK_MONOTONIC: seconds since the box booted.
-		started_with_box = now() < (params.boot_window_s or BOOT_WINDOW_S),
+		started_with_box = now() < (params.boot_window_s or BOOT_WINDOW_S)
+			and first_start_since_boot(params.start_marker or START_MARKER),
 		current_generation = nil,
 		active_apply = nil,
 		pending_intent = nil,

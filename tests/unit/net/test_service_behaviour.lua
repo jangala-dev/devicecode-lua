@@ -329,7 +329,7 @@ end
 
 -- net starts with the uplink disconnected, then the modem connects. Returns
 -- the restarts seen after the first connect, and after a drop and reconnect.
-local function first_connect_restarts(boot_window_s)
+local function first_connect_restarts(boot_window_s, start_marker)
 	local restarts = {}
 	local after_first
 	fibers.run(function (scope)
@@ -370,6 +370,7 @@ local function first_connect_restarts(boot_window_s)
 			hal = hal,
 			observe = false,
 			boot_window_s = boot_window_s,
+			start_marker = start_marker,
 		})
 
 		local view = reader:retained_view(topics.summary())
@@ -397,22 +398,47 @@ local function first_connect_restarts(boot_window_s)
 	return after_first, restarts
 end
 
+-- A path for net's start marker that does not exist yet.
+local function fresh_marker()
+	local path = os.tmpname()
+	os.remove(path)
+	return path
+end
+
 function tests.test_gsm_first_connect_after_boot_does_not_restart_member_interface()
-	-- net started with the box: the first connect gives the interface its first
-	-- lease, so there is no old address to replace and no restart.
-	local after_first, restarts = first_connect_restarts(math.huge)
+	-- net's first start since boot: the first connect gives the interface its
+	-- first lease, so there is no old address to replace and no restart.
+	local marker = fresh_marker()
+	local after_first, restarts = first_connect_restarts(math.huge, marker)
 	eq(after_first, 0, 'no restart on the first connect after boot')
 	-- A later drop and reconnect is a real reconnect: restart once.
 	eq(#restarts, 1, 'one restart expected after a reconnect')
 	eq(restarts[1].interface, 'modem_primary')
+	ok(io.open(marker, 'r'), 'start recorded for later starts')
+	os.remove(marker)
 end
 
-function tests.test_gsm_first_connect_after_a_later_net_restart_restarts_member_interface()
-	-- net restarted long after boot, during an outage: the interface may still
-	-- hold the lease from before, so the first connect it sees restarts it.
-	local after_first, restarts = first_connect_restarts(0)
-	eq(after_first, 1, 'restart on the first connect after a later net restart')
+function tests.test_gsm_first_connect_after_an_early_net_restart_restarts_member_interface()
+	-- net restarts soon after boot, after the modem had connected and dropped:
+	-- the interface may still hold the lease from before.
+	local marker = fresh_marker()
+	first_connect_restarts(math.huge, marker)
+	local after_first, restarts = first_connect_restarts(math.huge, marker)
+	eq(after_first, 1, 'restart on the first connect after an early net restart')
 	eq(#restarts, 2, 'and again after a reconnect')
+	os.remove(marker)
+end
+
+function tests.test_gsm_first_connect_after_a_late_net_start_restarts_member_interface()
+	local marker = fresh_marker()
+	local after_first = first_connect_restarts(0, marker)
+	eq(after_first, 1, 'restart on the first connect when net starts long after boot')
+	eq(io.open(marker, 'r'), nil, 'no marker written outside the boot window')
+end
+
+function tests.test_gsm_first_connect_restarts_when_the_start_cannot_be_recorded()
+	local after_first = first_connect_restarts(math.huge, '/nonexistent-dir/devicecode-net-started')
+	eq(after_first, 1, 'restart is the safe default')
 end
 
 function tests.test_gsm_reconnect_restart_retries_until_success_while_connected()

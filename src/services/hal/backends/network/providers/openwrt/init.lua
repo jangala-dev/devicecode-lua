@@ -2506,11 +2506,10 @@ local function mwan3_repair_argv(cfg, name, device)
 	}
 end
 
-local function kill_process_group(pgid)
+local function process_group_killer()
 	local ok, psig = pcall(require, 'posix.signal')
-	if ok and type(psig) == 'table' and type(psig.kill) == 'function' then
-		psig.kill(-pgid, psig.SIGKILL or 9)
-	end
+	if not (ok and type(psig) == 'table' and type(psig.kill) == 'function') then return nil end
+	return function (pgid) psig.kill(-pgid, psig.SIGKILL or 9) end
 end
 
 -- Returns the command's exit code, or nil and an error. The command runs in its
@@ -2519,6 +2518,9 @@ end
 -- only escalates against the direct child.
 local function run_for_exit_code(argv, timeout_s)
 	timeout_s = timeout_s or 30
+	-- Without a way to kill the group, a survivor could hold the lock: don't start.
+	local kill_group = process_group_killer()
+	if not kill_group then return nil, 'posix.signal unavailable to stop the repair process group' end
 	local status, _, code, err = perform(fibers.run_scope_op(function (scope)
 		local flags = { process_group = true }
 		if type(exec.supports) == 'function' and exec.supports('parent_death_signal') then
@@ -2527,7 +2529,7 @@ local function run_for_exit_code(argv, timeout_s)
 		local cmd = exec.command(exec_spec(argv, { flags = flags, shutdown_grace = 1 }))
 		scope:finally(function ()
 			local pid = cmd:pid()
-			if pid then kill_process_group(pid) end
+			if pid then kill_group(pid) end
 		end)
 		local which, st, exit_code = perform(op.named_choice({
 			done = cmd:run_op(),

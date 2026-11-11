@@ -657,6 +657,19 @@ function tests.test_mwan3_repair_command_stops_its_descendants()
 	os.execute('rm -rf ' .. dir)
 end
 
+function tests.test_mwan3_repair_does_not_start_without_process_group_cleanup()
+	local t = openwrt_provider._test
+	local saved = package.loaded['posix.signal']
+	package.loaded['posix.signal'] = {}  -- no kill()
+	local code, err
+	fibers.run(function()
+		code, err = t.run_for_exit_code({ 'sh', '-c', 'exit 0' }, 5)
+	end)
+	package.loaded['posix.signal'] = saved
+	eq(code, nil)
+	contains(err, 'posix.signal unavailable')
+end
+
 function tests.test_terminate_stops_a_superseded_repair()
 	local finished, cancelled = 0, 0
 	fibers.run(function()
