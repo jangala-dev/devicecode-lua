@@ -1390,4 +1390,72 @@ function tests.test_failure_retry_is_not_lost_behind_an_earlier_interval_timer()
 	end)
 end
 
+
+function tests.test_every_backhaul_mode_retests_each_backhaul_on_its_interval_without_weights()
+	fibers.run(function (scope)
+		local h = start_active_scope_service(scope, { scope = 'all', live_weights = false, interval_s = 1 })
+		local function times(iface)
+			local out = {}
+			for _, t in ipairs(h.speedtests) do if t.interface == iface then out[#out + 1] = t.at end end
+			return out
+		end
+		h.observe(true, false)
+		ok(h.tested(1), 'the active backhaul is tested')
+		eq(h.speedtests[1].interface, 'wan_a')
+		-- The standby comes online half a second later, so its result expires on
+		-- its own schedule rather than alongside the active backhaul's.
+		sleep.sleep(0.5)
+		h.observe(true, true)
+		ok(h.tested(2), 'the standby backhaul is tested')
+		eq(h.speedtests[2].interface, 'wan_b')
+		-- No further observations: each backhaul's own timer must bring it back.
+		ok(probe.wait_until(function () return #times('wan_b') >= 2 end, { timeout = 2.5 }), 'standby re-tested')
+		local b = times('wan_b')
+		ok(b[2] - b[1] < 1.4, 'standby re-tested on its own interval, took ' .. tostring(b[2] - b[1]))
+		ok(#times('wan_a') >= 2, 'active re-tested')
+		eq(#h.weights, 0, 'weights are never applied')
+		h.stop()
+	end)
+end
+
+function tests.test_active_uplink_and_speedtest_in_use_telemetry()
+	fibers.run(function (scope)
+		local h = start_active_scope_service(scope, { scope = 'all', live_weights = false, interval_s = 60 })
+		local sub_opts = { queue_len = 16, full = 'drop_oldest' }
+		local active_sub = h.reader:subscribe({ 'obs', 'v1', 'net', 'metric', 'active_uplink' }, sub_opts)
+		local in_use_sub = h.reader:subscribe({ 'obs', 'v1', 'net', 'metric', 'speedtest_in_use' }, sub_opts)
+		local function next_payload(sub)
+			local which, msg = fibers.perform(op.named_choice({ ev = sub:recv_op(), timeout = sleep.sleep_op(0.5) }))
+			return which == 'ev' and msg and msg.payload or nil
+		end
+
+		h.observe(true, true)
+		local active = ok(next_payload(active_sub), 'active_uplink metric expected')
+		eq(active.value, 'wan_a')
+		eq(active.namespace[1], 'net')
+		eq(active.namespace[2], 'active_uplink')
+		ok(h.tested(2), 'both backhauls tested')
+		local tags = {}
+		for _ = 1, 2 do
+			local p = ok(next_payload(in_use_sub), 'speedtest_in_use metric expected')
+			eq(p.namespace[1], 'net')
+			eq(p.namespace[3], 'speedtest_in_use')
+			tags[p.namespace[2]] = p.value
+		end
+		eq(tags.wan_a, true, 'the active backhaul was tested in use')
+		eq(tags.wan_b, false, 'the standby backhaul was tested on standby')
+
+		h.observe(false, true)
+		local moved = ok(next_payload(active_sub), 'active_uplink metric on failover')
+		eq(moved.value, 'wan_b')
+		h.observe(false, false)
+		local none = ok(next_payload(active_sub), 'active_uplink metric when nothing is online')
+		eq(none.value, 'last_resort')
+
+		active_sub:unsubscribe()
+		in_use_sub:unsubscribe()
+		h.stop()
+	end)
+end
+
 return tests

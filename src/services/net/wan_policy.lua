@@ -388,17 +388,28 @@ function M.active_speedtest_due(snapshot, uplink, opts)
 	return true, 'active_uplink_changed'
 end
 
--- The next time the active uplink may become due: its cached success
--- expiring, or a failure's retry_after passing, whichever comes first after
--- `now`.  The service keeps a timer armed for it, since observations alone
--- may never arrive.
-function M.active_speedtest_next_wake(snapshot, now)
-	if not M.speedtest_enabled(snapshot) or M.speedtest_scope(snapshot) ~= 'active' then return nil end
+-- Live weights rewrite mwan3's policy chain across every member they are given,
+-- ignoring metric, so applying them under strict failover would load-balance
+-- across the failover tiers.  Active scope never applies them; scope all does
+-- unless `live_weights = false`.
+function M.live_weights_enabled(snapshot)
+	if M.speedtest_scope(snapshot) == 'active' then return false end
+	return runtime_opts(snapshot).live_weights ~= false
+end
+
+-- Whether this uplink currently carries traffic (backhaul.active_uplink).
+function M.uplink_in_use(snapshot, uplink_id)
 	local active = M.active_uplink(snapshot)
-	local id = active and active.status == 'uplink' and active.uplink_id or nil
-	if not id then return nil end
+	if not active or active.status ~= 'uplink' then return false end
+	for _, id in ipairs(active.uplink_ids or {}) do
+		if id == uplink_id then return true end
+	end
+	return active.uplink_id == uplink_id
+end
+
+local function next_wake(snapshot, uplink_id, now)
 	local runtime = snapshot.wan_runtime or {}
-	local rec = runtime.speedtests and runtime.speedtests[id]
+	local rec = runtime.speedtests and runtime.speedtests[uplink_id]
 	local wake
 	local function consider(at)
 		at = tonumber(at)
@@ -408,8 +419,30 @@ function M.active_speedtest_next_wake(snapshot, now)
 	local ttl = speedtest_ttl(snapshot)
 	if mbps ~= nil and completed ~= nil and ttl and ttl > 0 then consider(completed + ttl) end
 	if type(rec) == 'table' then consider(rec.retry_after) end
-	if wake == nil then return nil end
-	return id, wake
+	return wake
+end
+
+-- When each uplink this scope tests may next become due: its cached success
+-- expiring, or a failure's retry_after passing, whichever comes first after
+-- `now`.  Observations are event-led and may never arrive on a stable link,
+-- so the service keeps a timer armed for each.  Active scope times only the
+-- uplink carrying traffic; scope all times every online uplink.
+function M.speedtest_wakes(snapshot, now)
+	local out = {}
+	if not M.speedtest_enabled(snapshot) then return out end
+	local only_id
+	if M.speedtest_scope(snapshot) == 'active' then
+		local active = M.active_uplink(snapshot)
+		only_id = active and active.status == 'uplink' and active.uplink_id or false
+	end
+	for _, uplink in ipairs(M.collect_uplinks(snapshot)) do
+		local id = uplink.uplink_id
+		if M.uplink_online(snapshot, uplink) and (only_id == nil or only_id == id) then
+			local wake = next_wake(snapshot, id, now)
+			if wake then out[#out + 1] = { uplink_id = id, wake_at = wake } end
+		end
+	end
+	return out
 end
 
 local function member_fingerprint(m)

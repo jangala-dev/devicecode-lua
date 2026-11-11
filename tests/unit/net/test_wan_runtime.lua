@@ -435,8 +435,9 @@ local function active_scope_model(opts)
 		s.generation = 2
 		s.wan = {
 			load_balancing = { policy = 'balanced', speedtests = {
-				enabled = true, scope = 'active', interval_s = 21600,
+				enabled = true, scope = opts.scope or 'active', interval_s = 21600,
 				failover_retest_min_s = opts.failover_retest_min_s,
+				live_weights = opts.live_weights,
 			} },
 			last_resort = opts.last_resort,
 			configured_members = {
@@ -720,6 +721,104 @@ function tests.test_active_scope_tests_the_active_member_when_ids_and_interfaces
 		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
 		local id = only_active(state)
 		eq(id, 'primary', 'the member carrying traffic must be tested')
+	end)
+end
+
+-- Every backhaul tested, weights untouched: scope "all" with live_weights = false.
+
+local function every_backhaul_model(opts)
+	opts = opts or {}
+	opts.scope = 'all'
+	opts.live_weights = false
+	return active_scope_model(opts)
+end
+
+local function launched(state)
+	local id, active = only_active(state)
+	return id, active
+end
+
+function tests.test_every_backhaul_is_tested_active_first_without_weight_changes()
+	runfibers.run(function(scope)
+		local clock, extra = { t = 100 }, {}
+		local model = every_backhaul_model()
+		model:update(function(s)
+			-- Give the active uplink an id that sorts last, so ordering is not alphabetical luck.
+			s.wan.configured_members.zz_wired = s.wan.configured_members.wan
+			s.wan.configured_members.wan = nil
+			s.backhaul.uplinks.zz_wired = s.backhaul.uplinks.wan
+			s.backhaul.uplinks.zz_wired.id = 'zz_wired'
+			s.backhaul.uplinks.wan = nil
+			s.wan.configured_members.zz_wired.interface = 'wan'
+			s.backhaul.active_uplink = active_uplink.select(s, s.backhaul.uplinks)
+			return s
+		end)
+		eq(model:snapshot().backhaul.active_uplink.uplink_id, 'zz_wired')
+		local state = active_scope_state(scope, model, clock, extra)
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		local id, active = launched(state)
+		eq(id, 'zz_wired', 'the active backhaul is tested first')
+		eq(model:snapshot().wan_runtime.speedtests.zz_wired.in_use, true)
+		finish(state, id, active, 80)
+		eq(state.active_weight_apply, nil, 'completion must not start a weight apply')
+
+		assert(wan_manager.reconcile_speedtests(state, 'speedtest_done'))
+		id, active = launched(state)
+		eq(id, 'modem_primary', 'the standby backhaul is tested too')
+		eq(model:snapshot().wan_runtime.speedtests.modem_primary.in_use, false)
+		finish(state, id, active, 20)
+		assert(wan_manager.reconcile_speedtests(state, 'speedtest_done'))
+		eq(next(state.active_speedtests), nil, 'both results are fresh')
+		eq(state.active_weight_apply, nil)
+		eq(extra.weight_applies, nil, 'weights are never applied')
+		local runtime = model:snapshot().wan_runtime
+		eq(runtime.live_weights.state, 'not_applicable')
+		eq(runtime.live_weights.reason, 'live_weights_disabled')
+		eq(runtime.last_weight_apply, nil)
+		eq(runtime.speedtests.zz_wired.last_success_mbps, 80)
+		eq(runtime.speedtests.modem_primary.last_success_mbps, 20)
+	end)
+end
+
+function tests.test_every_backhaul_mode_retests_the_new_active_backhaul_after_failover()
+	runfibers.run(function(scope)
+		local clock, extra = { t = 100 }, {}
+		local model = every_backhaul_model()
+		local state = active_scope_state(scope, model, clock, extra)
+		for _ = 1, 2 do
+			assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+			local id, active = launched(state)
+			finish(state, id, active, id == 'wan' and 80 or 20)
+		end
+		assert(wan_manager.reconcile_speedtests(state, 'speedtest_done'))
+		eq(next(state.active_speedtests), nil)
+
+		-- WAN fails: the modem now carries traffic. Its standby result is fresh,
+		-- but it is re-tested now that it is in use.
+		clock.t = 1000
+		set_online(model, { modem_primary = true })
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		local id = launched(state)
+		eq(id, 'modem_primary')
+		eq(model:snapshot().wan_runtime.active_speedtest.reason, 'active_uplink_changed')
+		eq(model:snapshot().wan_runtime.speedtests.modem_primary.in_use, true)
+		eq(extra.weight_applies, nil)
+	end)
+end
+
+function tests.test_every_backhaul_mode_skips_offline_standby()
+	runfibers.run(function(scope)
+		local clock, extra = { t = 100 }, {}
+		local model = every_backhaul_model()
+		set_online(model, { wan = true })
+		local state = active_scope_state(scope, model, clock, extra)
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		local id, active = launched(state)
+		eq(id, 'wan')
+		finish(state, id, active, 80)
+		assert(wan_manager.reconcile_speedtests(state, 'speedtest_done'))
+		eq(next(state.active_speedtests), nil, 'an offline standby is not tested')
+		eq(model:snapshot().wan_runtime.speedtests.modem_primary.last_skip_reason, 'not_online')
 	end)
 end
 

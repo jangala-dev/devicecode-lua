@@ -209,6 +209,9 @@ local function check_speedtest_scope(t)
 				if schema.is_plain_table(sp) and sp.scope ~= nil and not SPEEDTEST_SCOPES[sp.scope] then
 					return nil, schema.err({ 'net', 'wan', section, key, 'scope' }, 'must be all or active')
 				end
+				if schema.is_plain_table(sp) and sp.live_weights ~= nil and type(sp.live_weights) ~= 'boolean' then
+					return nil, schema.err({ 'net', 'wan', section, key, 'live_weights' }, 'must be true or false')
+				end
 			end
 		end
 	end

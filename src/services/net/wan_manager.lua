@@ -168,6 +168,9 @@ local function start_speedtest_for_uplink(state, uplink)
 			generation = generation,
 			id = id,
 			uplink_id = uplink_id,
+			-- Whether this path carried traffic when tested; a standby result shows
+			-- what is left on the table, an in-use one is measured under load.
+			in_use = wan_policy.uplink_in_use(snap, uplink_id),
 			interface = uplink.request.interface,
 			device = uplink.request.device,
 			metric = uplink.request.metric,
@@ -236,17 +239,24 @@ end
 
 local ACTIVE_SCOPE_WEIGHTS_REASON = 'speedtest_scope_active'
 
--- Active scope never changes mwan3 weights; record why none were computed.
-local function mark_weights_not_applicable(state, generation)
+-- Why no weights are computed when live weights are off.
+local function weights_off_reason(snap)
+	if wan_policy.speedtest_scope(snap) == 'active' then return ACTIVE_SCOPE_WEIGHTS_REASON end
+	return 'live_weights_disabled'
+end
+
+-- Record that mwan3 weights are deliberately left alone.
+local function mark_weights_not_applicable(state, generation, reason)
+	reason = reason or ACTIVE_SCOPE_WEIGHTS_REASON
 	state.model:update(function(s)
 		s.wan_runtime = s.wan_runtime or { uplinks = {}, speedtests = {}, live_weights = {} }
 		local lw = s.wan_runtime.live_weights
-		if type(lw) == 'table' and lw.state == 'not_applicable' and lw.reason == ACTIVE_SCOPE_WEIGHTS_REASON
+		if type(lw) == 'table' and lw.state == 'not_applicable' and lw.reason == reason
 			and lw.generation == generation then
 			return s
 		end
 		s.wan_runtime.live_weights = {
-			state = 'not_applicable', reason = ACTIVE_SCOPE_WEIGHTS_REASON, generation = generation,
+			state = 'not_applicable', reason = reason, generation = generation,
 			updated_at = now(state),
 		}
 		return s
@@ -261,6 +271,20 @@ local function acknowledge_active_uplink(state, uplink_id, reason)
 		s.wan_runtime.active_speedtest = { uplink_id = uplink_id, reason = reason, acknowledged_at = now(state) }
 		return s
 	end)
+end
+
+local function acknowledge_if_fresh(state, current, uplink, due_reason)
+	if due_reason ~= 'fresh_same_path' and due_reason ~= 'fresh_weak_path' then return end
+	local acked = current.wan_runtime and current.wan_runtime.active_speedtest
+	if type(acked) ~= 'table' or acked.uplink_id ~= uplink.uplink_id then
+		acknowledge_active_uplink(state, uplink.uplink_id, due_reason)
+	end
+end
+
+-- The member carrying most traffic, which is re-tested when traffic moves to it.
+local function is_lead_uplink(snap, uplink)
+	local active = wan_policy.active_uplink(snap)
+	return active ~= nil and active.status == 'uplink' and active.uplink_id == uplink.uplink_id
 end
 
 local function skip_uplink(state, snap, uplink, generation, trigger, online_reason)
@@ -312,12 +336,7 @@ local function reconcile_active_scope(state, reason, snap, uplinks, generation)
 		end
 		return true, nil
 	end
-	if due_reason == 'fresh_same_path' or due_reason == 'fresh_weak_path' then
-		local acked = current.wan_runtime and current.wan_runtime.active_speedtest
-		if type(acked) ~= 'table' or acked.uplink_id ~= target.uplink_id then
-			acknowledge_active_uplink(state, target.uplink_id, due_reason)
-		end
-	end
+	acknowledge_if_fresh(state, current, target, due_reason)
 	mark_speedtest_skipped(state, target, generation, due_reason or 'not_due')
 	report_speedtest_skip(state, due_reason or 'not_due', reason, target, generation)
 	return true, nil
@@ -378,6 +397,17 @@ function M.reconcile_speedtests(state, reason)
 		end
 	end
 
+	-- Test the backhaul carrying traffic first, so a failover is measured promptly.
+	local ordered = {}
+	for i = 1, #uplinks do
+		if is_lead_uplink(snap, uplinks[i]) then
+			table.insert(ordered, 1, uplinks[i])
+		else
+			ordered[#ordered + 1] = uplinks[i]
+		end
+	end
+	uplinks = ordered
+
 	local speedtest_pending = false
 	for i = 1, #uplinks do
 		local uplink = uplinks[i]
@@ -388,8 +418,10 @@ function M.reconcile_speedtests(state, reason)
 			mark_speedtest_skipped(state, uplink, generation, skip_reason)
 			report_speedtest_skip(state, skip_reason, reason, uplink, generation)
 		else
-			local due, due_reason = wan_policy.speedtest_due(state.model:snapshot(), uplink,
-				{ generation = generation, now = now(state) })
+			local current = state.model:snapshot()
+			local lead = is_lead_uplink(snap, uplink)
+			local due_fn = lead and wan_policy.active_speedtest_due or wan_policy.speedtest_due
+			local due, due_reason = due_fn(current, uplink, { generation = generation, now = now(state) })
 			if due then
 				speedtest_pending = true
 				-- The HAL runs speed tests serially, but each caller deadline starts
@@ -397,13 +429,19 @@ function M.reconcile_speedtests(state, reason)
 				if next(state.active_speedtests) == nil then
 					local ok, err = start_speedtest_for_uplink(state, uplink)
 					if ok ~= true then return nil, err end
+					if lead then acknowledge_active_uplink(state, uplink.uplink_id, due_reason) end
 				end
 			else
+				if lead then acknowledge_if_fresh(state, current, uplink, due_reason) end
 				if due_reason == 'running' then speedtest_pending = true end
 				mark_speedtest_skipped(state, uplink, generation, due_reason or 'not_due')
 				report_speedtest_skip(state, due_reason or 'not_due', reason, uplink, generation)
 			end
 		end
+	end
+	if not wan_policy.live_weights_enabled(snap) then
+		mark_weights_not_applicable(state, generation, weights_off_reason(snap))
+		return true, nil
 	end
 	if not speedtest_pending then return apply_weights_if_ready(state, generation) end
 	return true, nil
@@ -537,8 +575,8 @@ function M.handle_speedtest_done(state, ev)
 		return s
 	end)
 	local snap = state.model:snapshot()
-	if wan_policy.speedtest_scope(snap) == 'active' then
-		mark_weights_not_applicable(state, ev.generation)
+	if not wan_policy.live_weights_enabled(snap) then
+		mark_weights_not_applicable(state, ev.generation, weights_off_reason(snap))
 		return true, nil
 	end
 	local weights, werr = wan_policy.compute_weights(snap, ev.generation, { now = now(state) })

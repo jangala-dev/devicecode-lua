@@ -623,4 +623,31 @@ function tests.test_speedtest_settings_may_only_be_set_in_one_place()
 	eq(config.normalise(cfg, { rev = 1 }), nil, 'both spellings in one section also conflict')
 end
 
+function tests.test_speedtest_live_weights_must_be_boolean()
+	local cfg = sample_cfg()
+	cfg.wan.load_balancing.speedtests = { enabled = true, scope = 'all', live_weights = false }
+	ok(config.normalise(cfg, { rev = 1 }), 'false is accepted')
+	cfg.wan.load_balancing.speedtests.live_weights = 'no'
+	local intent, err = config.normalise(cfg, { rev = 1 })
+	eq(intent, nil)
+	ok(err and err:find('speedtests%.live_weights', 1, false), 'got ' .. tostring(err))
+end
+
+function tests.test_bigbox_configs_speedtest_every_backhaul_without_weights()
+	local cjson = require 'cjson.safe'
+	for _, name in ipairs({ 'bigbox-ss', 'bigbox-v1-cm', 'bigbox-v1-cm-2' }) do
+		local doc = ok(cjson.decode(ok(read_project_file('src/configs/' .. name .. '.json'))))
+		local intent, err = config.normalise(doc.net, { generation = 1 })
+		ok(intent, name .. ': ' .. tostring(err))
+		local sp = intent.wan.load_balancing.speedtests
+		eq(sp.enabled, true, name)
+		eq(sp.scope, 'all', name)
+		eq(sp.live_weights, false, name .. ': weights would load-balance across failover tiers')
+		local pipes = doc.metrics.data.pipelines
+		ok(pipes.speedtest, name .. ' speedtest pipeline')
+		ok(pipes.active_uplink, name .. ' active_uplink pipeline')
+		ok(pipes.speedtest_in_use, name .. ' speedtest_in_use pipeline')
+	end
+end
+
 return tests

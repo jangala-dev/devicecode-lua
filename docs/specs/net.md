@@ -548,10 +548,22 @@ Speedtest settings live in one place, normally `wan.load_balancing.speedtests` (
 
 `scope` chooses which uplinks are tested:
 
-- `all` (default): every online uplink is tested in turn and the results feed live weights.
-- `active`: only `active_uplink.uplink_id` is tested, and live weights are never changed (`live_weights.reason = 'speedtest_scope_active'`). Standby uplinks are skipped with `not_active_uplink`, and a test still running on an uplink that stops carrying traffic is cancelled. The active uplink is re-tested every `interval_s` (a timer, since observations are event-led) and when traffic moves to a different uplink. A move does not re-test an uplink whose last success is younger than `failover_retest_min_s` (default 300), so a flapping link does not spend modem data on every flap.
+- `all` (default): every online uplink is tested in turn, the active uplink first. Results feed live weights unless `live_weights = false`.
+- `active`: only `active_uplink.uplink_id` is tested, and live weights are never changed (`live_weights.reason = 'speedtest_scope_active'`). Standby uplinks are skipped with `not_active_uplink`, and a test still running on an uplink that stops carrying traffic is cancelled.
 
-Both scopes publish the `speedtest` metric for each successful test.
+`live_weights` (default `true`; ignored by `active`) controls whether `all` feeds results into mwan3 live weights. Live weights rewrite the policy chain across every member they are given, ignoring metric, so under strict failover they would load-balance across the failover tiers. BigBox therefore runs `scope = "all"` with `live_weights = false` (`live_weights.reason = 'live_weights_disabled'`): every backhaul is measured, standby SIMs included, and routing is left to mwan3's metrics.
+
+In both scopes:
+
+- Each tested uplink is re-tested every `interval_s`. Observations are event-led, so the service keeps a timer per uplink for its next deadline: the cached result expiring or a failure retry.
+- The uplink carrying traffic is also re-tested when traffic moves to it. A move does not re-test an uplink whose last success is younger than `failover_retest_min_s` (default 300), so a flapping link does not spend modem data on every flap.
+- Each speedtest record carries `in_use`: whether that path carried traffic when tested.
+
+Telemetry:
+
+- `speedtest` (`net.<interface>.speedtest`): Mbps for each successful test.
+- `speedtest_in_use` (`net.<interface>.speedtest_in_use`): whether that test ran on the backhaul carrying traffic. Standby results show what is left on the table; in-use results are measured under client load.
+- `active_uplink` (`net.active_uplink`): the interface carrying traffic, or `last_resort` / `none`, published on each change.
 
 ## Observation and drift
 

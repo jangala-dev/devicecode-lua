@@ -105,14 +105,14 @@ local function speedtests_blocked_by_apply(state)
 	return apply_state == 'running' or apply_state == 'waiting_for_hal'
 end
 
-local ensure_active_interval_timer -- defined after schedule_speedtest_retry
+local ensure_speedtest_timers -- defined after schedule_speedtest_retry
 
--- Every reconcile re-arms the active-scope interval timer, so scope or
--- interval changes and early wake-ups cannot leave a cached result untimed.
+-- Every reconcile re-arms the speedtest timers, so scope or interval changes
+-- and early wake-ups cannot leave a cached result untimed.
 local function reconcile_speedtests(state, reason)
 	local ok, err = wan_manager.reconcile_speedtests(state, reason)
 	if ok ~= true then return ok, err end
-	local tok, terr = ensure_active_interval_timer(state)
+	local tok, terr = ensure_speedtest_timers(state)
 	if tok ~= true then return nil, terr end
 	return ok, err
 end
@@ -249,6 +249,12 @@ function report_active_uplink_change(state)
 		trigger = trigger,
 	}
 	obs_event(state.svc, 'active_uplink_changed', model_mod.deep_copy(payload))
+	-- Telemetry: which backhaul carries traffic, named like the speedtest
+	-- namespace (net.<interface>.speedtest), or the status when none does.
+	if cur.status ~= 'unknown' and state.svc and type(state.svc.obs_metric) == 'function' then
+		local value = cur.status == 'uplink' and (cur.interface or cur.uplink_id) or cur.status
+		state.svc:obs_metric('active_uplink', { value = tostring(value), namespace = { 'net', 'active_uplink' } })
+	end
 	payload.what = 'active_uplink_changed'
 	payload.summary = string.format('active uplink %s -> %s (%s)',
 		tostring(from or '-'), tostring(to or '-'), tostring(cur.source or 'no source'))
@@ -1072,16 +1078,19 @@ local function schedule_speedtest_retry(state, uplink_id, generation, delay_s, r
 	return true, nil
 end
 
--- Observations only arrive on link events, so in active scope a stable
--- uplink needs a timer for the next time it can become due: its cached result
+-- Observations only arrive on link events, so each uplink the scope tests
+-- needs a timer for the next time it can become due: its cached result
 -- expiring or a failure retry. Deadlines already passed were handled by this
 -- reconcile (a test launched, or one is running and its completion re-arms).
-function ensure_active_interval_timer(state)
+function ensure_speedtest_timers(state)
 	local snap = state.model:snapshot()
 	local tnow = now()
-	local uplink_id, wake_at = wan_policy.active_speedtest_next_wake(snap, tnow)
-	if not uplink_id then return true, nil end
-	return schedule_speedtest_retry(state, uplink_id, snap.generation, wake_at - tnow, 'speedtest_interval')
+	for _, wake in ipairs(wan_policy.speedtest_wakes(snap, tnow)) do
+		local ok, err = schedule_speedtest_retry(state, wake.uplink_id, snap.generation,
+			wake.wake_at - tnow, 'speedtest_interval')
+		if ok ~= true then return nil, err end
+	end
+	return true, nil
 end
 
 local function handle_speedtest_retry_due(state, ev)
@@ -1134,6 +1143,12 @@ local function handle_speedtest_done(state, ev)
 			state.svc:obs_metric('speedtest', {
 				value = rec.peak_mbps,
 				namespace = { 'net', rec.interface or ev.uplink_id, 'speedtest' },
+			})
+			-- Whether that path carried traffic when tested, so standby results
+			-- (what is left on the table) can be told from in-use ones.
+			state.svc:obs_metric('speedtest_in_use', {
+				value = rec.in_use == true,
+				namespace = { 'net', rec.interface or ev.uplink_id, 'speedtest_in_use' },
 			})
 		end
 		if rec and rec.ok ~= true and rec.retry_after then

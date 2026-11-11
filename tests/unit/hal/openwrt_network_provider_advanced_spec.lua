@@ -832,7 +832,10 @@ function tests.test_bigbox_configs_render_strict_wan_modem_failover()
 		local doc = ok(cjson.decode(ok(read_project_file('src/configs/' .. target .. '.json'))), target .. ' must decode')
 		local net_intent = ok(net_config.normalise(doc.net, { rev = 1 }))
 
-		eq(wan_policy.speedtest_enabled({ wan = net_intent.wan }), false, target .. ' speed tests')
+		-- Speedtests may run on every backhaul, but their results must never feed
+		-- live weights: those rewrite mwan3's chain across all members, ignoring
+		-- metric, and would load-balance across the failover tiers.
+		eq(wan_policy.live_weights_enabled({ wan = net_intent.wan }), false, target .. ' live weights')
 		local ctx = ok(names.allocate(net_intent))
 		local changes = ok(mwan3.build_changes(net_intent, ctx))
 		for mid, metric in pairs(order) do

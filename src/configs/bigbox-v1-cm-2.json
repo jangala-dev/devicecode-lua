@@ -606,7 +606,9 @@
         "load_balancing": {
           "policy": "balanced",
           "speedtests": {
-            "enabled": false,
+            "enabled": true,
+            "scope": "all",
+            "live_weights": false,
             "interval_s": 21600,
             "retry_after_s": 10,
             "retry_max_s": 3600
@@ -1690,6 +1692,13 @@
         "speedtest": {
           "protocol": "http",
           "process": []
+        },
+        "speedtest_in_use": {
+          "protocol": "http",
+          "process": []
+        },
+        "active_uplink": {
+          "template": "any_change"
         },
         "firmware": {
           "template": "any_change"
