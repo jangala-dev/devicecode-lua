@@ -6,6 +6,7 @@
 -- admitted through scoped components.
 
 local fibers = require 'fibers'
+local file = require 'fibers.io.file'
 local sleep = require 'fibers.sleep'
 local mailbox = require 'fibers.mailbox'
 
@@ -39,6 +40,28 @@ local perform = fibers.perform
 local M = {}
 
 local function now() return fibers.now() end
+
+-- net counts as started with the box only on its first start since boot, and
+-- no later than this after boot.
+local BOOT_WINDOW_S = 300
+-- tmpfs: survives restarts of net and of devicecode, but not a reboot.
+local START_MARKER = '/var/run/devicecode-net-started'
+
+-- True on net's first start since the box booted. Records the start, so any
+-- later start in the same boot returns false. If the marker can't be written,
+-- returns false: restarting on a first connect is the safe default.
+local function first_start_since_boot(path)
+	local f = file.open(path, 'r')
+	if f then
+		f:close()
+		return false
+	end
+	local w = file.open(path, 'w')
+	if not w then return false end
+	local ok = w:write(tostring(os.time()) .. '\n')
+	local cok = w:close()
+	return ok ~= nil and ok ~= false and cok ~= nil and cok ~= false
+end
 
 local function elapsed_ms(t0)
 	if not t0 then return nil end
@@ -893,7 +916,16 @@ local function handle_gsm_uplink_changed(state, ev)
 	payload.role = payload.role or role
 	payload.updated_at = now()
 	local prev = (realised_sources(state).gsm_uplinks or {})[role]
-	local reconnected = prev ~= nil and prev.connected ~= true and payload.connected == true
+	-- Only a reconnect can leave the interface holding an old lease. When net
+	-- started with the box, the modem's first connect gives the interface its
+	-- first lease, and restarting it then races mwan3's hotplug handlers and can
+	-- leave mwan3 treating the uplink as offline. After any later start of net in
+	-- the same boot, the interface may still hold a lease from before, so restart
+	-- as before.
+	state.gsm_uplink_seen_connected = state.gsm_uplink_seen_connected or {}
+	local reconnected = (state.gsm_uplink_seen_connected[role] == true or not state.started_with_box)
+		and prev ~= nil and prev.connected ~= true and payload.connected == true
+	if payload.connected == true then state.gsm_uplink_seen_connected[role] = true end
 	state.model:update(function (s)
 		s.sources = s.sources or { gsm_uplinks = {} }
 		s.sources.gsm_uplinks = s.sources.gsm_uplinks or {}
@@ -1424,6 +1456,9 @@ function M.run(scope, params)
 		counter_poll_timeout_s = params.counter_poll_timeout_s or 5,
 		active_uplink_refresh_s = params.active_uplink_refresh_s or 300,
 		interface_restart_retry_s = params.interface_restart_retry_s or INTERFACE_RESTART_RETRY_S,
+		-- The scheduler clock is CLOCK_MONOTONIC: seconds since the box booted.
+		started_with_box = now() < (params.boot_window_s or BOOT_WINDOW_S)
+			and first_start_since_boot(params.start_marker or START_MARKER),
 		current_generation = nil,
 		active_apply = nil,
 		pending_intent = nil,

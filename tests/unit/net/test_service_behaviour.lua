@@ -308,6 +308,7 @@ function tests.test_gsm_reconnect_restarts_member_interface()
 		eq(restarts[1].interface, 'modem_primary')
 
 		-- A role with no WAN member: nothing to restart.
+		uplink('secondary', true, 'wwan1')
 		uplink('secondary', false, 'wwan1')
 		uplink('secondary', true, 'wwan1')
 		wait_restarts(2, 0.1)
@@ -324,6 +325,120 @@ function tests.test_gsm_reconnect_restarts_member_interface()
 		child:cancel('test complete')
 		fibers.perform(child:join_op())
 	end)
+end
+
+-- net starts with the uplink disconnected, then the modem connects. Returns
+-- the restarts seen after the first connect, and after a drop and reconnect.
+local function first_connect_restarts(boot_window_s, start_marker)
+	local restarts = {}
+	local after_first
+	fibers.run(function (scope)
+		local b = busmod.new()
+		local conn = b:connect()
+		local reader = b:connect()
+		local calls = {}
+
+		local hal = success_hal(calls)
+		hal.restart_interface_op = function (_, req)
+			restarts[#restarts + 1] = req
+			return op.always({ ok = true, backend = 'test', interface = req.interface })
+		end
+
+		local c = cfg()
+		c.wan = {
+			members = {
+				modem_primary = { interface = 'modem_primary', source = { kind = 'gsm-uplink', id = 'primary' } },
+			},
+		}
+
+		local function uplink(connected, ifname)
+			conn:retain(topics.gsm_uplink('primary'), {
+				connected = connected, available = connected, linux = { ifname = ifname },
+			})
+		end
+		local function wait_restarts(n, timeout)
+			local deadline = fibers.now() + timeout
+			while #restarts < n and fibers.now() < deadline do fibers.perform(sleep.sleep_op(0.01)) end
+		end
+
+		uplink(false, nil)
+		retain_network_config_status(conn, 'available')
+		local child = start_service(scope, conn, {
+			conn = conn,
+			config = c,
+			rev = 35,
+			hal = hal,
+			observe = false,
+			boot_window_s = boot_window_s,
+			start_marker = start_marker,
+		})
+
+		local view = reader:retained_view(topics.summary())
+		probe.wait_versioned_until('net running summary before the first modem connect',
+			function () return view:version() end,
+			function (seen) return view:changed_op(seen) end,
+			function ()
+				local msg = view:get(topics.summary())
+				return msg and msg.payload and msg.payload.state == 'running' and msg.payload or nil
+			end,
+			{ timeout = 0.5 })
+		view:close()
+
+		uplink(true, 'wwan0')
+		wait_restarts(1, 0.2)
+		after_first = #restarts
+
+		uplink(false, 'wwan0')
+		uplink(true, 'wwan0')
+		wait_restarts(after_first + 1, 0.5)
+
+		child:cancel('test complete')
+		fibers.perform(child:join_op())
+	end)
+	return after_first, restarts
+end
+
+-- A path for net's start marker that does not exist yet.
+local function fresh_marker()
+	local path = os.tmpname()
+	os.remove(path)
+	return path
+end
+
+function tests.test_gsm_first_connect_after_boot_does_not_restart_member_interface()
+	-- net's first start since boot: the first connect gives the interface its
+	-- first lease, so there is no old address to replace and no restart.
+	local marker = fresh_marker()
+	local after_first, restarts = first_connect_restarts(math.huge, marker)
+	eq(after_first, 0, 'no restart on the first connect after boot')
+	-- A later drop and reconnect is a real reconnect: restart once.
+	eq(#restarts, 1, 'one restart expected after a reconnect')
+	eq(restarts[1].interface, 'modem_primary')
+	ok(io.open(marker, 'r'), 'start recorded for later starts')
+	os.remove(marker)
+end
+
+function tests.test_gsm_first_connect_after_an_early_net_restart_restarts_member_interface()
+	-- net restarts soon after boot, after the modem had connected and dropped:
+	-- the interface may still hold the lease from before.
+	local marker = fresh_marker()
+	first_connect_restarts(math.huge, marker)
+	local after_first, restarts = first_connect_restarts(math.huge, marker)
+	eq(after_first, 1, 'restart on the first connect after an early net restart')
+	eq(#restarts, 2, 'and again after a reconnect')
+	os.remove(marker)
+end
+
+function tests.test_gsm_first_connect_after_a_late_net_start_restarts_member_interface()
+	local marker = fresh_marker()
+	local after_first = first_connect_restarts(0, marker)
+	eq(after_first, 1, 'restart on the first connect when net starts long after boot')
+	eq(io.open(marker, 'r'), nil, 'no marker written outside the boot window')
+end
+
+function tests.test_gsm_first_connect_restarts_when_the_start_cannot_be_recorded()
+	local after_first = first_connect_restarts(math.huge, '/nonexistent-dir/devicecode-net-started')
+	eq(after_first, 1, 'restart is the safe default')
 end
 
 function tests.test_gsm_reconnect_restart_retries_until_success_while_connected()
