@@ -1775,6 +1775,19 @@ function GsmModem:_apn_connect()
 		return nil, "mnc: " .. mnc_err, DEFAULT_RETRY_TIMEOUT
 	end
 
+	-- SPN may be unavailable before registration. Force a fresh SIM snapshot here,
+	-- matching the legacy behaviour of reading it immediately before APN ranking.
+	-- Read it before IMSI/GID1 so those fields reuse this refreshed grouped snapshot.
+	local spn, spn_err = modem_get_field(self.cap, 'spn', REQUEST_TIMEOUT, 0)
+	if spn_err ~= "" then
+		self.svc:obs_log('warn', {
+			what = 'spn_unavailable',
+			modem = self.name,
+			err = spn_err,
+		})
+		spn = nil
+	end
+
 	local imsi, imsi_err = modem_get_field(self.cap, 'imsi', REQUEST_TIMEOUT)
 	if imsi_err ~= "" then
 		return nil, "imsi: " .. imsi_err, DEFAULT_RETRY_TIMEOUT
@@ -1792,7 +1805,7 @@ function GsmModem:_apn_connect()
 
 	-- Get ranked APNs
 	local rank_cutoff = tonumber(self.cfg.apn_rank_cutoff) or 4
-	local ranked_apns, rankings = apns.get_ranked_apns(mcc, mnc, imsi, nil, gid1, self.svc and self.svc.custom_apns)
+	local ranked_apns, rankings = apns.get_ranked_apns(mcc, mnc, imsi, spn, gid1, self.svc and self.svc.custom_apns)
 
 	-- Iterate through ranked APNs
 	for _, ranking in ipairs(rankings) do
