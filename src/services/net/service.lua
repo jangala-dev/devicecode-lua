@@ -819,7 +819,14 @@ local function handle_gsm_uplink_changed(state, ev)
 	payload.role = payload.role or role
 	payload.updated_at = now()
 	local prev = (realised_sources(state).gsm_uplinks or {})[role]
-	local reconnected = prev ~= nil and prev.connected ~= true and payload.connected == true
+	-- Only a reconnect can leave the interface holding an old lease. The first
+	-- connect since startup (the modem registering at boot) gives the interface
+	-- its first lease, and restarting it then races mwan3's hotplug handlers
+	-- and can leave mwan3 treating the uplink as offline.
+	state.gsm_uplink_seen_connected = state.gsm_uplink_seen_connected or {}
+	local reconnected = state.gsm_uplink_seen_connected[role] == true
+		and prev ~= nil and prev.connected ~= true and payload.connected == true
+	if payload.connected == true then state.gsm_uplink_seen_connected[role] = true end
 	state.model:update(function (s)
 		s.sources = s.sources or { gsm_uplinks = {} }
 		s.sources.gsm_uplinks = s.sources.gsm_uplinks or {}

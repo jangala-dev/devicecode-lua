@@ -427,6 +427,82 @@ function tests.test_restart_interface_runs_ifup_on_generated_interface_name()
 	end)
 end
 
+-- Runs a restart with mwan3's state files given by `states` (changed by `step`
+-- after each check) and returns the commands run after the `ifup`.
+local function restart_with_mwan3_states(states, opts)
+	opts = opts or {}
+	local cmds = {}
+	fibers.run(function()
+		local provider = ok(provider_loader.new({
+			provider = 'openwrt',
+			allow_fake_uci = true,
+			mwan3_guard_interval_s = 0.01,
+			mwan3_guard_checks = 6,
+			mwan3_hotplug_guard = opts.guard,
+		}, {}))
+		provider.shaper_run_cmd = function(argv)
+			cmds[#cmds + 1] = argv_s(argv)
+			return true, nil
+		end
+		local reads = 0
+		provider.mwan3_guard_read = function(path)
+			if path:find('/mwan3track/', 1, true) then
+				reads = reads + 1
+				if opts.step then opts.step(states, reads) end
+				return states.tracker and (states.tracker .. '\n') or nil
+			end
+			return states.hotplug and (states.hotplug .. '\n') or nil
+		end
+		provider.mwan3_guard_device = function(_, name)
+			eq(name, 'mopri79e')
+			return 'wwan0'
+		end
+		provider._last_name_ctx = ok(names.allocate({
+			interfaces = { modem_primary = { kind = 'direct', role = 'wan', endpoint = { ifname = 'wwan0' } } },
+			wan = { members = { modem_primary = { interface = 'modem_primary' } } },
+		}))
+		for i = 1, opts.restarts or 1 do
+			local result = fibers.perform(provider:restart_interface_op({ interface = 'modem_primary' }))
+			eq(result.ok, true, 'restart result does not wait for the mwan3 check')
+			eq(#cmds, i)
+		end
+		fibers.perform(require('fibers.sleep').sleep_op(0.2))
+		provider:terminate('test complete')
+	end)
+	for _ = 1, opts.restarts or 1 do table.remove(cmds, 1) end
+	return cmds
+end
+
+function tests.test_restart_interface_resends_connected_when_mwan3_hotplug_state_is_stale()
+	-- A stale `disconnected` handler finished last: tracker online, hotplug offline.
+	local cmds = restart_with_mwan3_states({ tracker = 'online', hotplug = 'offline' })
+	eq(#cmds, 1, 'one repair expected')
+	eq(cmds[1], 'env -i ACTION=connected INTERFACE=mopri79e DEVICE=wwan0 /sbin/hotplug-call iface')
+
+	-- No hotplug state file at all also reads as offline in mwan3.
+	cmds = restart_with_mwan3_states({ tracker = 'online' })
+	eq(#cmds, 1, 'missing hotplug state is offline')
+
+	-- A second restart supersedes the first one's check: still one repair.
+	cmds = restart_with_mwan3_states({ tracker = 'online', hotplug = 'offline' }, { restarts = 2 })
+	eq(#cmds, 1, 'one repair after back-to-back restarts')
+end
+
+function tests.test_restart_interface_leaves_consistent_mwan3_state_alone()
+	eq(#restart_with_mwan3_states({ tracker = 'online', hotplug = 'online' }), 0, 'both online')
+	eq(#restart_with_mwan3_states({ tracker = 'offline', hotplug = 'offline' }), 0, 'both offline')
+	eq(#restart_with_mwan3_states({ tracker = 'connecting', hotplug = 'offline' }), 0, 'tracker not yet online')
+
+	-- A mismatch seen on one check only is an event still in flight.
+	local cmds = restart_with_mwan3_states({ tracker = 'online', hotplug = 'offline' }, {
+		step = function(states, reads) if reads >= 2 then states.hotplug = 'online' end end,
+	})
+	eq(#cmds, 0, 'a mismatch that clears by the next check is left alone')
+
+	cmds = restart_with_mwan3_states({ tracker = 'online', hotplug = 'offline' }, { guard = false })
+	eq(#cmds, 0, 'check disabled by config')
+end
+
 
 function tests.test_segment_trunk_realises_segments_without_cfg_net_interfaces()
 	fibers.run(function()

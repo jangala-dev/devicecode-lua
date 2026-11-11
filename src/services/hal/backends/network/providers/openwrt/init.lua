@@ -2463,6 +2463,93 @@ function Provider:apply_shaping_op(req)
 	end)
 end
 
+-- After `ifup`, netifd and mwan3track send their iface hotplug events
+-- (disconnected, ifdown, ifup, connected) close together, each in its own
+-- process. If a stale `disconnected` handler finishes last, mwan3's hotplug
+-- state stays offline while its tracker reports online. The tracker only
+-- reports changes, so mwan3 would keep the uplink out of its policies until the
+-- next one. Watch for that for a short while and resend `connected` the way
+-- mwan3track does.
+local function trimmed(s)
+	return type(s) == 'string' and s:match('^%s*(.-)%s*$') or nil
+end
+
+local function mwan3_interface_device(self, name)
+	local st = ubus_call(self.config, 'network.interface.' .. name, 'status', {})
+	if type(st) ~= 'table' then return nil end
+	local dev = st.l3_device or st.device
+	return type(dev) == 'string' and dev ~= '' and dev or nil
+end
+
+local function mwan3_hotplug_check(self, name, token)
+	local cfg = self.config or {}
+	local read = self.mwan3_guard_read or read_text_file
+	local device_of = self.mwan3_guard_device or mwan3_interface_device
+	local status_dir = cfg.mwan3_status_dir or '/var/run/mwan3'
+	local track_dir = cfg.mwan3track_status_dir or '/var/run/mwan3track'
+	local interval_s = tonumber(cfg.mwan3_guard_interval_s) or 5
+	local checks = tonumber(cfg.mwan3_guard_checks) or 12
+	local mismatches = 0
+	for _ = 1, checks do
+		fibers.perform(sleep.sleep_op(interval_s))
+		-- A newer restart of the same interface runs its own check.
+		if self.terminated or self._mwan3_guards[name] ~= token then return end
+		local tracker = trimmed(read(track_dir .. '/' .. name .. '/STATUS'))
+		local hotplug = trimmed(read(status_dir .. '/iface_state/' .. name)) or 'offline'
+		if tracker == 'online' and hotplug ~= 'online' then
+			mismatches = mismatches + 1
+		else
+			mismatches = 0
+		end
+		-- Two checks in a row, so a hotplug event still in flight can land first.
+		if mismatches >= 2 then
+			local device = device_of(self, name)
+			if not device then
+				log_provider(self, 'warn', {
+					what = 'mwan3_hotplug_state_stale', interface = name, tracker = tracker, hotplug = hotplug, err = 'no device',
+				})
+				break
+			end
+			local ok, err = run_provider_command(self, {
+				'env', '-i', 'ACTION=connected', 'INTERFACE=' .. name, 'DEVICE=' .. device, '/sbin/hotplug-call', 'iface',
+			})
+			log_provider(self, ok and 'warn' or 'error', {
+				what = 'mwan3_hotplug_state_repaired',
+				summary = string.format('mwan3 hotplug state for %s was %s while its tracker was online; resent connected (%s)',
+					name, hotplug, ok and 'ok' or tostring(err)),
+				interface = name,
+				device = device,
+				hotplug = hotplug,
+				ok = ok == true,
+				err = err,
+			})
+			break
+		end
+	end
+	if self._mwan3_guards[name] == token then self._mwan3_guards[name] = nil end
+end
+
+local function start_mwan3_hotplug_check(self, name)
+	if (self.config or {}).mwan3_hotplug_guard == false then return end
+	local scope = self:_owner()
+	if not scope then return end
+	self._mwan3_guards = self._mwan3_guards or {}
+	local previous = self._mwan3_guards[name]
+	if previous and previous.scope then previous.scope:cancel('superseded by a newer restart') end
+	local token = {}
+	self._mwan3_guards[name] = token
+	-- Its own scope: a fault here must not fail the provider's owner scope.
+	scope:spawn(function ()
+		local status, _, err = fibers.perform(fibers.run_scope_op(function ()
+			token.scope = fibers.current_scope()
+			mwan3_hotplug_check(self, name, token)
+		end))
+		if status == 'failed' then
+			log_provider(self, 'warn', { what = 'mwan3_hotplug_check_failed', interface = name, err = tostring(err) })
+		end
+	end)
+end
+
 function Provider:restart_interface_op(req)
 	return fibers.run_scope_op(function()
 		if self.terminated then return { ok = false, err = 'provider terminated', backend = 'openwrt' } end
@@ -2474,6 +2561,7 @@ function Provider:restart_interface_op(req)
 		-- ifup takes the netifd interface down and up, so its DHCP client starts a new lease.
 		local ok, err = run_provider_command(self, { 'ifup', name })
 		if not ok then return { ok = false, err = err, backend = 'openwrt', interface = name } end
+		start_mwan3_hotplug_check(self, name)
 		return { ok = true, backend = 'openwrt', interface = name }
 	end):wrap(function(status, _report, result)
 		if status ~= 'ok' then return { ok = false, err = tostring(result or status), backend = 'openwrt' } end
@@ -2491,6 +2579,10 @@ function Provider:terminate(reason)
 	end
 	self._observer = nil
 	self.terminated = reason or true
+	for name, token in pairs(self._mwan3_guards or {}) do
+		if token.scope then token.scope:cancel(reason or 'provider terminated') end
+		self._mwan3_guards[name] = nil
+	end
 	if self._uci_manager and type(self._uci_manager.terminate) == 'function' then
 		self._uci_manager:terminate(reason or 'terminated')
 	end

@@ -308,6 +308,7 @@ function tests.test_gsm_reconnect_restarts_member_interface()
 		eq(restarts[1].interface, 'modem_primary')
 
 		-- A role with no WAN member: nothing to restart.
+		uplink('secondary', true, 'wwan1')
 		uplink('secondary', false, 'wwan1')
 		uplink('secondary', true, 'wwan1')
 		wait_restarts(2, 0.1)
@@ -320,6 +321,77 @@ function tests.test_gsm_reconnect_restarts_member_interface()
 		wait_restarts(2, 0.5)
 		eq(#restarts, 2, 'restart expected when the reconnect also rebinds the device')
 		eq(restarts[2].interface, 'modem_primary')
+
+		child:cancel('test complete')
+		fibers.perform(child:join_op())
+	end)
+end
+
+function tests.test_gsm_first_connect_after_startup_does_not_restart_member_interface()
+	fibers.run(function (scope)
+		local b = busmod.new()
+		local conn = b:connect()
+		local reader = b:connect()
+		local calls = {}
+		local restarts = {}
+
+		local hal = success_hal(calls)
+		hal.restart_interface_op = function (_, req)
+			restarts[#restarts + 1] = req
+			return op.always({ ok = true, backend = 'test', interface = req.interface })
+		end
+
+		local c = cfg()
+		c.wan = {
+			members = {
+				modem_primary = { interface = 'modem_primary', source = { kind = 'gsm-uplink', id = 'primary' } },
+			},
+		}
+
+		local function uplink(connected, ifname)
+			conn:retain(topics.gsm_uplink('primary'), {
+				connected = connected, available = connected, linux = { ifname = ifname },
+			})
+		end
+		local function wait_restarts(n, timeout)
+			local deadline = fibers.now() + timeout
+			while #restarts < n and fibers.now() < deadline do fibers.perform(sleep.sleep_op(0.01)) end
+		end
+
+		-- At boot the modem is still registering when net starts.
+		uplink(false, nil)
+		retain_network_config_status(conn, 'available')
+		local child = start_service(scope, conn, {
+			conn = conn,
+			config = c,
+			rev = 35,
+			hal = hal,
+			observe = false,
+		})
+
+		local view = reader:retained_view(topics.summary())
+		probe.wait_versioned_until('net running summary before the first modem connect',
+			function () return view:version() end,
+			function (seen) return view:changed_op(seen) end,
+			function ()
+				local msg = view:get(topics.summary())
+				return msg and msg.payload and msg.payload.state == 'running' and msg.payload or nil
+			end,
+			{ timeout = 0.5 })
+		view:close()
+
+		-- First connect since startup: the interface's lease is the first one, so
+		-- there is no stale address to replace and no restart.
+		uplink(true, 'wwan0')
+		wait_restarts(1, 0.2)
+		eq(#restarts, 0, 'no restart on the first connect after startup')
+
+		-- A later drop and reconnect is a real reconnect: restart once.
+		uplink(false, 'wwan0')
+		uplink(true, 'wwan0')
+		wait_restarts(1, 0.5)
+		eq(#restarts, 1, 'one restart expected after a reconnect')
+		eq(restarts[1].interface, 'modem_primary')
 
 		child:cancel('test complete')
 		fibers.perform(child:join_op())
