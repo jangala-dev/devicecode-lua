@@ -8,6 +8,7 @@ local runfibers = require 'tests.support.run_fibers'
 local wan_runtime = require 'services.net.wan_runtime'
 local wan_manager = require 'services.net.wan_manager'
 local model_mod = require 'services.net.model'
+local active_uplink = require 'services.net.active_uplink'
 
 local tests = {}
 
@@ -423,6 +424,467 @@ function tests.test_offline_uplink_releases_slot_for_due_uplink_in_same_reconcil
 		ok(state.active_speedtests.a, 'due uplink must launch once the offline test releases the slot')
 		eq(state.next_speedtest_id, 9)
 	end)
+end
+
+-- Active-scope speed tests: strict failover, test only the uplink carrying traffic.
+
+local function active_scope_model(opts)
+	opts = opts or {}
+	local model = model_mod.new('net-test')
+	model:update(function(s)
+		s.generation = 2
+		s.wan = {
+			load_balancing = { policy = 'balanced', speedtests = {
+				enabled = true, scope = opts.scope or 'active', interval_s = 21600,
+				failover_retest_min_s = opts.failover_retest_min_s,
+				live_weights = opts.live_weights,
+			} },
+			last_resort = opts.last_resort,
+			configured_members = {
+				wan = { interface = 'wan', metric = 1 },
+				modem_primary = { interface = 'modem_primary', metric = 2, source = { kind = 'gsm-uplink', id = 'primary' } },
+			},
+		}
+		s.backhaul = { uplinks = {
+			wan = { id = 'wan', interface = 'wan', state = 'online', usable = true, metric = 1,
+				path_address = { family = 'ipv4', address = '203.0.113.10' } },
+			modem_primary = { id = 'modem_primary', interface = 'modem_primary', state = 'online', usable = true, metric = 2,
+				path_address = { family = 'ipv4', address = '10.1.2.3' } },
+		} }
+		s.backhaul.active_uplink = active_uplink.select(s, s.backhaul.uplinks)
+		s.wan_runtime = { uplinks = {}, live_weights = {}, speedtests = {} }
+		return s
+	end)
+	return model
+end
+
+local function set_online(model, online)
+	model:update(function(s)
+		for id, rec in pairs(s.backhaul.uplinks) do
+			local up = online[id] == true
+			rec.state = up and 'online' or 'offline'
+			rec.usable = up
+		end
+		s.backhaul.active_uplink = active_uplink.select(s, s.backhaul.uplinks)
+		return s
+	end)
+end
+
+local function active_scope_state(scope, model, clock, extra)
+	local state = {
+		scope = scope, service_id = 'net-test', model = model,
+		hal = {
+			speedtest_op = function() return op.never() end,
+			apply_live_weights_op = function()
+				extra.weight_applies = (extra.weight_applies or 0) + 1
+				return op.always({ ok = true, changed = true, applied = true })
+			end,
+		},
+		done_tx = mailbox.new(8, { full = 'reject_newest' }),
+		active_speedtests = {},
+		current_generation = { generation = 2 }, next_speedtest_id = 1, next_weight_apply_id = 1,
+		now = function() return clock.t end,
+	}
+	return state
+end
+
+local function only_active(state)
+	local id, active = next(state.active_speedtests)
+	ok(active and next(state.active_speedtests, id) == nil, 'exactly one active speed test')
+	return id, active
+end
+
+local function finish(state, uplink_id, active, mbps)
+	assert(wan_manager.handle_speedtest_done(state, {
+		uplink_id = uplink_id, generation = 2, speedtest_id = active.speedtest_id,
+		result = { ok = true, mbps = mbps or 10 },
+	}))
+end
+
+function tests.test_active_scope_tests_only_the_active_uplink_and_never_changes_weights()
+	runfibers.run(function(scope)
+		local clock, extra = { t = 100 }, {}
+		local model = active_scope_model()
+		local state = active_scope_state(scope, model, clock, extra)
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		local id, active = only_active(state)
+		eq(id, 'wan', 'wired WAN carries traffic under strict failover')
+		local modem = model:snapshot().wan_runtime.speedtests.modem_primary
+		eq(modem.state, 'skipped')
+		eq(modem.last_skip_reason, 'not_active_uplink')
+
+		finish(state, 'wan', active, 80)
+		eq(state.active_weight_apply, nil, 'completion must not start a live weight apply')
+		eq(model:snapshot().wan_runtime.live_weights.reason, 'speedtest_scope_active')
+		assert(wan_manager.reconcile_speedtests(state, 'speedtest_done'))
+		eq(state.active_weight_apply, nil)
+		eq(state.next_speedtest_id, 2, 'standby modem must not be tested')
+		eq(next(state.active_speedtests), nil)
+		eq(extra.weight_applies, nil, 'active scope must never apply live weights')
+		local runtime = model:snapshot().wan_runtime
+		eq(runtime.last_weight_apply, nil)
+		eq(runtime.live_weights.state, 'not_applicable')
+		eq(runtime.live_weights.reason, 'speedtest_scope_active')
+		eq(runtime.speedtests.wan.state, 'ok')
+		eq(runtime.speedtests.wan.last_success_mbps, 80)
+		eq(runtime.active_speedtest.uplink_id, 'wan')
+	end)
+end
+
+function tests.test_active_scope_leaves_existing_weights_untouched()
+	runfibers.run(function(scope)
+		local clock, extra = { t = 100 }, {}
+		local model = active_scope_model()
+		local previous = { { id = 'wan', interface = 'wan', metric = 1, weight = 1 } }
+		model:update(function(s) s.wan_runtime.last_weight_apply = { generation = 1, members = previous }; return s end)
+		local state = active_scope_state(scope, model, clock, extra)
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		local id, active = only_active(state)
+		finish(state, id, active, 50)
+		eq(state.active_weight_apply, nil)
+		assert(wan_manager.reconcile_speedtests(state, 'speedtest_done'))
+		eq(state.active_weight_apply, nil)
+		eq(extra.weight_applies, nil)
+		local last = model:snapshot().wan_runtime.last_weight_apply
+		eq(last.generation, 1)
+		eq(#last.members, 1)
+		eq(last.members[1].weight, 1)
+	end)
+end
+
+function tests.test_active_scope_retests_after_failover_and_failback()
+	runfibers.run(function(scope)
+		local clock, extra = { t = 100 }, {}
+		local model = active_scope_model()
+		local state = active_scope_state(scope, model, clock, extra)
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		local id, active = only_active(state)
+		eq(id, 'wan')
+		finish(state, id, active, 80)
+
+		-- WAN fails: mwan3 moves traffic to modem 1, which is tested.
+		clock.t = 1000
+		set_online(model, { modem_primary = true })
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		id, active = only_active(state)
+		eq(id, 'modem_primary', 'failover must re-test on the new active uplink')
+		finish(state, id, active, 20)
+
+		-- WAN returns. Its earlier result is still within interval_s, but the
+		-- path carrying traffic changed, so it is tested again.
+		clock.t = 2000
+		set_online(model, { wan = true, modem_primary = true })
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		id, active = only_active(state)
+		eq(id, 'wan', 'failback must re-test the wired WAN')
+		eq(model:snapshot().wan_runtime.active_speedtest.reason, 'active_uplink_changed')
+		finish(state, id, active, 75)
+
+		-- A second failover re-tests the modem even though its result is fresh.
+		clock.t = 3000
+		set_online(model, { modem_primary = true })
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		id = only_active(state)
+		eq(id, 'modem_primary')
+		eq(model:snapshot().wan_runtime.active_speedtest.reason, 'active_uplink_changed')
+		eq(extra.weight_applies, nil)
+	end)
+end
+
+function tests.test_active_scope_same_uplink_is_not_retested_before_interval()
+	runfibers.run(function(scope)
+		local clock, extra = { t = 100 }, {}
+		local model = active_scope_model()
+		local state = active_scope_state(scope, model, clock, extra)
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		local id, active = only_active(state)
+		finish(state, id, active, 80)
+		clock.t = 5000
+		for _ = 1, 3 do assert(wan_manager.reconcile_speedtests(state, 'observed_state')) end
+		eq(state.next_speedtest_id, 2, 'repeated observations must not re-test')
+		clock.t = 100 + 21600 + 1
+		assert(wan_manager.reconcile_speedtests(state, 'speedtest_retry_due'))
+		id = only_active(state)
+		eq(id, 'wan', 'interval_s expiry re-tests the active uplink')
+	end)
+end
+
+function tests.test_active_scope_flapping_within_damping_window_does_not_retest()
+	runfibers.run(function(scope)
+		local clock, extra = { t = 100 }, {}
+		local model = active_scope_model({ failover_retest_min_s = 300 })
+		local state = active_scope_state(scope, model, clock, extra)
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		local id, active = only_active(state)
+		finish(state, id, active, 80)
+
+		clock.t = 150
+		set_online(model, { modem_primary = true })
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		id, active = only_active(state)
+		eq(id, 'modem_primary', 'never-tested modem is tested on first failover')
+		finish(state, id, active, 20)
+
+		clock.t = 200
+		set_online(model, { wan = true, modem_primary = true })
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		eq(next(state.active_speedtests), nil, 'WAN tested 100 s ago is within the damping window')
+
+		clock.t = 260
+		set_online(model, { modem_primary = true })
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		eq(next(state.active_speedtests), nil, 'modem tested 110 s ago is within the damping window')
+		eq(state.next_speedtest_id, 3)
+		eq(model:snapshot().wan_runtime.active_speedtest.uplink_id, 'modem_primary')
+	end)
+end
+
+function tests.test_active_scope_cancels_test_on_uplink_that_stopped_carrying_traffic()
+	runfibers.run(function(scope)
+		local clock, extra = { t = 100 }, {}
+		local model = active_scope_model()
+		model:update(function(s)
+			s.wan_runtime.speedtests.modem_primary = { state = 'running', generation = 2, id = 7 }
+			return s
+		end)
+		local state = active_scope_state(scope, model, clock, extra)
+		local cancelled
+		state.active_speedtests.modem_primary = { generation = 2, speedtest_id = 7,
+			handle = { cancel = function(_, why) cancelled = why end } }
+		state.next_speedtest_id = 8
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		eq(cancelled, 'not_active_uplink')
+		local id = only_active(state)
+		eq(id, 'wan', 'freed slot goes to the active uplink in the same reconcile')
+		eq(model:snapshot().wan_runtime.speedtests.modem_primary.state, 'skipped')
+	end)
+end
+
+function tests.test_active_scope_runs_nothing_without_an_active_uplink()
+	for _, lr in ipairs({ 'default', 'unreachable' }) do
+		runfibers.run(function(scope)
+			local clock, extra = { t = 100 }, {}
+			local model = active_scope_model({ last_resort = lr })
+			set_online(model, {})
+			local state = active_scope_state(scope, model, clock, extra)
+			assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+			eq(next(state.active_speedtests), nil, 'no test without an active uplink (' .. lr .. ')')
+			eq(state.next_speedtest_id, 1)
+			eq(extra.weight_applies, nil)
+			local runtime = model:snapshot().wan_runtime
+			eq(runtime.live_weights.reason, 'speedtest_scope_active')
+			eq(runtime.speedtests.wan.last_skip_reason, 'not_online')
+		end)
+	end
+end
+
+function tests.test_apply_keeps_active_scope_acknowledgement_for_current_members()
+	local service = require 'services.net.service'
+	local carry = service._test.carry_forward_wan_runtime
+	local previous = {
+		speedtests = { wan = { state = 'ok', last_success = { mbps = 80, completed_at = 10 } } },
+		active_speedtest = { uplink_id = 'wan', reason = 'due', acknowledged_at = 10 },
+	}
+	local intent = { wan = { members = { wan = { interface = 'wan' }, modem_primary = { interface = 'modem_primary' } } } }
+	local out = carry(previous, intent, 3)
+	eq(out.active_speedtest.uplink_id, 'wan', 'failover after an apply must still be noticed')
+	ok(out.active_speedtest ~= previous.active_speedtest, 'carried as a copy')
+
+	out = carry(previous, { wan = { members = { modem_primary = { interface = 'modem_primary' } } } }, 4)
+	eq(out.active_speedtest, nil, 'acknowledgement for a removed member is dropped')
+end
+
+function tests.test_active_scope_tests_the_active_member_when_ids_and_interfaces_collide()
+	runfibers.run(function(scope)
+		local clock, extra = { t = 100 }, {}
+		local model = model_mod.new('net-test')
+		model:update(function(s)
+			s.generation = 2
+			s.wan = {
+				load_balancing = { speedtests = { enabled = true, scope = 'active' } },
+				configured_members = {
+					primary = { interface = 'wan', metric = 1 },
+					wan = { interface = 'modem_primary', metric = 2 },
+				},
+			}
+			s.backhaul = { uplinks = {
+				primary = { id = 'primary', interface = 'wan', state = 'online', usable = true, metric = 1,
+					path_address = { family = 'ipv4', address = '203.0.113.10' } },
+				wan = { id = 'wan', interface = 'modem_primary', state = 'offline', usable = false, metric = 2 },
+			} }
+			s.backhaul.active_uplink = active_uplink.select(s, s.backhaul.uplinks)
+			s.wan_runtime = { uplinks = {}, live_weights = {}, speedtests = {} }
+			return s
+		end)
+		eq(model:snapshot().backhaul.active_uplink.uplink_id, 'primary')
+		local state = active_scope_state(scope, model, clock, extra)
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		local id = only_active(state)
+		eq(id, 'primary', 'the member carrying traffic must be tested')
+	end)
+end
+
+-- Every backhaul tested, weights untouched: scope "all" with live_weights = false.
+
+local function every_backhaul_model(opts)
+	opts = opts or {}
+	opts.scope = 'all'
+	opts.live_weights = false
+	return active_scope_model(opts)
+end
+
+local function launched(state)
+	local id, active = only_active(state)
+	return id, active
+end
+
+function tests.test_every_backhaul_is_tested_active_first_without_weight_changes()
+	runfibers.run(function(scope)
+		local clock, extra = { t = 100 }, {}
+		local model = every_backhaul_model()
+		model:update(function(s)
+			-- Give the active uplink an id that sorts last, so ordering is not alphabetical luck.
+			s.wan.configured_members.zz_wired = s.wan.configured_members.wan
+			s.wan.configured_members.wan = nil
+			s.backhaul.uplinks.zz_wired = s.backhaul.uplinks.wan
+			s.backhaul.uplinks.zz_wired.id = 'zz_wired'
+			s.backhaul.uplinks.wan = nil
+			s.wan.configured_members.zz_wired.interface = 'wan'
+			s.backhaul.active_uplink = active_uplink.select(s, s.backhaul.uplinks)
+			return s
+		end)
+		eq(model:snapshot().backhaul.active_uplink.uplink_id, 'zz_wired')
+		local state = active_scope_state(scope, model, clock, extra)
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		local id, active = launched(state)
+		eq(id, 'zz_wired', 'the active backhaul is tested first')
+		eq(model:snapshot().wan_runtime.speedtests.zz_wired.in_use, true)
+		finish(state, id, active, 80)
+		eq(state.active_weight_apply, nil, 'completion must not start a weight apply')
+
+		assert(wan_manager.reconcile_speedtests(state, 'speedtest_done'))
+		id, active = launched(state)
+		eq(id, 'modem_primary', 'the standby backhaul is tested too')
+		eq(model:snapshot().wan_runtime.speedtests.modem_primary.in_use, false)
+		finish(state, id, active, 20)
+		assert(wan_manager.reconcile_speedtests(state, 'speedtest_done'))
+		eq(next(state.active_speedtests), nil, 'both results are fresh')
+		eq(state.active_weight_apply, nil)
+		eq(extra.weight_applies, nil, 'weights are never applied')
+		local runtime = model:snapshot().wan_runtime
+		eq(runtime.live_weights.state, 'not_applicable')
+		eq(runtime.live_weights.reason, 'live_weights_disabled')
+		eq(runtime.last_weight_apply, nil)
+		eq(runtime.speedtests.zz_wired.last_success_mbps, 80)
+		eq(runtime.speedtests.modem_primary.last_success_mbps, 20)
+	end)
+end
+
+function tests.test_every_backhaul_mode_retests_the_new_active_backhaul_after_failover()
+	runfibers.run(function(scope)
+		local clock, extra = { t = 100 }, {}
+		local model = every_backhaul_model()
+		local state = active_scope_state(scope, model, clock, extra)
+		for _ = 1, 2 do
+			assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+			local id, active = launched(state)
+			finish(state, id, active, id == 'wan' and 80 or 20)
+		end
+		assert(wan_manager.reconcile_speedtests(state, 'speedtest_done'))
+		eq(next(state.active_speedtests), nil)
+
+		-- WAN fails: the modem now carries traffic. Its standby result is fresh,
+		-- but it is re-tested now that it is in use.
+		clock.t = 1000
+		set_online(model, { modem_primary = true })
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		local id = launched(state)
+		eq(id, 'modem_primary')
+		eq(model:snapshot().wan_runtime.active_speedtest.reason, 'active_uplink_changed')
+		eq(model:snapshot().wan_runtime.speedtests.modem_primary.in_use, true)
+		eq(extra.weight_applies, nil)
+	end)
+end
+
+function tests.test_every_backhaul_mode_skips_offline_standby()
+	runfibers.run(function(scope)
+		local clock, extra = { t = 100 }, {}
+		local model = every_backhaul_model()
+		set_online(model, { wan = true })
+		local state = active_scope_state(scope, model, clock, extra)
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		local id, active = launched(state)
+		eq(id, 'wan')
+		finish(state, id, active, 80)
+		assert(wan_manager.reconcile_speedtests(state, 'speedtest_done'))
+		eq(next(state.active_speedtests), nil, 'an offline standby is not tested')
+		eq(model:snapshot().wan_runtime.speedtests.modem_primary.last_skip_reason, 'not_online')
+	end)
+end
+
+local function add_member(model, id, iface, metric, online)
+	model:update(function(s)
+		s.wan.configured_members[id] = { interface = iface, metric = metric }
+		s.backhaul.uplinks[id] = { id = id, interface = iface, state = online and 'online' or 'offline',
+			usable = online, metric = metric, path_address = { family = 'ipv4', address = '192.0.2.' .. metric } }
+		s.backhaul.active_uplink = active_uplink.select(s, s.backhaul.uplinks)
+		return s
+	end)
+end
+
+function tests.test_every_backhaul_mode_shares_test_time_fairly_when_tests_overrun_the_interval()
+	runfibers.run(function(scope)
+		local clock, extra = { t = 100 }, {}
+		local model = every_backhaul_model()
+		add_member(model, 'modem_secondary', 'modem_secondary', 3, true)
+		model:update(function(s) s.wan.load_balancing.speedtests.interval_s = 1; return s end)
+		local state = active_scope_state(scope, model, clock, extra)
+		local counts = {}
+		for _ = 1, 9 do
+			assert(wan_manager.reconcile_speedtests(state, 'speedtest_done'))
+			local id, active = launched(state)
+			counts[id] = (counts[id] or 0) + 1
+			clock.t = clock.t + 1.1 -- each test outlasts interval_s
+			finish(state, id, active, 10)
+		end
+		for _, id in ipairs({ 'wan', 'modem_primary', 'modem_secondary' }) do
+			ok((counts[id] or 0) >= 2, id .. ' must not be starved, tested ' .. tostring(counts[id] or 0) .. ' times')
+		end
+	end)
+end
+
+function tests.test_every_backhaul_mode_tests_a_shared_interface_once()
+	runfibers.run(function(scope)
+		local clock, extra = { t = 100 }, {}
+		local model = every_backhaul_model()
+		-- A second member on the wired interface, at a higher metric.
+		add_member(model, 'wan_alias', 'wan', 5, true)
+		local state = active_scope_state(scope, model, clock, extra)
+		local tested = {}
+		for _ = 1, 3 do
+			assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+			local id, active = next(state.active_speedtests)
+			if not id then break end
+			tested[#tested + 1] = id
+			finish(state, id, active, 10)
+		end
+		eq(#tested, 2, 'one download per physical path')
+		for _, id in ipairs(tested) do ok(id ~= 'wan_alias', 'the lower-metric owner tests a shared interface') end
+		local runtime = model:snapshot().wan_runtime
+		eq(runtime.speedtests.wan.in_use, true)
+		eq(runtime.speedtests.wan_alias.last_skip_reason, 'shares_interface')
+	end)
+end
+
+function tests.test_in_use_follows_the_interface_carrying_traffic()
+	local policy = require 'services.net.wan_policy'
+	local s = { backhaul = { active_uplink = {
+		status = 'uplink', uplink_id = 'wan', uplink_ids = { 'wan' }, interface = 'wan',
+	} } }
+	eq(policy.uplink_in_use(s, { uplink_id = 'wan', request = { interface = 'wan' } }), true)
+	eq(policy.uplink_in_use(s, { uplink_id = 'wan_alias', request = { interface = 'wan' } }), true,
+		'another member on the same interface measures the same path')
+	eq(policy.uplink_in_use(s, { uplink_id = 'modem', request = { interface = 'modem' } }), false)
 end
 
 return tests

@@ -168,6 +168,9 @@ local function start_speedtest_for_uplink(state, uplink)
 			generation = generation,
 			id = id,
 			uplink_id = uplink_id,
+			-- Whether this path carried traffic when tested; a standby result shows
+			-- what is left on the table, an in-use one is measured under load.
+			in_use = wan_policy.uplink_in_use(snap, uplink),
 			interface = uplink.request.interface,
 			device = uplink.request.device,
 			metric = uplink.request.metric,
@@ -226,6 +229,119 @@ local function apply_weights_if_ready(state, generation)
 	return start_live_weight_apply(state, weights)
 end
 
+local function cancel_active_speedtest(state, uplink_id, why)
+	local active = state.active_speedtests[uplink_id]
+	if active and active.handle and type(active.handle.cancel) == 'function' then
+		active.handle:cancel(why)
+	end
+	state.active_speedtests[uplink_id] = nil
+end
+
+local ACTIVE_SCOPE_WEIGHTS_REASON = 'speedtest_scope_active'
+
+-- Why no weights are computed when live weights are off.
+local function weights_off_reason(snap)
+	if wan_policy.speedtest_scope(snap) == 'active' then return ACTIVE_SCOPE_WEIGHTS_REASON end
+	return 'live_weights_disabled'
+end
+
+-- Record that mwan3 weights are deliberately left alone.
+local function mark_weights_not_applicable(state, generation, reason)
+	reason = reason or ACTIVE_SCOPE_WEIGHTS_REASON
+	state.model:update(function(s)
+		s.wan_runtime = s.wan_runtime or { uplinks = {}, speedtests = {}, live_weights = {} }
+		local lw = s.wan_runtime.live_weights
+		if type(lw) == 'table' and lw.state == 'not_applicable' and lw.reason == reason
+			and lw.generation == generation then
+			return s
+		end
+		s.wan_runtime.live_weights = {
+			state = 'not_applicable', reason = reason, generation = generation,
+			updated_at = now(state),
+		}
+		return s
+	end)
+end
+
+-- Remember which uplink the active-scope results describe, so a later change
+-- of active uplink (failover or failback) is noticed.
+local function acknowledge_active_uplink(state, uplink_id, reason)
+	state.model:update(function(s)
+		s.wan_runtime = s.wan_runtime or { uplinks = {}, speedtests = {}, live_weights = {} }
+		s.wan_runtime.active_speedtest = { uplink_id = uplink_id, reason = reason, acknowledged_at = now(state) }
+		return s
+	end)
+end
+
+local function acknowledge_if_fresh(state, current, uplink, due_reason)
+	if due_reason ~= 'fresh_same_path' and due_reason ~= 'fresh_weak_path' then return end
+	local acked = current.wan_runtime and current.wan_runtime.active_speedtest
+	if type(acked) ~= 'table' or acked.uplink_id ~= uplink.uplink_id then
+		acknowledge_active_uplink(state, uplink.uplink_id, due_reason)
+	end
+end
+
+-- The member carrying most traffic, which is re-tested when traffic moves to it.
+local function is_lead_uplink(snap, uplink)
+	local active = wan_policy.active_uplink(snap)
+	return active ~= nil and active.status == 'uplink' and active.uplink_id == uplink.uplink_id
+end
+
+local function skip_uplink(state, snap, uplink, generation, trigger, online_reason)
+	local skip_reason
+	if wan_policy.uplink_online(snap, uplink) then
+		skip_reason = online_reason
+	elseif wan_policy.uplink_observed_status(snap, uplink) == nil then
+		skip_reason = 'waiting_for_observation'
+	else
+		skip_reason = 'not_online'
+	end
+	mark_speedtest_skipped(state, uplink, generation, skip_reason)
+	report_speedtest_skip(state, skip_reason, trigger, uplink, generation)
+end
+
+local function reconcile_active_scope(state, reason, snap, uplinks, generation)
+	local active = wan_policy.active_uplink(snap)
+	local active_id = active and active.status == 'uplink' and active.uplink_id or nil
+	local target
+	for i = 1, #uplinks do
+		local uplink = uplinks[i]
+		if uplink.uplink_id == active_id then
+			target = uplink
+		else
+			-- Standby uplinks are never tested: that spends data on SIMs not in use.
+			cancel_active_speedtest(state, uplink.uplink_id, 'not_active_uplink')
+			skip_uplink(state, snap, uplink, generation, reason, 'not_active_uplink')
+		end
+	end
+	mark_weights_not_applicable(state, generation)
+	if not target then return true, nil end
+
+	if not wan_policy.uplink_online(snap, target) then
+		if wan_policy.uplink_observed_status(snap, target) ~= nil then
+			cancel_active_speedtest(state, target.uplink_id, 'uplink_offline')
+		end
+		skip_uplink(state, snap, target, generation, reason, 'not_online')
+		return true, nil
+	end
+
+	local current = state.model:snapshot()
+	local due, due_reason = wan_policy.active_speedtest_due(current, target,
+		{ generation = generation, now = now(state) })
+	if due then
+		if next(state.active_speedtests) == nil then
+			local ok, err = start_speedtest_for_uplink(state, target)
+			if ok ~= true then return nil, err end
+			acknowledge_active_uplink(state, target.uplink_id, due_reason)
+		end
+		return true, nil
+	end
+	acknowledge_if_fresh(state, current, target, due_reason)
+	mark_speedtest_skipped(state, target, generation, due_reason or 'not_due')
+	report_speedtest_skip(state, due_reason or 'not_due', reason, target, generation)
+	return true, nil
+end
+
 function M.reconcile_speedtests(state, reason)
 	local snap = state.model:snapshot()
 	if not wan_policy.speedtest_enabled(snap) then
@@ -265,6 +381,10 @@ function M.reconcile_speedtests(state, reason)
 		return s
 	end)
 
+	if wan_policy.speedtest_scope(snap) == 'active' then
+		return reconcile_active_scope(state, reason, snap, uplinks, generation)
+	end
+
 	-- Release tests on uplinks observed offline before choosing the next one to launch.
 	for i = 1, #uplinks do
 		local uplink = uplinks[i]
@@ -278,6 +398,8 @@ function M.reconcile_speedtests(state, reason)
 	end
 
 	local speedtest_pending = false
+	local candidates = {}
+	local runtime_tests = snap.wan_runtime and snap.wan_runtime.speedtests or {}
 	for i = 1, #uplinks do
 		local uplink = uplinks[i]
 		local observed_status = wan_policy.uplink_observed_status(snap, uplink)
@@ -286,23 +408,50 @@ function M.reconcile_speedtests(state, reason)
 			local skip_reason = observed_status == nil and 'waiting_for_observation' or 'not_online'
 			mark_speedtest_skipped(state, uplink, generation, skip_reason)
 			report_speedtest_skip(state, skip_reason, reason, uplink, generation)
+		elseif not wan_policy.interface_owner(snap, uplink) then
+			-- Another member owns this interface and measures the same path.
+			cancel_active_speedtest(state, uplink.uplink_id, 'shares_interface')
+			mark_speedtest_skipped(state, uplink, generation, 'shares_interface')
+			report_speedtest_skip(state, 'shares_interface', reason, uplink, generation)
 		else
-			local due, due_reason = wan_policy.speedtest_due(state.model:snapshot(), uplink,
-				{ generation = generation, now = now(state) })
+			local current = state.model:snapshot()
+			local lead = is_lead_uplink(snap, uplink)
+			local due_fn = lead and wan_policy.active_speedtest_due or wan_policy.speedtest_due
+			local due, due_reason = due_fn(current, uplink, { generation = generation, now = now(state) })
 			if due then
 				speedtest_pending = true
-				-- The HAL runs speed tests serially, but each caller deadline starts
-				-- at launch. Launch one at a time; completion reconciles the next.
-				if next(state.active_speedtests) == nil then
-					local ok, err = start_speedtest_for_uplink(state, uplink)
-					if ok ~= true then return nil, err end
-				end
+				local rec = runtime_tests[uplink.uplink_id]
+				candidates[#candidates + 1] = {
+					uplink = uplink, lead = lead, reason = due_reason, order = i,
+					-- A failover re-test jumps the queue; otherwise the longest-untested goes first.
+					urgent = lead and due_reason == 'active_uplink_changed',
+					last = type(rec) == 'table' and tonumber(rec.started_at) or -math.huge,
+				}
 			else
+				if lead then acknowledge_if_fresh(state, current, uplink, due_reason) end
 				if due_reason == 'running' then speedtest_pending = true end
 				mark_speedtest_skipped(state, uplink, generation, due_reason or 'not_due')
 				report_speedtest_skip(state, due_reason or 'not_due', reason, uplink, generation)
 			end
 		end
+	end
+	-- The HAL runs speed tests serially, but each caller deadline starts at
+	-- launch. Launch one at a time, fairly; completion reconciles the next.
+	if #candidates > 0 and next(state.active_speedtests) == nil then
+		table.sort(candidates, function(x, y)
+			if x.urgent ~= y.urgent then return x.urgent end
+			if x.last ~= y.last then return x.last < y.last end
+			if x.lead ~= y.lead then return x.lead end
+			return x.order < y.order
+		end)
+		local pick = candidates[1]
+		local ok, err = start_speedtest_for_uplink(state, pick.uplink)
+		if ok ~= true then return nil, err end
+		if pick.lead then acknowledge_active_uplink(state, pick.uplink.uplink_id, pick.reason) end
+	end
+	if not wan_policy.live_weights_enabled(snap) then
+		mark_weights_not_applicable(state, generation, weights_off_reason(snap))
+		return true, nil
 	end
 	if not speedtest_pending then return apply_weights_if_ready(state, generation) end
 	return true, nil
@@ -376,7 +525,10 @@ function M.handle_speedtest_done(state, ev)
 		rec.id = ev.speedtest_id
 		rec.ok = result.ok == true
 		rec.err = result.err
-		rec.interface = result.interface or (work_result.request and work_result.request.interface) or rec.interface
+		-- Keep the product interface id: telemetry and active_uplink name it. The HAL
+		-- may report its generated OpenWrt name, kept separately.
+		rec.interface = rec.interface or (work_result.request and work_result.request.interface) or result.interface
+		rec.hal_interface = result.interface
 		rec.device = result.device or (work_result.request and work_result.request.device) or rec.device
 		rec.metric = rec.metric or (work_result.request and work_result.request.metric) or 1
 		rec.completed_at = completed_at
@@ -436,6 +588,10 @@ function M.handle_speedtest_done(state, ev)
 		return s
 	end)
 	local snap = state.model:snapshot()
+	if not wan_policy.live_weights_enabled(snap) then
+		mark_weights_not_applicable(state, ev.generation, weights_off_reason(snap))
+		return true, nil
+	end
 	local weights, werr = wan_policy.compute_weights(snap, ev.generation, { now = now(state) })
 	if not weights then
 		state.model:update(function(s)

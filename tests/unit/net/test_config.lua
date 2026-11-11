@@ -568,4 +568,86 @@ function tests.test_section_one_semantics_reach_hal_unchanged()
 	eq(captured.dns.service_discovery.shared_devices.backend, nil)
 end
 
+function tests.test_speedtest_scope_accepts_all_and_active()
+	for _, scope in ipairs({ 'all', 'active' }) do
+		local cfg = sample_cfg()
+		cfg.wan.load_balancing.speedtests = { enabled = true, scope = scope }
+		local intent, err = config.normalise(cfg, { rev = 1 })
+		ok(intent, tostring(err))
+		eq(intent.wan.load_balancing.speedtests.scope, scope)
+	end
+end
+
+function tests.test_speedtest_scope_rejects_unknown_values()
+	for _, scope in ipairs({ 'standby', 1, true }) do
+		local cfg = sample_cfg()
+		cfg.wan.load_balancing.speedtests = { enabled = true, scope = scope }
+		local intent, err = config.normalise(cfg, { rev = 1 })
+		eq(intent, nil, 'scope ' .. tostring(scope))
+		ok(err and err:find('speedtests%.scope', 1, false), 'scope error expected, got ' .. tostring(err))
+	end
+end
+
+function tests.test_speedtest_scope_is_validated_wherever_speedtests_are_read()
+	-- wan_policy reads speedtest settings from load_balancing and from runtime,
+	-- under both spellings; a bad scope in any of them must be rejected.
+	for _, where in ipairs({
+		{ 'load_balancing', 'speedtest' }, { 'runtime', 'speedtests' }, { 'runtime', 'speedtest' },
+	}) do
+		local cfg = sample_cfg()
+		cfg.wan[where[1]] = cfg.wan[where[1]] or {}
+		cfg.wan[where[1]][where[2]] = { enabled = true, scope = 'actvie' }
+		local intent, err = config.normalise(cfg, { rev = 1 })
+		local label = where[1] .. '.' .. where[2]
+		eq(intent, nil, label)
+		ok(err and err:find(where[1] .. '%.' .. where[2] .. '%.scope', 1, false), label .. ': got ' .. tostring(err))
+
+		cfg = sample_cfg()
+		cfg.wan[where[1]] = cfg.wan[where[1]] or {}
+		cfg.wan[where[1]][where[2]] = { enabled = true, scope = 'active' }
+		ok(config.normalise(cfg, { rev = 1 }), label .. ' accepts active')
+	end
+end
+
+function tests.test_speedtest_settings_may_only_be_set_in_one_place()
+	local cfg = sample_cfg()
+	cfg.wan.load_balancing.speedtests = { enabled = false }
+	cfg.wan.runtime = { speedtests = { enabled = true, scope = 'active' } }
+	local intent, err = config.normalise(cfg, { rev = 1 })
+	eq(intent, nil)
+	ok(err and err:find('speedtest', 1, true) and err:find('one place', 1, true), 'got ' .. tostring(err))
+
+	cfg = sample_cfg()
+	cfg.wan.load_balancing.speedtests = { enabled = true }
+	cfg.wan.load_balancing.speedtest = { scope = 'active' }
+	eq(config.normalise(cfg, { rev = 1 }), nil, 'both spellings in one section also conflict')
+end
+
+function tests.test_speedtest_live_weights_must_be_boolean()
+	local cfg = sample_cfg()
+	cfg.wan.load_balancing.speedtests = { enabled = true, scope = 'all', live_weights = false }
+	ok(config.normalise(cfg, { rev = 1 }), 'false is accepted')
+	cfg.wan.load_balancing.speedtests.live_weights = 'no'
+	local intent, err = config.normalise(cfg, { rev = 1 })
+	eq(intent, nil)
+	ok(err and err:find('speedtests%.live_weights', 1, false), 'got ' .. tostring(err))
+end
+
+function tests.test_bigbox_configs_speedtest_every_backhaul_without_weights()
+	local cjson = require 'cjson.safe'
+	for _, name in ipairs({ 'bigbox-ss', 'bigbox-v1-cm', 'bigbox-v1-cm-2' }) do
+		local doc = ok(cjson.decode(ok(read_project_file('src/configs/' .. name .. '.json'))))
+		local intent, err = config.normalise(doc.net, { generation = 1 })
+		ok(intent, name .. ': ' .. tostring(err))
+		local sp = intent.wan.load_balancing.speedtests
+		eq(sp.enabled, true, name)
+		eq(sp.scope, 'all', name)
+		eq(sp.live_weights, false, name .. ': weights would load-balance across failover tiers')
+		local pipes = doc.metrics.data.pipelines
+		ok(pipes.speedtest, name .. ' speedtest pipeline')
+		ok(pipes.active_uplink, name .. ' active_uplink pipeline')
+		ok(pipes.speedtest_in_use, name .. ' speedtest_in_use pipeline')
+	end
+end
+
 return tests

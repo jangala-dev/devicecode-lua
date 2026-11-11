@@ -1154,7 +1154,10 @@ function tests.test_bigbox_configs_render_strict_wan_modem_failover()
 		local doc = ok(cjson.decode(ok(read_project_file('src/configs/' .. target .. '.json'))), target .. ' must decode')
 		local net_intent = ok(net_config.normalise(doc.net, { rev = 1 }))
 
-		eq(wan_policy.speedtest_enabled({ wan = net_intent.wan }), false, target .. ' speed tests')
+		-- Speedtests may run on every backhaul, but their results must never feed
+		-- live weights: those rewrite mwan3's chain across all members, ignoring
+		-- metric, and would load-balance across the failover tiers.
+		eq(wan_policy.live_weights_enabled({ wan = net_intent.wan }), false, target .. ' live weights')
 		local ctx = ok(names.allocate(net_intent))
 		local changes = ok(mwan3.build_changes(net_intent, ctx))
 		for mid, metric in pairs(order) do
@@ -1242,6 +1245,53 @@ function tests.test_mwan3_interfaces_start_online_unless_configured()
 	eq(states.wan, 'offline', 'health-level override kept')
 end
 
+
+function tests.test_mwan_status_maps_live_policies_back_to_semantic_names()
+	local ctx = ok(names.allocate({
+		interfaces = { wan = {}, modem_primary = {}, modem_secondary = {} },
+		wan = { members = {
+			wan = { interface = 'wan' },
+			modem_primary = { interface = 'modem_primary' },
+			modem_secondary = { interface = 'modem_secondary' },
+		} },
+	}))
+	local wan_if = ctx:mwan_iface('wan')
+	local pri_if = ctx:mwan_iface('modem_primary')
+	local sec_if = ctx:mwan_iface('modem_secondary')
+	local policy = ctx:mwan_policy('balanced')
+	ok(pri_if ~= 'modem_primary', 'long member names are shortened for mwan3')
+	local observed = openwrt_provider._test.normalise_mwan3_status({
+		interfaces = {
+			[wan_if] = { status = 'offline', enabled = true },
+			[pri_if] = { status = 'online', enabled = true },
+			[sec_if] = { status = 'online', enabled = true },
+		},
+		policies = {
+			ipv4 = { [policy] = { { interface = pri_if, percent = 100 } } },
+			ipv6 = { [policy] = { { interface = 'unreachable' } } },
+		},
+	}, ctx)
+	local v4 = ok(observed.policies_by_semantic and observed.policies_by_semantic.ipv4
+		and observed.policies_by_semantic.ipv4.balanced, 'semantic ipv4 balanced policy expected')
+	eq(#v4, 1)
+	eq(v4[1].interface, 'modem_primary')
+	eq(v4[1].percent, 100)
+	local v6 = observed.policies_by_semantic.ipv6.balanced
+	eq(v6[1].interface, 'unreachable', 'routing fallbacks keep their mwan3 name')
+	eq(v6[1].percent, nil)
+	eq(observed.policies.ipv4[policy][1].interface, pri_if, 'raw policies are kept')
+end
+
+function tests.test_mwan_status_without_name_context_keeps_policy_names()
+	local observed = openwrt_provider._test.normalise_mwan3_status({
+		interfaces = { wan = { status = 'online' } },
+		policies = { ipv4 = { balanced = { { interface = 'wan', percent = '100' } }, odd = 'text' }, bad = 7 },
+	})
+	eq(observed.policies_by_semantic.ipv4.balanced[1].interface, 'wan')
+	eq(observed.policies_by_semantic.ipv4.balanced[1].percent, 100)
+	eq(observed.policies_by_semantic.ipv4.odd, nil, 'non-list policies are dropped')
+	eq(observed.policies_by_semantic.bad, nil)
+end
 
 function tests.test_interface_status_reads_netifd_ipv4_address_field()
 	-- netifd reports IPv4 as "ipv4-address" (as `ifstatus wan` shows on a box).

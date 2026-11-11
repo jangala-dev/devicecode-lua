@@ -177,6 +177,47 @@ local function normalise_members(t)
 	return out, nil
 end
 
+local SPEEDTEST_SCOPES = { all = true, active = true }
+
+-- `scope = "active"` tests only the uplink carrying traffic and leaves
+-- mwan3 weights alone; `all` (the default) tests every online uplink and
+-- feeds the results into live weights.  wan_policy reads speedtest settings
+-- from load_balancing and runtime under both spellings, so a mistyped scope is
+-- rejected in all of them rather than silently falling back to `all`.
+local function check_speedtest_scope(t)
+	local seen
+	for _, section in ipairs({ 'load_balancing', 'runtime' }) do
+		local sec = t[section]
+		if schema.is_plain_table(sec) then
+			for _, key in ipairs({ 'speedtests', 'speedtest' }) do
+				if sec[key] ~= nil then
+					local here = section .. '.' .. key
+					if seen then
+						return nil, schema.err({ 'net', 'wan', section, key },
+							'speedtest settings may only be set in one place (also set at net.wan.' .. seen .. ')')
+					end
+					seen = here
+				end
+			end
+		end
+	end
+	for _, section in ipairs({ 'load_balancing', 'runtime' }) do
+		local sec = t[section]
+		if schema.is_plain_table(sec) then
+			for _, key in ipairs({ 'speedtests', 'speedtest' }) do
+				local sp = sec[key]
+				if schema.is_plain_table(sp) and sp.scope ~= nil and not SPEEDTEST_SCOPES[sp.scope] then
+					return nil, schema.err({ 'net', 'wan', section, key, 'scope' }, 'must be all or active')
+				end
+				if schema.is_plain_table(sp) and sp.live_weights ~= nil and type(sp.live_weights) ~= 'boolean' then
+					return nil, schema.err({ 'net', 'wan', section, key, 'live_weights' }, 'must be true or false')
+				end
+			end
+		end
+	end
+	return true, nil
+end
+
 function M.normalise(v)
 	local t, err = schema.optional_plain_table(v, { 'net', 'wan' })
 	if not t then return nil, err end
@@ -190,6 +231,8 @@ function M.normalise(v)
 	if last_resort ~= nil and last_resort ~= 'default' and last_resort ~= 'unreachable' and last_resort ~= 'blackhole' then
 		return nil, schema.err({ 'net', 'wan', 'last_resort' }, 'must be default, unreachable or blackhole')
 	end
+	local scope_ok, scope_err = check_speedtest_scope(t)
+	if not scope_ok then return nil, scope_err end
 	local out = {
 		enabled = t.enabled ~= false,
 		members = members,

@@ -264,4 +264,95 @@ function tests.test_retry_backoff_only_suppresses_same_path()
 	eq(reason, 'due')
 end
 
+function tests.test_uplink_status_uses_the_members_own_record_when_ids_and_interfaces_collide()
+	-- Cyclic collision: each member's id is the other member's interface, so a
+	-- lookup that accepts id and interface matches in one hash-order pass reads
+	-- the wrong record for one of the two members whatever the order.
+	local s = {
+		generation = 1,
+		wan = {
+			configured_members = {
+				primary = { interface = 'wan', metric = 1 },
+				wan = { interface = 'primary', metric = 2 },
+			},
+			load_balancing = { speedtests = { enabled = true, scope = 'active' } },
+		},
+		backhaul = { uplinks = {
+			primary = { id = 'primary', interface = 'wan', state = 'online', usable = true },
+			wan = { id = 'wan', interface = 'primary', state = 'offline', usable = false },
+		} },
+		wan_runtime = { speedtests = {} },
+	}
+	local by_id = uplinks_by_id(s)
+	eq(policy.uplink_observed_status(s, by_id.primary).id, 'primary')
+	eq(policy.uplink_online(s, by_id.primary), true, 'primary carries traffic on interface wan')
+	eq(policy.uplink_observed_status(s, by_id.wan).id, 'wan')
+	eq(policy.uplink_online(s, by_id.wan), false)
+
+	-- Without a record keyed by the member id, an interface match wins over an id alias.
+	s.backhaul.uplinks = {
+		a = { id = 'x', interface = 'wan', state = 'online', usable = true },
+		b = { id = 'wan', interface = 'other', state = 'offline', usable = false },
+	}
+	local stray = { uplink_id = 'stray', request = { interface = 'wan' } }
+	eq(policy.uplink_observed_status(s, stray).interface, 'wan')
+end
+function tests.test_speedtest_enabled_and_options_come_from_the_same_entry()
+	local s = snapshot()
+	s.wan.load_balancing.speedtests = { enabled = false }
+	s.wan.runtime = { speedtests = { enabled = true, scope = 'active' } }
+	eq(policy.speedtest_enabled(s), false, 'the first entry decides enablement as it decides options')
+	eq(policy.speedtest_scope(s), 'all')
+
+	s.wan.load_balancing.speedtests = nil
+	eq(policy.speedtest_enabled(s), true)
+	eq(policy.speedtest_scope(s), 'active')
+
+	s.wan.load_balancing.speedtests = true
+	eq(policy.speedtest_enabled(s), true, 'a boolean entry still enables')
+	eq(policy.speedtest_scope(s), 'all', 'a boolean entry carries no options')
+end
+
+function tests.test_live_weights_follow_scope_and_setting()
+	local s = snapshot()
+	eq(policy.live_weights_enabled(s), true, 'scope all applies weights by default, as before')
+	s.wan.load_balancing.speedtests.live_weights = false
+	eq(policy.live_weights_enabled(s), false)
+	s.wan.load_balancing.speedtests.live_weights = true
+	s.wan.load_balancing.speedtests.scope = 'active'
+	eq(policy.live_weights_enabled(s), false, 'active scope never applies weights')
+end
+
+function tests.test_speedtest_wakes_cover_every_tested_online_uplink()
+	local s = snapshot()
+	s.wan.load_balancing.speedtests.interval_s = 100
+	s.wan.load_balancing.speedtests.live_weights = false
+	s.backhaul.uplinks.modem_primary.state = 'online'
+	s.backhaul.uplinks.modem_primary.usable = true
+	s.backhaul.active_uplink = { status = 'uplink', uplink_id = 'wan', uplink_ids = { 'wan' } }
+	s.wan_runtime.speedtests.wan = keyed_success(s, 'wan', 80, 10)
+	s.wan_runtime.speedtests.modem_primary = keyed_success(s, 'modem_primary', 20, 30)
+	s.wan_runtime.speedtests.modem_primary.retry_after = 50
+	local function wakes(now)
+		local out = {}
+		for _, w in ipairs(policy.speedtest_wakes(s, now)) do out[w.uplink_id] = w.wake_at end
+		return out
+	end
+	local w = wakes(40)
+	eq(w.wan, 110, 'expiry of the cached result')
+	eq(w.modem_primary, 50, 'a pending retry comes first')
+	w = wakes(60)
+	eq(w.modem_primary, 130, 'after the retry passes, the expiry')
+
+	s.wan.load_balancing.speedtests.scope = 'active'
+	w = wakes(40)
+	eq(w.wan, 110)
+	eq(w.modem_primary, nil, 'active scope only times the active uplink')
+
+	s.wan.load_balancing.speedtests.scope = 'all'
+	s.backhaul.uplinks.modem_primary.state = 'offline'
+	s.backhaul.uplinks.modem_primary.usable = false
+	eq(wakes(40).modem_primary, nil, 'offline uplinks are not timed')
+end
+
 return tests
