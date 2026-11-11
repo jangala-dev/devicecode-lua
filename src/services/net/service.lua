@@ -227,6 +227,16 @@ local function log_mwan_backhaul_transitions(state, before, after, trigger)
 	end
 end
 
+-- Telemetry: which backhaul carries traffic, named like the speedtest
+-- namespace (net.<interface>.speedtest), or the status when none does. The
+-- metrics pipeline (any_change) drops repeats, so sending it again is cheap.
+local function publish_active_uplink_metric(state, cur)
+	if type(cur) ~= 'table' or cur.status == 'unknown' then return end
+	if not state.svc or type(state.svc.obs_metric) ~= 'function' then return end
+	local value = cur.status == 'uplink' and (cur.interface or cur.uplink_id) or cur.status
+	state.svc:obs_metric('active_uplink', { value = tostring(value), namespace = { 'net', 'active_uplink' } })
+end
+
 -- Checked on every publish, so any path that recomputes backhaul (observations,
 -- GSM changes, applies) reports a move of the active uplink.
 function report_active_uplink_change(state)
@@ -249,12 +259,7 @@ function report_active_uplink_change(state)
 		trigger = trigger,
 	}
 	obs_event(state.svc, 'active_uplink_changed', model_mod.deep_copy(payload))
-	-- Telemetry: which backhaul carries traffic, named like the speedtest
-	-- namespace (net.<interface>.speedtest), or the status when none does.
-	if cur.status ~= 'unknown' and state.svc and type(state.svc.obs_metric) == 'function' then
-		local value = cur.status == 'uplink' and (cur.interface or cur.uplink_id) or cur.status
-		state.svc:obs_metric('active_uplink', { value = tostring(value), namespace = { 'net', 'active_uplink' } })
-	end
+	publish_active_uplink_metric(state, cur)
 	payload.what = 'active_uplink_changed'
 	payload.summary = string.format('active uplink %s -> %s (%s)',
 		tostring(from or '-'), tostring(to or '-'), tostring(cur.source or 'no source'))
@@ -1144,13 +1149,17 @@ local function handle_speedtest_done(state, ev)
 				value = rec.peak_mbps,
 				namespace = { 'net', rec.interface or ev.uplink_id, 'speedtest' },
 			})
-			-- Whether that path carried traffic when tested, so standby results
-			-- (what is left on the table) can be told from in-use ones.
+			-- Whether that path carried traffic when the test started, so standby
+			-- results (what is left on the table) can be told from in-use ones.
 			state.svc:obs_metric('speedtest_in_use', {
 				value = rec.in_use == true,
 				namespace = { 'net', rec.interface or ev.uplink_id, 'speedtest_in_use' },
 			})
 		end
+		-- Refresh with each result: metrics drops samples that arrive before it is
+		-- configured, and a stable box would otherwise send no new value until a
+		-- failover.
+		publish_active_uplink_metric(state, snap.backhaul and snap.backhaul.active_uplink)
 		if rec and rec.ok ~= true and rec.retry_after then
 			local delay_s = math.max(1, (tonumber(rec.retry_after) or (now() + (tonumber(rec.retry_delay_s) or 10))) - now())
 			local rok, rerr = schedule_speedtest_retry(state, tostring(ev.uplink_id or ''), ev.generation, delay_s, rec.err or 'speedtest_failed')

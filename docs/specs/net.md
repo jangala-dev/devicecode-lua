@@ -548,7 +548,7 @@ Speedtest settings live in one place, normally `wan.load_balancing.speedtests` (
 
 `scope` chooses which uplinks are tested:
 
-- `all` (default): every online uplink is tested in turn, the active uplink first. Results feed live weights unless `live_weights = false`.
+- `all` (default): every online uplink is tested in turn. When several are due, the one tested longest ago goes first (ties go to the active uplink), so no backhaul is starved. Members sharing an interface measure one path, so only its owner (lowest metric) is tested; the others are skipped with `shares_interface`. Results feed live weights unless `live_weights = false`.
 - `active`: only `active_uplink.uplink_id` is tested, and live weights are never changed (`live_weights.reason = 'speedtest_scope_active'`). Standby uplinks are skipped with `not_active_uplink`, and a test still running on an uplink that stops carrying traffic is cancelled.
 
 `live_weights` (default `true`; ignored by `active`) controls whether `all` feeds results into mwan3 live weights. Live weights rewrite the policy chain across every member they are given, ignoring metric, so under strict failover they would load-balance across the failover tiers. BigBox therefore runs `scope = "all"` with `live_weights = false` (`live_weights.reason = 'live_weights_disabled'`): every backhaul is measured, standby SIMs included, and routing is left to mwan3's metrics.
@@ -557,13 +557,15 @@ In both scopes:
 
 - Each tested uplink is re-tested every `interval_s`. Observations are event-led, so the service keeps a timer per uplink for its next deadline: the cached result expiring or a failure retry.
 - The uplink carrying traffic is also re-tested when traffic moves to it. A move does not re-test an uplink whose last success is younger than `failover_retest_min_s` (default 300), so a flapping link does not spend modem data on every flap.
-- Each speedtest record carries `in_use`: whether that path carried traffic when tested.
+- Each speedtest record carries `in_use`: whether that path (its interface) carried traffic when the test started. A test that starts on standby and fails over mid-download still reports `false`.
 
 Telemetry:
 
+Telemetry names the product interface id (for example `modem_primary`), never the generated OpenWrt name, so the series can be joined:
+
 - `speedtest` (`net.<interface>.speedtest`): Mbps for each successful test.
 - `speedtest_in_use` (`net.<interface>.speedtest_in_use`): whether that test ran on the backhaul carrying traffic. Standby results show what is left on the table; in-use results are measured under client load.
-- `active_uplink` (`net.active_uplink`): the interface carrying traffic, or `last_resort` / `none`, published on each change.
+- `active_uplink` (`net.active_uplink`): the interface carrying traffic, or `last_resort` / `none`. It is sent on each change and again with each speedtest result, because metrics drops samples received before it is configured. The `any_change` pipeline drops the repeats.
 
 ## Observation and drift
 

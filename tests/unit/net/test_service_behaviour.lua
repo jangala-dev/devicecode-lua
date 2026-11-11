@@ -1164,7 +1164,9 @@ local function start_active_scope_service(scope, speedtest_opts)
 	local b = busmod.new()
 	local conn = b:connect()
 	local h = { speedtests = {}, weights = {}, reader = b:connect(), fail_next = false, rev = 22,
-		addresses = { wan_a = '203.0.113.10', wan_b = '10.1.2.3' } }
+		addresses = { wan_a = '203.0.113.10', wan_b = '10.1.2.3' },
+		-- Like the OpenWrt HAL, results may name the generated interface.
+		hal_names = {} }
 	local obs_tx, obs_rx = mailbox.new(8, { full = 'drop_oldest' })
 	local hal = success_hal({})
 	hal.speedtest_op = function (_, req)
@@ -1173,7 +1175,7 @@ local function start_active_scope_service(scope, speedtest_opts)
 			h.fail_next = false
 			return op.always({ ok = false, err = 'test_failure', interface = req.interface })
 		end
-		return op.always({ ok = true, interface = req.interface, device = req.device,
+		return op.always({ ok = true, interface = h.hal_names[req.interface] or req.interface, device = req.device,
 			peak_mbps = 10, data_mib = 1, duration_s = 0.1 })
 	end
 	hal.apply_live_weights_op = function (_, req)
@@ -1445,15 +1447,75 @@ function tests.test_active_uplink_and_speedtest_in_use_telemetry()
 		eq(tags.wan_a, true, 'the active backhaul was tested in use')
 		eq(tags.wan_b, false, 'the standby backhaul was tested on standby')
 
+		-- The value is also re-sent with each speedtest; skip those repeats.
+		local function next_change(from)
+			for _ = 1, 10 do
+				local p = next_payload(active_sub)
+				if not p then return nil end
+				if p.value ~= from then return p end
+			end
+		end
 		h.observe(false, true)
-		local moved = ok(next_payload(active_sub), 'active_uplink metric on failover')
+		local moved = ok(next_change('wan_a'), 'active_uplink metric on failover')
 		eq(moved.value, 'wan_b')
 		h.observe(false, false)
-		local none = ok(next_payload(active_sub), 'active_uplink metric when nothing is online')
+		local none = ok(next_change('wan_b'), 'active_uplink metric when nothing is online')
 		eq(none.value, 'last_resort')
 
 		active_sub:unsubscribe()
 		in_use_sub:unsubscribe()
+		h.stop()
+	end)
+end
+
+
+function tests.test_speedtest_and_active_uplink_telemetry_share_product_interface_names()
+	fibers.run(function (scope)
+		local h = start_active_scope_service(scope, { scope = 'all', live_weights = false, interval_s = 60 })
+		h.hal_names.wan_b = 'genb1234'
+		local sub_opts = { queue_len = 16, full = 'drop_oldest' }
+		local speed_sub = h.reader:subscribe({ 'obs', 'v1', 'net', 'metric', 'speedtest' }, sub_opts)
+		local active_sub = h.reader:subscribe({ 'obs', 'v1', 'net', 'metric', 'active_uplink' }, sub_opts)
+		local function drain(sub)
+			local out = {}
+			while true do
+				local which, msg = fibers.perform(op.named_choice({ ev = sub:recv_op(), timeout = sleep.sleep_op(0.3) }))
+				if which ~= 'ev' then return out end
+				out[#out + 1] = msg.payload
+			end
+		end
+		h.observe(false, true)
+		ok(h.tested(1), 'the modem is tested')
+		local names = {}
+		for _, p in ipairs(drain(speed_sub)) do names[p.namespace[2]] = true end
+		ok(names.wan_b, 'speedtest namespace uses the product interface')
+		eq(names.genb1234, nil, 'not the generated OpenWrt name')
+		local actives = drain(active_sub)
+		ok(#actives >= 1 and actives[#actives].value == 'wan_b', 'active_uplink names the same interface')
+		speed_sub:unsubscribe()
+		active_sub:unsubscribe()
+		h.stop()
+	end)
+end
+
+function tests.test_active_uplink_telemetry_is_refreshed_with_each_speedtest()
+	fibers.run(function (scope)
+		-- The metrics service drops samples that arrive before it is configured,
+		-- so a value sent only on change could be lost until the next failover.
+		local h = start_active_scope_service(scope, { scope = 'all', live_weights = false, interval_s = 60 })
+		local active_sub = h.reader:subscribe({ 'obs', 'v1', 'net', 'metric', 'active_uplink' },
+			{ queue_len = 16, full = 'drop_oldest' })
+		h.observe(true, true)
+		ok(h.tested(2), 'both backhauls tested')
+		local values = {}
+		while true do
+			local which, msg = fibers.perform(op.named_choice({ ev = active_sub:recv_op(), timeout = sleep.sleep_op(0.3) }))
+			if which ~= 'ev' then break end
+			values[#values + 1] = msg.payload.value
+		end
+		ok(#values >= 3, 'sent on change and again with each speedtest, got ' .. #values)
+		for _, v in ipairs(values) do eq(v, 'wan_a') end
+		active_sub:unsubscribe()
 		h.stop()
 	end)
 end

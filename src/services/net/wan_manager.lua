@@ -170,7 +170,7 @@ local function start_speedtest_for_uplink(state, uplink)
 			uplink_id = uplink_id,
 			-- Whether this path carried traffic when tested; a standby result shows
 			-- what is left on the table, an in-use one is measured under load.
-			in_use = wan_policy.uplink_in_use(snap, uplink_id),
+			in_use = wan_policy.uplink_in_use(snap, uplink),
 			interface = uplink.request.interface,
 			device = uplink.request.device,
 			metric = uplink.request.metric,
@@ -397,18 +397,9 @@ function M.reconcile_speedtests(state, reason)
 		end
 	end
 
-	-- Test the backhaul carrying traffic first, so a failover is measured promptly.
-	local ordered = {}
-	for i = 1, #uplinks do
-		if is_lead_uplink(snap, uplinks[i]) then
-			table.insert(ordered, 1, uplinks[i])
-		else
-			ordered[#ordered + 1] = uplinks[i]
-		end
-	end
-	uplinks = ordered
-
 	local speedtest_pending = false
+	local candidates = {}
+	local runtime_tests = snap.wan_runtime and snap.wan_runtime.speedtests or {}
 	for i = 1, #uplinks do
 		local uplink = uplinks[i]
 		local observed_status = wan_policy.uplink_observed_status(snap, uplink)
@@ -417,6 +408,11 @@ function M.reconcile_speedtests(state, reason)
 			local skip_reason = observed_status == nil and 'waiting_for_observation' or 'not_online'
 			mark_speedtest_skipped(state, uplink, generation, skip_reason)
 			report_speedtest_skip(state, skip_reason, reason, uplink, generation)
+		elseif not wan_policy.interface_owner(snap, uplink) then
+			-- Another member owns this interface and measures the same path.
+			cancel_active_speedtest(state, uplink.uplink_id, 'shares_interface')
+			mark_speedtest_skipped(state, uplink, generation, 'shares_interface')
+			report_speedtest_skip(state, 'shares_interface', reason, uplink, generation)
 		else
 			local current = state.model:snapshot()
 			local lead = is_lead_uplink(snap, uplink)
@@ -424,13 +420,13 @@ function M.reconcile_speedtests(state, reason)
 			local due, due_reason = due_fn(current, uplink, { generation = generation, now = now(state) })
 			if due then
 				speedtest_pending = true
-				-- The HAL runs speed tests serially, but each caller deadline starts
-				-- at launch. Launch one at a time; completion reconciles the next.
-				if next(state.active_speedtests) == nil then
-					local ok, err = start_speedtest_for_uplink(state, uplink)
-					if ok ~= true then return nil, err end
-					if lead then acknowledge_active_uplink(state, uplink.uplink_id, due_reason) end
-				end
+				local rec = runtime_tests[uplink.uplink_id]
+				candidates[#candidates + 1] = {
+					uplink = uplink, lead = lead, reason = due_reason, order = i,
+					-- A failover re-test jumps the queue; otherwise the longest-untested goes first.
+					urgent = lead and due_reason == 'active_uplink_changed',
+					last = type(rec) == 'table' and tonumber(rec.started_at) or -math.huge,
+				}
 			else
 				if lead then acknowledge_if_fresh(state, current, uplink, due_reason) end
 				if due_reason == 'running' then speedtest_pending = true end
@@ -438,6 +434,20 @@ function M.reconcile_speedtests(state, reason)
 				report_speedtest_skip(state, due_reason or 'not_due', reason, uplink, generation)
 			end
 		end
+	end
+	-- The HAL runs speed tests serially, but each caller deadline starts at
+	-- launch. Launch one at a time, fairly; completion reconciles the next.
+	if #candidates > 0 and next(state.active_speedtests) == nil then
+		table.sort(candidates, function(x, y)
+			if x.urgent ~= y.urgent then return x.urgent end
+			if x.last ~= y.last then return x.last < y.last end
+			if x.lead ~= y.lead then return x.lead end
+			return x.order < y.order
+		end)
+		local pick = candidates[1]
+		local ok, err = start_speedtest_for_uplink(state, pick.uplink)
+		if ok ~= true then return nil, err end
+		if pick.lead then acknowledge_active_uplink(state, pick.uplink.uplink_id, pick.reason) end
 	end
 	if not wan_policy.live_weights_enabled(snap) then
 		mark_weights_not_applicable(state, generation, weights_off_reason(snap))
@@ -515,7 +525,10 @@ function M.handle_speedtest_done(state, ev)
 		rec.id = ev.speedtest_id
 		rec.ok = result.ok == true
 		rec.err = result.err
-		rec.interface = result.interface or (work_result.request and work_result.request.interface) or rec.interface
+		-- Keep the product interface id: telemetry and active_uplink name it. The HAL
+		-- may report its generated OpenWrt name, kept separately.
+		rec.interface = rec.interface or (work_result.request and work_result.request.interface) or result.interface
+		rec.hal_interface = result.interface
 		rec.device = result.device or (work_result.request and work_result.request.device) or rec.device
 		rec.metric = rec.metric or (work_result.request and work_result.request.metric) or 1
 		rec.completed_at = completed_at

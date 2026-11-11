@@ -397,14 +397,33 @@ function M.live_weights_enabled(snapshot)
 	return runtime_opts(snapshot).live_weights ~= false
 end
 
--- Whether this uplink currently carries traffic (backhaul.active_uplink).
-function M.uplink_in_use(snapshot, uplink_id)
+-- Whether the path this uplink measures currently carries traffic
+-- (backhaul.active_uplink). Members sharing the active interface measure the
+-- same path, so they count as in use too.
+function M.uplink_in_use(snapshot, uplink)
 	local active = M.active_uplink(snapshot)
-	if not active or active.status ~= 'uplink' then return false end
+	if not active or active.status ~= 'uplink' or type(uplink) ~= 'table' then return false end
+	local iface = uplink.request and uplink.request.interface
+	if iface ~= nil and active.interface == iface then return true end
 	for _, id in ipairs(active.uplink_ids or {}) do
-		if id == uplink_id then return true end
+		if id == uplink.uplink_id then return true end
 	end
-	return active.uplink_id == uplink_id
+	return active.uplink_id == uplink.uplink_id
+end
+
+-- Several members may share one interface, which is one physical path. The
+-- lowest metric owns it (ties by id), matching active_uplink, and only the
+-- owner is speedtested so the path is not downloaded over twice.
+function M.interface_owner(snapshot, uplink)
+	local iface = uplink and uplink.request and uplink.request.interface
+	local best
+	for _, u in ipairs(M.collect_uplinks(snapshot)) do
+		if u.request.interface == iface then
+			local m, bm = tonumber(u.request.metric) or 1, best and (tonumber(best.request.metric) or 1)
+			if best == nil or m < bm or (m == bm and u.uplink_id < best.uplink_id) then best = u end
+		end
+	end
+	return best == nil or best.uplink_id == uplink.uplink_id
 end
 
 local function next_wake(snapshot, uplink_id, now)
@@ -437,7 +456,8 @@ function M.speedtest_wakes(snapshot, now)
 	end
 	for _, uplink in ipairs(M.collect_uplinks(snapshot)) do
 		local id = uplink.uplink_id
-		if M.uplink_online(snapshot, uplink) and (only_id == nil or only_id == id) then
+		local tested = only_id == nil or only_id == id
+		if tested and M.uplink_online(snapshot, uplink) and M.interface_owner(snapshot, uplink) then
 			local wake = next_wake(snapshot, id, now)
 			if wake then out[#out + 1] = { uplink_id = id, wake_at = wake } end
 		end

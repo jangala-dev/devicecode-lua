@@ -822,4 +822,69 @@ function tests.test_every_backhaul_mode_skips_offline_standby()
 	end)
 end
 
+local function add_member(model, id, iface, metric, online)
+	model:update(function(s)
+		s.wan.configured_members[id] = { interface = iface, metric = metric }
+		s.backhaul.uplinks[id] = { id = id, interface = iface, state = online and 'online' or 'offline',
+			usable = online, metric = metric, path_address = { family = 'ipv4', address = '192.0.2.' .. metric } }
+		s.backhaul.active_uplink = active_uplink.select(s, s.backhaul.uplinks)
+		return s
+	end)
+end
+
+function tests.test_every_backhaul_mode_shares_test_time_fairly_when_tests_overrun_the_interval()
+	runfibers.run(function(scope)
+		local clock, extra = { t = 100 }, {}
+		local model = every_backhaul_model()
+		add_member(model, 'modem_secondary', 'modem_secondary', 3, true)
+		model:update(function(s) s.wan.load_balancing.speedtests.interval_s = 1; return s end)
+		local state = active_scope_state(scope, model, clock, extra)
+		local counts = {}
+		for _ = 1, 9 do
+			assert(wan_manager.reconcile_speedtests(state, 'speedtest_done'))
+			local id, active = launched(state)
+			counts[id] = (counts[id] or 0) + 1
+			clock.t = clock.t + 1.1 -- each test outlasts interval_s
+			finish(state, id, active, 10)
+		end
+		for _, id in ipairs({ 'wan', 'modem_primary', 'modem_secondary' }) do
+			ok((counts[id] or 0) >= 2, id .. ' must not be starved, tested ' .. tostring(counts[id] or 0) .. ' times')
+		end
+	end)
+end
+
+function tests.test_every_backhaul_mode_tests_a_shared_interface_once()
+	runfibers.run(function(scope)
+		local clock, extra = { t = 100 }, {}
+		local model = every_backhaul_model()
+		-- A second member on the wired interface, at a higher metric.
+		add_member(model, 'wan_alias', 'wan', 5, true)
+		local state = active_scope_state(scope, model, clock, extra)
+		local tested = {}
+		for _ = 1, 3 do
+			assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+			local id, active = next(state.active_speedtests)
+			if not id then break end
+			tested[#tested + 1] = id
+			finish(state, id, active, 10)
+		end
+		eq(#tested, 2, 'one download per physical path')
+		for _, id in ipairs(tested) do ok(id ~= 'wan_alias', 'the lower-metric owner tests a shared interface') end
+		local runtime = model:snapshot().wan_runtime
+		eq(runtime.speedtests.wan.in_use, true)
+		eq(runtime.speedtests.wan_alias.last_skip_reason, 'shares_interface')
+	end)
+end
+
+function tests.test_in_use_follows_the_interface_carrying_traffic()
+	local policy = require 'services.net.wan_policy'
+	local s = { backhaul = { active_uplink = {
+		status = 'uplink', uplink_id = 'wan', uplink_ids = { 'wan' }, interface = 'wan',
+	} } }
+	eq(policy.uplink_in_use(s, { uplink_id = 'wan', request = { interface = 'wan' } }), true)
+	eq(policy.uplink_in_use(s, { uplink_id = 'wan_alias', request = { interface = 'wan' } }), true,
+		'another member on the same interface measures the same path')
+	eq(policy.uplink_in_use(s, { uplink_id = 'modem', request = { interface = 'modem' } }), false)
+end
+
 return tests
