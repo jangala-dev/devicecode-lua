@@ -2474,6 +2474,40 @@ local function trimmed(s)
 	return type(s) == 'string' and s:match('^%s*(.-)%s*$') or nil
 end
 
+-- mwan3's iface hotplug handler holds procd's mwan3 lock (`procd_lock`, fd
+-- 1000) while it changes state. Take the same lock and check again before
+-- resending `connected`, so a disconnect that happens meanwhile is either seen
+-- here or applied after this repair, never overwritten by it. The handler runs
+-- with fd 1000 inherited, and `flock -n 1000` on a lock we already hold succeeds.
+-- Exit 10: tracker no longer online. Exit 11: hotplug state already online.
+local MWAN3_REPAIR_SCRIPT = table.concat({
+	'iface=$1 device=$2 track_dir=$3 status_dir=$4 hotplug_call=$5 lock=$6',
+	'exec 1000>"$lock" || exit 2',
+	'flock 1000 || exit 2',
+	'[ "$(cat "$track_dir/$iface/STATUS" 2>/dev/null)" = online ] || exit 10',
+	'[ "$(cat "$status_dir/iface_state/$iface" 2>/dev/null)" = online ] && exit 11',
+	'env -i ACTION=connected INTERFACE="$iface" DEVICE="$device" "$hotplug_call" iface',
+}, '\n')
+
+local function mwan3_repair_argv(cfg, name, device)
+	return {
+		-- OpenWrt's ash takes fd 1000, as procd.sh does; not every sh does.
+		cfg.mwan3_repair_shell or 'sh', '-c', MWAN3_REPAIR_SCRIPT, 'mwan3-hotplug-repair', name, device,
+		cfg.mwan3track_status_dir or '/var/run/mwan3track',
+		cfg.mwan3_status_dir or '/var/run/mwan3',
+		cfg.mwan3_hotplug_call or '/sbin/hotplug-call',
+		cfg.mwan3_lock or '/var/lock/procd_mwan3.lock',
+	}
+end
+
+-- Returns the command's exit code, or nil and an error.
+local function run_for_exit_code(argv)
+	local cmd = exec.command(exec_spec(argv))
+	local status, code = perform(cmd:run_op())
+	if status == 'exited' then return tonumber(code), nil end
+	return nil, table.concat(argv, ' ', 1, 2) .. ' ended with status=' .. tostring(status) .. ' code=' .. tostring(code)
+end
+
 local function mwan3_interface_device(self, name)
 	local st = ubus_call(self.config, 'network.interface.' .. name, 'status', {})
 	if type(st) ~= 'table' then return nil end
@@ -2481,10 +2515,17 @@ local function mwan3_interface_device(self, name)
 	return type(dev) == 'string' and dev ~= '' and dev or nil
 end
 
+local MWAN3_REPAIR_OUTCOME = {
+	[0] = 'resent connected',
+	[10] = 'tracker went offline',
+	[11] = 'hotplug state already online',
+}
+
 local function mwan3_hotplug_check(self, name, token)
 	local cfg = self.config or {}
 	local read = self.mwan3_guard_read or read_text_file
 	local device_of = self.mwan3_guard_device or mwan3_interface_device
+	local run = self.mwan3_guard_run or run_for_exit_code
 	local status_dir = cfg.mwan3_status_dir or '/var/run/mwan3'
 	local track_dir = cfg.mwan3track_status_dir or '/var/run/mwan3track'
 	local interval_s = tonumber(cfg.mwan3_guard_interval_s) or 5
@@ -2508,25 +2549,22 @@ local function mwan3_hotplug_check(self, name, token)
 				log_provider(self, 'warn', {
 					what = 'mwan3_hotplug_state_stale', interface = name, tracker = tracker, hotplug = hotplug, err = 'no device',
 				})
-				break
+				return
 			end
-			local ok, err = run_provider_command(self, {
-				'env', '-i', 'ACTION=connected', 'INTERFACE=' .. name, 'DEVICE=' .. device, '/sbin/hotplug-call', 'iface',
-			})
-			log_provider(self, ok and 'warn' or 'error', {
-				what = 'mwan3_hotplug_state_repaired',
-				summary = string.format('mwan3 hotplug state for %s was %s while its tracker was online; resent connected (%s)',
-					name, hotplug, ok and 'ok' or tostring(err)),
+			local code, err = run(mwan3_repair_argv(cfg, name, device))
+			local outcome = MWAN3_REPAIR_OUTCOME[code] or ('failed: ' .. tostring(err or ('exit ' .. tostring(code))))
+			log_provider(self, code == 0 and 'warn' or (code == 10 or code == 11) and 'info' or 'error', {
+				what = code == 0 and 'mwan3_hotplug_state_repaired' or 'mwan3_hotplug_state_not_repaired',
+				summary = string.format('mwan3 hotplug state for %s was %s while its tracker was online: %s',
+					name, hotplug, outcome),
 				interface = name,
 				device = device,
 				hotplug = hotplug,
-				ok = ok == true,
-				err = err,
+				outcome = outcome,
 			})
-			break
+			return
 		end
 	end
-	if self._mwan3_guards[name] == token then self._mwan3_guards[name] = nil end
 end
 
 local function start_mwan3_hotplug_check(self, name)
@@ -2544,6 +2582,7 @@ local function start_mwan3_hotplug_check(self, name)
 			token.scope = fibers.current_scope()
 			mwan3_hotplug_check(self, name, token)
 		end))
+		if self._mwan3_guards and self._mwan3_guards[name] == token then self._mwan3_guards[name] = nil end
 		if status == 'failed' then
 			log_provider(self, 'warn', { what = 'mwan3_hotplug_check_failed', interface = name, err = tostring(err) })
 		end
@@ -2595,6 +2634,8 @@ M._test = {
 	mwan3_user_block = mwan3_user_block,
 	strip_observer_block = strip_observer_block,
 	install_observer_hooks = install_observer_hooks,
+	mwan3_repair_argv = mwan3_repair_argv,
+	run_for_exit_code = run_for_exit_code,
 }
 
 return M
