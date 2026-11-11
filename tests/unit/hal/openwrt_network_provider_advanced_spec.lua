@@ -467,6 +467,10 @@ local function restart_with_mwan3_states(states, opts)
 		end
 		provider.mwan3_guard_run = function(argv)
 			repairs[#repairs + 1] = argv
+			if opts.restarts_during_run and #repairs == 1 then
+				ok(provider._mwan3_guards.mopri79e.repairing, 'marked as repairing')
+				eq(fibers.perform(provider:restart_interface_op({ interface = 'modem_primary' })).ok, true)
+			end
 			if opts.on_run then return opts.on_run(states, argv) end
 			states.hotplug = 'online'
 			return 0, nil
@@ -564,6 +568,8 @@ function tests.test_mwan3_repair_script_rechecks_under_the_lock()
 	write('hotplug-call', table.concat({
 		'#!/bin/sh',
 		'echo "$1 $ACTION $INTERFACE $DEVICE" > "' .. dir .. '/called"',
+		-- mwan3's handler takes the lock with procd_lock: `flock -n 1000` on the inherited fd.
+		'( flock -n 1000 && echo reentrant || echo blocked ) >> "' .. dir .. '/called"',
 		'( flock -n 9 && echo free || echo held ) 9>"' .. dir .. '/lock" >> "' .. dir .. '/called"',
 		'',
 	}, '\n'))
@@ -591,9 +597,78 @@ function tests.test_mwan3_repair_script_rechecks_under_the_lock()
 
 		write('status/iface_state/mopri79e', 'offline\n')
 		eq(t.run_for_exit_code(argv), 0, 'stale state repaired')
-		eq(read('called'), 'iface connected mopri79e wwan0\nheld\n')
+		eq(read('called'), 'iface connected mopri79e wwan0\nreentrant\nheld\n')
+		os.remove(dir .. '/called')
+
+		-- A disconnect handler holds the lock when the repair starts, and the
+		-- tracker goes offline before it lets go: the repair waits, then sees it.
+		write('status/iface_state/mopri79e', 'offline\n')
+		assert(os.execute('bash -c \'exec 9>"' .. dir .. '/lock"; flock 9; touch "' .. dir .. '/holding"; sleep 0.3;'
+			.. ' echo offline > "' .. dir .. '/track/mopri79e/STATUS"\' &') == 0)
+		local deadline = fibers.now() + 2
+		while not read('holding') and fibers.now() < deadline do fibers.perform(require('fibers.sleep').sleep_op(0.01)) end
+		ok(read('holding'), 'competing handler took the lock')
+		eq(t.run_for_exit_code(argv), 10, 'repair saw the disconnect made under the lock')
+		eq(read('called'), nil, 'no connected event after a disconnect')
 	end)
 	os.execute('rm -rf ' .. dir)
+end
+
+-- A hook started by the repair must not outlive it: it would keep the mwan3 lock.
+function tests.test_mwan3_repair_command_stops_its_descendants()
+	local t = openwrt_provider._test
+	local dir = os.tmpname()
+	os.remove(dir)
+	assert(os.execute('mkdir -p ' .. dir) == 0)
+	local function alive(pidfile)
+		local f = io.open(pidfile, 'r')
+		if not f then return nil end
+		local pid = f:read('*l')
+		f:close()
+		return os.execute('kill -0 ' .. pid .. ' 2>/dev/null') == 0
+	end
+	local function argv(name)
+		return { 'bash', '-c', 'sleep 30 & echo $! > "' .. dir .. '/' .. name .. '"; wait' }
+	end
+	fibers.run(function()
+		local sleep = require 'fibers.sleep'
+		-- Timeout.
+		local code, err = t.run_for_exit_code(argv('timeout.pid'), 0.3)
+		eq(code, nil)
+		contains(err, 'timed out')
+		fibers.perform(sleep.sleep_op(0.1))
+		eq(alive(dir .. '/timeout.pid'), false, 'descendant stopped after a timeout')
+
+		-- Cancellation of the scope running it.
+		local st = fibers.perform(fibers.run_scope_op(function(scope)
+			scope:spawn(function()
+				fibers.perform(sleep.sleep_op(0.3))
+				scope:cancel('test cancel')
+			end)
+			t.run_for_exit_code(argv('cancel.pid'), 30)
+		end))
+		eq(st, 'cancelled')
+		fibers.perform(sleep.sleep_op(0.1))
+		eq(alive(dir .. '/cancel.pid'), false, 'descendant stopped after cancellation')
+	end)
+	os.execute('rm -rf ' .. dir)
+end
+
+function tests.test_restart_during_a_repair_lets_the_repair_finish()
+	local finished = 0
+	local repairs = restart_with_mwan3_states({ tracker = 'online', hotplug = 'offline' }, {
+		restarts_during_run = true,
+		on_run = function(states)
+			fibers.perform(require('fibers.sleep').sleep_op(0.05))
+			finished = finished + 1
+			states.hotplug = 'online'
+			return 0, nil
+		end,
+	})
+	-- The newer check may repair too (on a box the lock serialises them and the
+	-- second sees exit 11), but no repair is cut off part way.
+	ok(#repairs >= 1)
+	eq(finished, #repairs, 'every repair ran to the end')
 end
 
 

@@ -2500,10 +2500,21 @@ local function mwan3_repair_argv(cfg, name, device)
 	}
 end
 
--- Returns the command's exit code, or nil and an error.
-local function run_for_exit_code(argv)
-	local cmd = exec.command(exec_spec(argv))
-	local status, code = perform(cmd:run_op())
+-- Returns the command's exit code, or nil and an error. The command runs in its
+-- own process group, so a timeout or cancellation also stops the hotplug hooks
+-- it started, which inherit the mwan3 lock.
+local function run_for_exit_code(argv, timeout_s)
+	local flags = { process_group = true }
+	if type(exec.supports) == 'function' and exec.supports('parent_death_signal') then
+		flags.parent_death_signal = 'TERM'
+	end
+	local cmd = exec.command(exec_spec(argv, { flags = flags, shutdown_grace = 1 }))
+	local which, status, code = perform(op.named_choice({
+		done = cmd:run_op(),
+		timeout = sleep.sleep_op(timeout_s or 30),
+	}))
+	perform(cmd:shutdown_op(1))
+	if which ~= 'done' then return nil, 'timed out after ' .. tostring(timeout_s or 30) .. 's' end
 	if status == 'exited' then return tonumber(code), nil end
 	return nil, table.concat(argv, ' ', 1, 2) .. ' ended with status=' .. tostring(status) .. ' code=' .. tostring(code)
 end
@@ -2551,7 +2562,11 @@ local function mwan3_hotplug_check(self, name, token)
 				})
 				return
 			end
-			local code, err = run(mwan3_repair_argv(cfg, name, device))
+			-- Not cancelled by a newer restart from here: stopping mwan3's handler
+			-- part way would leave its rules half changed.
+			token.repairing = true
+			local code, err = run(mwan3_repair_argv(cfg, name, device), tonumber(cfg.mwan3_repair_timeout_s) or 30)
+			token.repairing = nil
 			local outcome = MWAN3_REPAIR_OUTCOME[code] or ('failed: ' .. tostring(err or ('exit ' .. tostring(code))))
 			log_provider(self, code == 0 and 'warn' or (code == 10 or code == 11) and 'info' or 'error', {
 				what = code == 0 and 'mwan3_hotplug_state_repaired' or 'mwan3_hotplug_state_not_repaired',
@@ -2573,7 +2588,9 @@ local function start_mwan3_hotplug_check(self, name)
 	if not scope then return end
 	self._mwan3_guards = self._mwan3_guards or {}
 	local previous = self._mwan3_guards[name]
-	if previous and previous.scope then previous.scope:cancel('superseded by a newer restart') end
+	if previous and previous.scope and not previous.repairing then
+		previous.scope:cancel('superseded by a newer restart')
+	end
 	local token = {}
 	self._mwan3_guards[name] = token
 	-- Its own scope: a fault here must not fail the provider's owner scope.
