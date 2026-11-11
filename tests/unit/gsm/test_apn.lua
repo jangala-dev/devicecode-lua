@@ -3,7 +3,6 @@ local fibers = require 'fibers'
 local op = require 'fibers.op'
 local gsm = require 'services.gsm'
 local binser = require 'shared.binser'
-local known_regression = require 'tests.support.known_regression'
 
 local tests = {}
 local function fail(msg) error(msg or 'assertion failed', 2) end
@@ -510,17 +509,6 @@ function tests.test_apn_connect_never_logs_the_password()
 			ok(not tostring(connect_err):find(part, 1, true), 'password in the returned error')
 		end
 	end)
-end
-
-for _, name in ipairs({
-	'test_apn_connect_continues_when_imsi_is_unavailable',
-	'test_selection_attempts_matching_custom_record_even_when_mvno_metadata_does_not_match',
-	'test_selection_orders_custom_mvno_plain_default_and_mismatch',
-	'test_selection_preserves_custom_record_insertion_order_after_nine_entries',
-	'test_selection_ranks_mvnos_as_mismatches_when_identifiers_are_missing',
-	'test_spn_mismatched_mvno_apn_remains_within_default_cutoff',
-}) do
-	tests[name] = known_regression(tests[name])
 end
 
 return tests

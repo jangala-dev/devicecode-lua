@@ -3,7 +3,6 @@ local qmi = require 'services.hal.backends.modem.modes.qmi'
 local exec = require 'fibers.io.exec'
 local op = require 'fibers.op'
 local runfibers = require 'tests.support.run_fibers'
-local known_regression = require 'tests.support.known_regression'
 
 local tests = {}
 
@@ -128,10 +127,5 @@ function tests.test_qmi_home_network_failure_remains_fatal()
 	eq(info, nil)
 	ok(err and err ~= '', 'home-network failure must still be returned')
 end
-
-tests.test_qmi_keeps_home_network_when_rf_band_command_fails = known_regression(
-	tests.test_qmi_keeps_home_network_when_rf_band_command_fails)
-tests.test_qmi_keeps_home_network_when_rf_band_is_absent_from_output = known_regression(
-	tests.test_qmi_keeps_home_network_when_rf_band_is_absent_from_output)
 
 return tests

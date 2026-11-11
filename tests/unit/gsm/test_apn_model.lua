@@ -1,5 +1,4 @@
 local model = require 'services.gsm.apn_model'
-local known_regression = require 'tests.support.known_regression'
 
 local tests = {}
 local function fail(msg) error(msg or 'assertion failed', 2) end
@@ -69,8 +68,5 @@ function tests.test_redact_list_removes_apn_secrets_but_preserves_presence_flags
 	eq(redacted[1].has_password, true)
 	eq(redacted[1].has_auth, true)
 end
-
-tests.test_normalise_list_preserves_credential_variants_in_order = known_regression(
-	tests.test_normalise_list_preserves_credential_variants_in_order)
 
 return tests

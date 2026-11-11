@@ -1,5 +1,4 @@
 local gsm = require 'services.gsm'
-local known_regression = require 'tests.support.known_regression'
 
 local tests = {}
 
@@ -16,8 +15,5 @@ function tests.test_connecting_state_has_a_bounded_settle_wait()
 	assert(phase_two:find('sleep.sleep_op', 1, true),
 		'phase two has no settle deadline')
 end
-
-tests.test_connecting_state_has_a_bounded_settle_wait = known_regression(
-	tests.test_connecting_state_has_a_bounded_settle_wait)
 
 return tests

@@ -6,7 +6,6 @@ local cjson = require 'cjson.safe'
 local runfibers = require 'tests.support.run_fibers'
 local store_mod = require 'services.gsm.apn_store_control_store'
 local import = require 'services.gsm.apn_legacy_import'
-local known_regression = require 'tests.support.known_regression'
 
 local tests = {}
 
@@ -191,14 +190,6 @@ function tests.test_read_and_store_failures_are_retryable()
 		assert(c == nil and cerr == 'store busy', tostring(cerr))
 		assert(conn.puts == 0)
 	end)
-end
-
-for _, name in ipairs({
-	'test_legacy_sources_include_remote_before_user_cfg',
-	'test_parse_preserves_credential_variants_in_order',
-	'test_parse_uses_apn_as_fallback_carrier_for_legacy_records',
-}) do
-	tests[name] = known_regression(tests[name])
 end
 
 return tests
