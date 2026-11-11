@@ -443,7 +443,7 @@ local function restart_with_mwan3_states(states, opts)
 			provider = 'openwrt',
 			allow_fake_uci = true,
 			mwan3_guard_interval_s = 0.01,
-			mwan3_guard_checks = 6,
+			mwan3_guard_checks = opts.checks or 6,
 			mwan3_hotplug_guard = opts.guard,
 		}, { logger = logger }))
 		local ifups = 0
@@ -512,6 +512,30 @@ function tests.test_restart_interface_resends_connected_when_mwan3_hotplug_state
 	-- A second restart supersedes the first one's check: still one repair.
 	repairs = restart_with_mwan3_states({ tracker = 'online', hotplug = 'offline' }, { restarts = 2 })
 	eq(#repairs, 1, 'one repair after back-to-back restarts')
+end
+
+function tests.test_restart_interface_repairs_again_after_a_late_stale_event()
+	-- A delayed stale `disconnected` handler runs after the first repair.
+	local repaired_at
+	local repairs = restart_with_mwan3_states({ tracker = 'online', hotplug = 'offline' }, {
+		step = function(states, reads)
+			if repaired_at and reads == repaired_at + 1 then states.hotplug = 'offline' end
+		end,
+		on_run = function(states)
+			states.hotplug = 'online'
+			repaired_at = repaired_at or 2
+			return 0, nil
+		end,
+	})
+	eq(#repairs, 2, 'the check keeps watching after a repair')
+
+	-- A state that never settles: stop after a few attempts (12 checks would
+	-- otherwise allow 6).
+	repairs = restart_with_mwan3_states({ tracker = 'online', hotplug = 'offline' }, {
+		checks = 12,
+		on_run = function() return 0, nil end,
+	})
+	eq(#repairs, 3, 'repairs are capped')
 end
 
 function tests.test_restart_interface_repair_yields_to_a_disconnect_seen_under_the_lock()

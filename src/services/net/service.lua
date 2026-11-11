@@ -6,6 +6,7 @@
 -- admitted through scoped components.
 
 local fibers = require 'fibers'
+local file = require 'fibers.io.file'
 local sleep = require 'fibers.sleep'
 local mailbox = require 'fibers.mailbox'
 
@@ -48,16 +49,16 @@ local START_MARKER = '/var/run/devicecode-net-started'
 -- later start in the same boot returns false. If the marker can't be written,
 -- returns false: restarting on a first connect is the safe default.
 local function first_start_since_boot(path)
-	local f = io.open(path, 'r')
+	local f = file.open(path, 'r')
 	if f then
 		f:close()
 		return false
 	end
-	f = io.open(path, 'w')
-	if not f then return false end
-	local ok = f:write(tostring(os.time()), '\n')
-	f:close()
-	return ok ~= nil
+	local w = file.open(path, 'w')
+	if not w then return false end
+	local ok = w:write(tostring(os.time()) .. '\n')
+	local cok = w:close()
+	return ok ~= nil and ok ~= false and cok ~= nil and cok ~= false
 end
 
 local function elapsed_ms(t0)

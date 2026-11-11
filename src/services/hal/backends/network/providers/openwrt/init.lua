@@ -2565,7 +2565,8 @@ local function mwan3_hotplug_check(self, name, token)
 	local track_dir = cfg.mwan3track_status_dir or '/var/run/mwan3track'
 	local interval_s = tonumber(cfg.mwan3_guard_interval_s) or 5
 	local checks = tonumber(cfg.mwan3_guard_checks) or 12
-	local mismatches = 0
+	local max_repairs = tonumber(cfg.mwan3_max_repairs) or 3
+	local mismatches, repairs = 0, 0
 	for _ = 1, checks do
 		fibers.perform(sleep.sleep_op(interval_s))
 		-- A newer restart of the same interface runs its own check.
@@ -2602,7 +2603,11 @@ local function mwan3_hotplug_check(self, name, token)
 				hotplug = hotplug,
 				outcome = outcome,
 			})
-			return
+			-- Keep watching for the rest of the window: a delayed stale
+			-- `disconnected` handler can still run after this and undo it.
+			repairs = repairs + 1
+			mismatches = 0
+			if repairs >= max_repairs then return end
 		end
 	end
 end
