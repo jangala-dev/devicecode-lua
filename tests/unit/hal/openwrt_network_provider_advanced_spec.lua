@@ -427,6 +427,328 @@ function tests.test_restart_interface_runs_ifup_on_generated_interface_name()
 	end)
 end
 
+-- Runs a restart with mwan3's state files given by `states` (changed by `step`
+-- after each check). Returns the repair commands run and the provider's log.
+local function restart_with_mwan3_states(states, opts)
+	opts = opts or {}
+	local repairs, logs = {}, {}
+	local logger = {}
+	for _, level in ipairs({ 'debug', 'info', 'warn', 'error' }) do
+		logger[level] = function(_, payload)
+			logs[#logs + 1] = { level = level, what = payload.what, outcome = payload.outcome }
+		end
+	end
+	fibers.run(function()
+		local provider = ok(provider_loader.new({
+			provider = 'openwrt',
+			allow_fake_uci = true,
+			mwan3_guard_interval_s = 0.01,
+			mwan3_guard_checks = opts.checks or 6,
+			mwan3_hotplug_guard = opts.guard,
+		}, { logger = logger }))
+		local ifups = 0
+		provider.shaper_run_cmd = function(argv)
+			eq(argv_s(argv), 'ifup mopri79e')
+			ifups = ifups + 1
+			return true, nil
+		end
+		local reads = 0
+		provider.mwan3_guard_read = function(path)
+			if path:find('/mwan3track/', 1, true) then
+				reads = reads + 1
+				if opts.step then opts.step(states, reads) end
+				return states.tracker and (states.tracker .. '\n') or nil
+			end
+			return states.hotplug and (states.hotplug .. '\n') or nil
+		end
+		provider.mwan3_guard_device = function(_, name)
+			eq(name, 'mopri79e')
+			return 'wwan0'
+		end
+		provider.mwan3_guard_run = function(argv)
+			repairs[#repairs + 1] = argv
+			if opts.restarts_during_run and #repairs == 1 then
+				ok(provider._mwan3_guards.mopri79e.repairing, 'marked as repairing')
+				eq(fibers.perform(provider:restart_interface_op({ interface = 'modem_primary' })).ok, true)
+			end
+			if opts.on_run then return opts.on_run(states, argv) end
+			states.hotplug = 'online'
+			return 0, nil
+		end
+		provider._last_name_ctx = ok(names.allocate({
+			interfaces = { modem_primary = { kind = 'direct', role = 'wan', endpoint = { ifname = 'wwan0' } } },
+			wan = { members = { modem_primary = { interface = 'modem_primary' } } },
+		}))
+		for i = 1, opts.restarts or 1 do
+			local result = fibers.perform(provider:restart_interface_op({ interface = 'modem_primary' }))
+			eq(result.ok, true, 'restart result does not wait for the mwan3 check')
+			eq(ifups, i)
+		end
+		fibers.perform(require('fibers.sleep').sleep_op(0.2))
+		eq(next(provider._mwan3_guards or {}), nil, 'finished checks release their token')
+		provider:terminate('test complete')
+	end)
+	return repairs, logs
+end
+
+local function logged(logs, what)
+	for i = 1, #logs do if logs[i].what == what then return logs[i] end end
+	return nil
+end
+
+function tests.test_restart_interface_resends_connected_when_mwan3_hotplug_state_is_stale()
+	-- A stale `disconnected` handler finished last: tracker online, hotplug offline.
+	local repairs, logs = restart_with_mwan3_states({ tracker = 'online', hotplug = 'offline' })
+	eq(#repairs, 1, 'one repair expected')
+	eq(table.concat(repairs[1], ' ', 1, 2), 'sh -c')
+	eq(table.concat(repairs[1], ' ', 4), 'mwan3-hotplug-repair mopri79e wwan0 /var/run/mwan3track /var/run/mwan3'
+		.. ' /etc/hotplug.d/iface/15-mwan3 /lib/functions.sh /var/lock/procd_mwan3.lock')
+	eq(ok(logged(logs, 'mwan3_hotplug_state_repaired')).level, 'warn')
+
+	-- No hotplug state file at all also reads as offline in mwan3.
+	repairs = restart_with_mwan3_states({ tracker = 'online' })
+	eq(#repairs, 1, 'missing hotplug state is offline')
+
+	-- A second restart supersedes the first one's check: still one repair.
+	repairs = restart_with_mwan3_states({ tracker = 'online', hotplug = 'offline' }, { restarts = 2 })
+	eq(#repairs, 1, 'one repair after back-to-back restarts')
+end
+
+function tests.test_restart_interface_repairs_again_after_a_late_stale_event()
+	-- A delayed stale `disconnected` handler runs after the first repair.
+	local repaired_at
+	local repairs = restart_with_mwan3_states({ tracker = 'online', hotplug = 'offline' }, {
+		step = function(states, reads)
+			if repaired_at and reads == repaired_at + 1 then states.hotplug = 'offline' end
+		end,
+		on_run = function(states)
+			states.hotplug = 'online'
+			repaired_at = repaired_at or 2
+			return 0, nil
+		end,
+	})
+	eq(#repairs, 2, 'the check keeps watching after a repair')
+
+	-- A state that never settles: stop after a few attempts (12 checks would
+	-- otherwise allow 6).
+	repairs = restart_with_mwan3_states({ tracker = 'online', hotplug = 'offline' }, {
+		checks = 12,
+		on_run = function() return 0, nil end,
+	})
+	eq(#repairs, 3, 'repairs are capped')
+end
+
+function tests.test_restart_interface_repair_yields_to_a_disconnect_seen_under_the_lock()
+	-- The uplink really goes down between the check and the repair: the locked
+	-- re-check sees the tracker offline and sends nothing (exit 10).
+	local repairs, logs = restart_with_mwan3_states({ tracker = 'online', hotplug = 'offline' }, {
+		on_run = function(states)
+			states.tracker = 'offline'
+			return 10, nil
+		end,
+	})
+	eq(#repairs, 1, 'no further attempts')
+	eq(logged(logs, 'mwan3_hotplug_state_repaired'), nil)
+	local entry = ok(logged(logs, 'mwan3_hotplug_state_not_repaired'))
+	eq(entry.level, 'info')
+	eq(entry.outcome, 'tracker went offline')
+end
+
+function tests.test_restart_interface_leaves_consistent_mwan3_state_alone()
+	eq(#restart_with_mwan3_states({ tracker = 'online', hotplug = 'online' }), 0, 'both online')
+	eq(#restart_with_mwan3_states({ tracker = 'offline', hotplug = 'offline' }), 0, 'both offline')
+	eq(#restart_with_mwan3_states({ tracker = 'connecting', hotplug = 'offline' }), 0, 'tracker not yet online')
+
+	-- A mismatch seen on one check only is an event still in flight.
+	local repairs = restart_with_mwan3_states({ tracker = 'online', hotplug = 'offline' }, {
+		step = function(states, reads) if reads >= 2 then states.hotplug = 'online' end end,
+	})
+	eq(#repairs, 0, 'a mismatch that clears by the next check is left alone')
+
+	repairs = restart_with_mwan3_states({ tracker = 'online', hotplug = 'offline' }, { guard = false })
+	eq(#repairs, 0, 'check disabled by config')
+end
+
+-- Runs the real repair script against temporary mwan3 state files and a fake
+-- mwan3 handler that records what it was given.
+function tests.test_mwan3_repair_script_rechecks_under_the_lock()
+	local t = openwrt_provider._test
+	local dir = os.tmpname()
+	os.remove(dir)
+	assert(os.execute('mkdir -p ' .. dir .. '/track/mopri79e ' .. dir .. '/status/iface_state') == 0)
+	local function write(path, text)
+		local f = assert(io.open(dir .. '/' .. path, 'w'))
+		f:write(text)
+		f:close()
+	end
+	local function read(path)
+		local f = io.open(dir .. '/' .. path, 'r')
+		if not f then return nil end
+		local text = f:read('*a')
+		f:close()
+		return text
+	end
+	write('functions.sh', 'FUNCTIONS_LOADED=1\n')
+	-- Sourced like a hotplug.d hook. Records its env, and whether the repair
+	-- still holds the lock while it runs.
+	write('handler', table.concat({
+		'echo "$HOTPLUG_TYPE $ACTION $INTERFACE $DEVICE $FUNCTIONS_LOADED $PATH" > "' .. dir .. '/called"',
+		-- mwan3's handler takes the lock with procd_lock: `flock -n 1000` on the inherited fd.
+		'( flock -n 1000 && echo reentrant || echo blocked ) >> "' .. dir .. '/called"',
+		'( flock -n 9 && echo free || echo held ) 9>"' .. dir .. '/lock" >> "' .. dir .. '/called"',
+		'',
+	}, '\n'))
+	local cfg = {
+		mwan3track_status_dir = dir .. '/track',
+		mwan3_status_dir = dir .. '/status',
+		mwan3_hotplug_handler = dir .. '/handler',
+		mwan3_functions = dir .. '/functions.sh',
+		mwan3_lock = dir .. '/lock',
+		-- dash, a common /bin/sh on dev hosts, can't redirect fd 1000.
+		mwan3_repair_shell = 'bash',
+	}
+	fibers.run(function()
+		local argv = t.mwan3_repair_argv(cfg, 'mopri79e', 'wwan0')
+
+		write('track/mopri79e/STATUS', 'offline\n')
+		write('status/iface_state/mopri79e', 'offline\n')
+		eq(t.run_for_exit_code(argv), 10, 'tracker offline')
+		eq(read('called'), nil, 'no hotplug event when the tracker is offline')
+
+		write('track/mopri79e/STATUS', 'online\n')
+		write('status/iface_state/mopri79e', 'online\n')
+		eq(t.run_for_exit_code(argv), 11, 'hotplug state already online')
+		eq(read('called'), nil, 'no hotplug event when already consistent')
+
+		write('status/iface_state/mopri79e', 'offline\n')
+		eq(t.run_for_exit_code(argv), 0, 'stale state repaired')
+		eq(read('called'), 'iface connected mopri79e wwan0 1 /usr/sbin:/usr/bin:/sbin:/bin\nreentrant\nheld\n')
+		os.remove(dir .. '/called')
+
+		-- A disconnect handler holds the lock when the repair starts, and the
+		-- tracker goes offline before it lets go: the repair waits, then sees it.
+		write('status/iface_state/mopri79e', 'offline\n')
+		assert(os.execute('bash -c \'exec 9>"' .. dir .. '/lock"; flock 9; touch "' .. dir .. '/holding"; sleep 0.3;'
+			.. ' echo offline > "' .. dir .. '/track/mopri79e/STATUS"\' &') == 0)
+		local deadline = fibers.now() + 2
+		while not read('holding') and fibers.now() < deadline do fibers.perform(require('fibers.sleep').sleep_op(0.01)) end
+		ok(read('holding'), 'competing handler took the lock')
+		eq(t.run_for_exit_code(argv), 10, 'repair saw the disconnect made under the lock')
+		eq(read('called'), nil, 'no connected event after a disconnect')
+	end)
+	os.execute('rm -rf ' .. dir)
+end
+
+-- A hook started by the repair must not outlive it: it would keep the mwan3 lock.
+function tests.test_mwan3_repair_command_stops_its_descendants()
+	local t = openwrt_provider._test
+	local dir = os.tmpname()
+	os.remove(dir)
+	assert(os.execute('mkdir -p ' .. dir) == 0)
+	local function alive(pidfile)
+		local f = io.open(pidfile, 'r')
+		if not f then return nil end
+		local pid = f:read('*l')
+		f:close()
+		return os.execute('kill -0 ' .. pid .. ' 2>/dev/null') == 0
+	end
+	-- The script exits on TERM, but its descendant ignores TERM, as a stuck hook
+	-- might: exec's shutdown then sees the direct child exit and stops there.
+	local function argv(name)
+		return { 'bash', '-c', '(trap "" TERM; exec sleep 30) & echo $! > "' .. dir .. '/' .. name .. '"; wait' }
+	end
+	fibers.run(function()
+		local sleep = require 'fibers.sleep'
+		-- Timeout.
+		local code, err = t.run_for_exit_code(argv('timeout.pid'), 0.3)
+		eq(code, nil)
+		contains(err, 'timed out')
+		fibers.perform(sleep.sleep_op(0.1))
+		eq(alive(dir .. '/timeout.pid'), false, 'descendant stopped after a timeout')
+
+		-- Cancellation of the scope running it.
+		local st = fibers.perform(fibers.run_scope_op(function(scope)
+			scope:spawn(function()
+				fibers.perform(sleep.sleep_op(0.3))
+				scope:cancel('test cancel')
+			end)
+			t.run_for_exit_code(argv('cancel.pid'), 30)
+		end))
+		eq(st, 'cancelled')
+		fibers.perform(sleep.sleep_op(0.1))
+		eq(alive(dir .. '/cancel.pid'), false, 'descendant stopped after cancellation')
+	end)
+	os.execute('rm -rf ' .. dir)
+end
+
+function tests.test_mwan3_repair_does_not_start_without_process_group_cleanup()
+	local t = openwrt_provider._test
+	local saved = package.loaded['posix.signal']
+	package.loaded['posix.signal'] = {}  -- no kill()
+	local code, err
+	fibers.run(function()
+		code, err = t.run_for_exit_code({ 'sh', '-c', 'exit 0' }, 5)
+	end)
+	package.loaded['posix.signal'] = saved
+	eq(code, nil)
+	contains(err, 'posix.signal unavailable')
+end
+
+function tests.test_terminate_stops_a_superseded_repair()
+	local finished, cancelled = 0, 0
+	fibers.run(function()
+		local sleep = require 'fibers.sleep'
+		local provider = ok(provider_loader.new({
+			provider = 'openwrt', allow_fake_uci = true, mwan3_guard_interval_s = 0.01, mwan3_guard_checks = 6,
+		}, {}))
+		provider.shaper_run_cmd = function() return true, nil end
+		provider.mwan3_guard_read = function(path)
+			return path:find('/mwan3track/', 1, true) and 'online\n' or 'offline\n'
+		end
+		provider.mwan3_guard_device = function() return 'wwan0' end
+		local runs = 0
+		provider.mwan3_guard_run = function()
+			runs = runs + 1
+			local first = runs == 1
+			if first then
+				-- A newer restart arrives mid-repair, then the provider goes away.
+				eq(fibers.perform(provider:restart_interface_op({ interface = 'modem_primary' })).ok, true)
+				provider:terminate('test terminate')
+			end
+			local ok_sleep = pcall(fibers.perform, sleep.sleep_op(0.5))
+			if not ok_sleep then cancelled = cancelled + 1; error('cancelled', 0) end
+			finished = finished + 1
+			return 0, nil
+		end
+		provider._last_name_ctx = ok(names.allocate({
+			interfaces = { modem_primary = { kind = 'direct', role = 'wan', endpoint = { ifname = 'wwan0' } } },
+			wan = { members = { modem_primary = { interface = 'modem_primary' } } },
+		}))
+		eq(fibers.perform(provider:restart_interface_op({ interface = 'modem_primary' })).ok, true)
+		fibers.perform(sleep.sleep_op(0.3))
+		eq(runs, 1, 'no repair after terminate')
+		eq(next(provider._mwan3_checks), nil, 'no live checks after terminate')
+	end)
+	eq(finished, 0, 'the superseded repair was stopped by terminate')
+end
+
+function tests.test_restart_during_a_repair_lets_the_repair_finish()
+	local finished = 0
+	local repairs = restart_with_mwan3_states({ tracker = 'online', hotplug = 'offline' }, {
+		restarts_during_run = true,
+		on_run = function(states)
+			fibers.perform(require('fibers.sleep').sleep_op(0.05))
+			finished = finished + 1
+			states.hotplug = 'online'
+			return 0, nil
+		end,
+	})
+	-- The newer check may repair too (on a box the lock serialises them and the
+	-- second sees exit 11), but no repair is cut off part way.
+	ok(#repairs >= 1)
+	eq(finished, #repairs, 'every repair ran to the end')
+end
+
 
 function tests.test_segment_trunk_realises_segments_without_cfg_net_interfaces()
 	fibers.run(function()
