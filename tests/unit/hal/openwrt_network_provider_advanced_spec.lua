@@ -921,4 +921,89 @@ function tests.test_mwan3_interfaces_start_online_unless_configured()
 end
 
 
+function tests.test_interface_status_reads_netifd_ipv4_address_field()
+	-- netifd reports IPv4 as "ipv4-address" (as `ifstatus wan` shows on a box).
+	local live = openwrt_provider._test.normalise_interface_status('wan', {
+		up = true, l3_device = 'eth1',
+		['ipv4-address'] = { { address = '203.0.113.10', mask = 24 } },
+		['ipv6-address'] = {},
+	})
+	eq(#live.ipv4, 1)
+	eq(live.ipv4[1].address, '203.0.113.10')
+	eq(live.ipv4[1].mask, 24)
+
+	local legacy = openwrt_provider._test.normalise_interface_status('wan', { address = { { address = '198.51.100.1' } } })
+	eq(legacy.ipv4[1].address, '198.51.100.1', 'the older field is still accepted')
+end
+
+function tests.test_live_interfaces_are_indexed_by_product_interface()
+	local ctx = ok(names.allocate({
+		interfaces = { wan = {}, modem_primary = {} },
+		wan = { members = { wan = { interface = 'wan' }, modem_primary = { interface = 'modem_primary' } } },
+	}))
+	local generated = ctx:iface('modem_primary')
+	ok(generated ~= 'modem_primary', 'long ids are shortened for OpenWrt')
+	local by_sem = openwrt_provider._test.live_interfaces_by_semantic({
+		wan = { id = 'wan' },
+		[generated] = { id = generated },
+	}, ctx)
+	eq(by_sem.modem_primary.id, generated)
+	eq(by_sem.wan.id, 'wan')
+	eq(by_sem[generated], nil)
+end
+
+function tests.test_live_snapshot_carries_netifd_addresses_to_backhaul_under_product_ids()
+	-- Drive the real snapshot path against a fake `ubus` on PATH that answers
+	-- `ubus call network.interface.<name> status` with netifd-shaped JSON.
+	local stdlib = require 'posix.stdlib'
+	local dir = os.tmpname(); os.remove(dir); assert(os.execute('mkdir -p ' .. dir))
+	local script = assert(io.open(dir .. '/ubus', 'w'))
+	script:write('#!/bin/sh\n[ -f "' .. dir .. '/$4.json" ] && cat "' .. dir .. '/$4.json" || echo "{}"\n')
+	script:close()
+	assert(os.execute('chmod +x ' .. dir .. '/ubus'))
+	local function reply(object, address)
+		local f = assert(io.open(dir .. '/' .. object .. '.json', 'w'))
+		f:write('{"up":true,"l3_device":"wwan0","ipv4-address":[{"address":"' .. address
+			.. '","mask":30}],"ipv6-address":[]}')
+		f:close()
+	end
+	local old_path = os.getenv('PATH')
+	stdlib.setenv('PATH', dir .. ':' .. old_path)
+
+	local ctx = ok(names.allocate({
+		interfaces = { modem_primary = {} },
+		wan = { members = { modem_primary = { interface = 'modem_primary' } } },
+	}))
+	local generated = ctx:iface('modem_primary')
+	local backhaul = require 'services.net.backhaul_model'
+	local function snapshot_address()
+		local observed = { interfaces = { [generated] = {} } }
+		fibers.run(function()
+			openwrt_provider._test.augment_with_live_snapshot({}, observed, {}, 'network', nil, ctx)
+		end)
+		local model = backhaul.reduce({
+			wan = { configured_members = { modem_primary = { interface = 'modem_primary', metric = 2 } } },
+			observed = { snapshot = {
+				multiwan = { interfaces_by_semantic = {
+					modem_primary = { interface = generated, state = 'online', usable = true },
+				} },
+				live = observed.live,
+			} },
+		}, { now = 1 })
+		return model.uplinks.modem_primary.path_address
+	end
+
+	local ok_run, err = pcall(function()
+		reply('network.interface.' .. generated, '10.1.2.3')
+		local first = snapshot_address()
+		eq(first and first.address, '10.1.2.3', 'live address under generated name ' .. generated)
+		eq(first.source, 'hal-network-live')
+		reply('network.interface.' .. generated, '10.9.8.7')
+		eq(snapshot_address().address, '10.9.8.7', 'a new address is picked up by the next snapshot')
+	end)
+	stdlib.setenv('PATH', old_path)
+	os.execute('rm -rf ' .. dir)
+	if not ok_run then error(err, 0) end
+end
+
 return tests

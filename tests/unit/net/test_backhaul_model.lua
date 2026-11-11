@@ -201,4 +201,61 @@ function tests.test_gsm_member_stays_present_without_gsm_details()
 	eq(uplink.ifname, 'wwan0')
 end
 
+function tests.test_live_addresses_reach_members_with_shortened_openwrt_names()
+	local function snap(address)
+		return {
+			wan = { configured_members = {
+				modem_primary = { interface = 'modem_primary', metric = 2, source = { kind = 'gsm-uplink', id = 'primary' } },
+				lte_backup = { interface = 'lte_backup', metric = 3 },
+			} },
+			sources = { gsm_uplinks = { primary = { connected = true, linux = { ifname = 'wwan0' } } } },
+			observed = { snapshot = {
+				multiwan = { interfaces_by_semantic = {
+					modem_primary = { interface = 'mopri79e', state = 'online', usable = true },
+					lte_backup = { interface = 'ltbac1a2', state = 'online', usable = true },
+				} },
+				live = {
+					-- HAL keys live records by the generated OpenWrt name and
+					-- indexes them by product interface.
+					interfaces = {
+						mopri79e = { ipv4 = { { address = address } } },
+						ltbac1a2 = { ipv4 = { { address = '192.0.2.5' } } },
+					},
+					interfaces_by_semantic = {
+						modem_primary = { ipv4 = { { address = address } } },
+						lte_backup = { ipv4 = { { address = '192.0.2.5' } } },
+					},
+				},
+			} },
+		}
+	end
+	local model = backhaul.reduce(snap('10.1.2.3'), { now = 1 })
+	eq(model.uplinks.modem_primary.path_address.address, '10.1.2.3', 'gsm member')
+	eq(model.uplinks.modem_primary.path_address.source, 'hal-network-live')
+	eq(model.uplinks.lte_backup.path_address.address, '192.0.2.5', 'host member')
+
+	-- The address feeds the speedtest measurement key, so a new address re-tests.
+	local policy = require 'services.net.wan_policy'
+	local function due_after_change()
+		local before = snap('10.1.2.3')
+		before.backhaul = backhaul.reduce(before, { now = 1 })
+		before.wan.load_balancing = { speedtests = { enabled = true, interval_s = 1000 } }
+		local uplink
+		for _, u in ipairs(policy.collect_uplinks(before)) do if u.uplink_id == 'modem_primary' then uplink = u end end
+		local m = policy.measurement(before, uplink)
+		local after = snap('10.9.8.7')
+		after.backhaul = backhaul.reduce(after, { now = 2 })
+		after.wan.load_balancing = before.wan.load_balancing
+		after.wan_runtime = { speedtests = { modem_primary = {
+			state = 'ok', ok = true, last_success_mbps = 20, measurement_key = m.key,
+			last_success = { mbps = 20, completed_at = 10, measurement_key = m.key, measurement = m },
+		} } }
+		for _, u in ipairs(policy.collect_uplinks(after)) do if u.uplink_id == 'modem_primary' then uplink = u end end
+		return policy.speedtest_due(after, uplink, { generation = 1, now = 20 })
+	end
+	local due, reason = due_after_change()
+	eq(due, true)
+	eq(reason, 'path_changed_ip')
+end
+
 return tests

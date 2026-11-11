@@ -1797,8 +1797,10 @@ local function normalise_interface_status(ifid, st)
 		data = copy_plain(st.data or {}),
 		raw = copy_plain(st),
 	}
-	for i = 1, #(st.address or {}) do
-		local a = st.address[i]
+	-- netifd reports IPv4 as "ipv4-address"; older callers passed "address".
+	local ipv4 = st['ipv4-address'] or st.ipv4_address or st.address or {}
+	for i = 1, #ipv4 do
+		local a = ipv4[i]
 		if is_plain_table(a) then
 			out.ipv4[#out.ipv4 + 1] = { address = a.address, mask = a.mask, ptpaddress = a.ptpaddress }
 		end
@@ -1935,6 +1937,21 @@ local function normalise_mwan3_status(st, name_ctx)
 	return out
 end
 
+-- Live records are keyed by the generated OpenWrt interface name (for example
+-- "mopri79e"); index them by product interface id too, as interfaces_by_semantic
+-- does for mwan3, so NET can find them without OpenWrt names.
+local function live_interfaces_by_semantic(interfaces, name_ctx)
+	local out = {}
+	for ifid, norm in pairs(interfaces or {}) do
+		local semantic = ifid
+		if name_ctx and type(name_ctx.semantic_for) == 'function' then
+			semantic = name_ctx:semantic_for('logical_interface', ifid) or ifid
+		end
+		out[semantic] = norm
+	end
+	return out
+end
+
 local function augment_with_live_snapshot(config, observed, req, subject, trigger, name_ctx)
 	observed.live = observed.live or { interfaces = {}, devices = {}, routes = {}, errors = {} }
 	local live = observed.live
@@ -1954,6 +1971,7 @@ local function augment_with_live_snapshot(config, observed, req, subject, trigge
 			append_error(live.errors, 'network.interface.' .. tostring(ifid) .. ' status: ' .. tostring(err))
 		end
 	end
+	live.interfaces_by_semantic = live_interfaces_by_semantic(live.interfaces, name_ctx)
 	for _, iface in pairs(observed.interfaces or {}) do
 		if iface.endpoint then add_unique(devices, iface.endpoint.ifname or iface.endpoint.device or iface.endpoint.name, device_seen) end
 		add_unique(devices, iface.device, device_seen)
@@ -2499,6 +2517,9 @@ end
 
 M._test = {
 	normalise_mwan3_status = normalise_mwan3_status,
+	normalise_interface_status = normalise_interface_status,
+	live_interfaces_by_semantic = live_interfaces_by_semantic,
+	augment_with_live_snapshot = augment_with_live_snapshot,
 	observer_forward_script = observer_forward_script,
 	mwan3_user_block = mwan3_user_block,
 	strip_observer_block = strip_observer_block,
