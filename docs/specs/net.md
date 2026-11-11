@@ -565,7 +565,7 @@ Telemetry names the product interface id (for example `modem_primary`), never th
 
 - `speedtest` (`net.<interface>.speedtest`): Mbps for each successful test.
 - `speedtest_in_use` (`net.<interface>.speedtest_in_use`): whether that test ran on the backhaul carrying traffic. Standby results show what is left on the table; in-use results are measured under client load.
-- `active_uplink` (`net.active_uplink`): the interface carrying traffic, or `last_resort` / `none`. It is sent on each change and again with each speedtest result, because metrics drops samples received before it is configured. The `any_change` pipeline drops the repeats.
+- `active_uplink` (`net.active_uplink`): the interface carrying traffic, or `last_resort` / `none`. It is sent on each change, with each speedtest result, and every `active_uplink_refresh_s` (service parameter, default 300). Metrics drops samples received before it is configured, and with nothing online no speedtest runs to resend the value. The `any_change` pipeline drops the repeats.
 
 ## Observation and drift
 

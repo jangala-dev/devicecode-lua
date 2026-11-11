@@ -1159,7 +1159,7 @@ local function active_scope_cfg(speedtest_opts, members)
 	return c
 end
 
-local function start_active_scope_service(scope, speedtest_opts)
+local function start_active_scope_service(scope, speedtest_opts, service_params)
 	local mailbox = require 'fibers.mailbox'
 	local b = busmod.new()
 	local conn = b:connect()
@@ -1187,6 +1187,7 @@ local function start_active_scope_service(scope, speedtest_opts)
 	retain_network_config_status(conn, 'available')
 	retain_network_state_status_payload(conn, { schema = 'devicecode.cap.status/1', state = 'running', available = true })
 	local params = { conn = conn, config = active_scope_cfg(speedtest_opts), rev = h.rev, hal = hal }
+	for k, v in pairs(service_params or {}) do params[k] = v end
 	h.child = start_service(scope, conn, params)
 	function h.reconfigure(opts, members)
 		h.rev = h.rev + 1
@@ -1515,6 +1516,30 @@ function tests.test_active_uplink_telemetry_is_refreshed_with_each_speedtest()
 		end
 		ok(#values >= 3, 'sent on change and again with each speedtest, got ' .. #values)
 		for _, v in ipairs(values) do eq(v, 'wan_a') end
+		active_sub:unsubscribe()
+		h.stop()
+	end)
+end
+
+
+function tests.test_active_uplink_telemetry_is_refreshed_without_speedtests()
+	fibers.run(function (scope)
+		-- Every backhaul offline: no speedtest runs, so the value must still be
+		-- re-sent on its own in case metrics dropped the first one at startup.
+		local h = start_active_scope_service(scope, { scope = 'all', live_weights = false, interval_s = 60 },
+			{ active_uplink_refresh_s = 0.2 })
+		local active_sub = h.reader:subscribe({ 'obs', 'v1', 'net', 'metric', 'active_uplink' },
+			{ queue_len = 16, full = 'drop_oldest' })
+		h.observe(false, false)
+		local values = {}
+		local deadline = fibers.now() + 1.0
+		while fibers.now() < deadline do
+			local which, msg = fibers.perform(op.named_choice({ ev = active_sub:recv_op(), timeout = sleep.sleep_op(0.3) }))
+			if which == 'ev' then values[#values + 1] = msg.payload.value end
+		end
+		eq(#h.speedtests, 0, 'nothing is online to test')
+		ok(#values >= 3, 'refreshed without speedtests, got ' .. #values)
+		for _, v in ipairs(values) do eq(v, 'last_resort') end
 		active_sub:unsubscribe()
 		h.stop()
 	end)

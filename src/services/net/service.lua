@@ -237,6 +237,19 @@ local function publish_active_uplink_metric(state, cur)
 	state.svc:obs_metric('active_uplink', { value = tostring(value), namespace = { 'net', 'active_uplink' } })
 end
 
+-- Re-send the active uplink on a timer, independent of speedtests: metrics
+-- drops samples received before it is configured, and with nothing online no
+-- speedtest runs to refresh it.
+local function active_uplink_refresh_loop(state)
+	local interval = tonumber(state.active_uplink_refresh_s) or 300
+	if interval <= 0 then return end
+	while true do
+		sleep.sleep(interval)
+		local bh = state.model and state.model:snapshot().backhaul or nil
+		publish_active_uplink_metric(state, type(bh) == 'table' and bh.active_uplink or nil)
+	end
+end
+
 -- Checked on every publish, so any path that recomputes backhaul (observations,
 -- GSM changes, applies) reports a move of the active uplink.
 function report_active_uplink_change(state)
@@ -1409,6 +1422,7 @@ function M.run(scope, params)
 		counter_poll_enabled = params.counter_metrics ~= false and params.counter_poll ~= false,
 		counter_poll_interval_s = params.counter_poll_interval_s or params.counter_metrics_interval_s or 60,
 		counter_poll_timeout_s = params.counter_poll_timeout_s or 5,
+		active_uplink_refresh_s = params.active_uplink_refresh_s or 300,
 		interface_restart_retry_s = params.interface_restart_retry_s or INTERFACE_RESTART_RETRY_S,
 		current_generation = nil,
 		active_apply = nil,
@@ -1425,6 +1439,9 @@ function M.run(scope, params)
 
 	if state.counter_poll_enabled and conn then
 		scope:spawn(function () metrics.counter_metrics_loop(state) end)
+	end
+	if svc then
+		scope:spawn(function () active_uplink_refresh_loop(state) end)
 	end
 
 	scope:finally(function (_, status, primary)
