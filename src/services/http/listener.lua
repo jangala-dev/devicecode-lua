@@ -18,7 +18,12 @@ local function make(raw, opts)
 	opts = opts or {}
 	local self = setmetatable({
 		_raw = raw,
-		_contexts = setmetatable({}, { __mode = 'k' }),
+		-- Weak values too: each public context holds its transport context
+		-- (`_raw`), and LuaJIT's weak-keyed tables are not ephemerons, so with
+		-- weak keys alone every entry, and its request's stream and connection,
+		-- was kept for good. The transport context holds its public context
+		-- (`_http_public_context`), so an entry lives as long as its context.
+		_contexts = setmetatable({}, { __mode = 'kv' }),
 		_admitted_raw = setmetatable({}, { __mode = 'k' }),
 		_events_port = opts.events_port,
 	}, HttpListener)
