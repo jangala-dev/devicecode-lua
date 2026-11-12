@@ -825,6 +825,28 @@ local function pdp_cid_record(scope_state, cid)
 	return record
 end
 
+local function pdp_episode_unreset_cids(episode)
+	if episode.unreset_cids == nil then
+		episode.unreset_cids = {}
+		-- Compatibility for an episode created before this field existed, and for
+		-- deliberately constructed test state: pending means its corrections have
+		-- not yet been covered by a successful reset.
+		if episode.state == 'pending' then
+			for cid in pairs(episode.cids or {}) do episode.unreset_cids[cid] = true end
+		end
+	end
+	return episode.unreset_cids
+end
+
+local function pdp_episode_has_unreset_cids(episode)
+	return next(pdp_episode_unreset_cids(episode)) ~= nil
+end
+
+local function pdp_episode_clear_reset_cids(episode, covered)
+	local unreset = pdp_episode_unreset_cids(episode)
+	for cid in pairs(covered or {}) do unreset[cid] = nil end
+end
+
 local function merge_pdp_scopes(target, source)
 	if target == source then return target end
 	target.inspection_failures = math.min(MAX_PDP_INSPECTION_FAILURES,
@@ -851,11 +873,20 @@ local function merge_pdp_scopes(target, source)
 			local incoming = source.active_episode
 			episode.restart_count = math.max(episode.restart_count or 0, incoming.restart_count or 0)
 			for cid in pairs(incoming.cids or {}) do episode.cids[cid] = true end
+			local unreset = pdp_episode_unreset_cids(episode)
+			for cid in pairs(pdp_episode_unreset_cids(incoming)) do unreset[cid] = true end
 			episode.pending_fail_open = episode.pending_fail_open or incoming.pending_fail_open
 			episode.restart_inflight = episode.restart_inflight or incoming.restart_inflight
-			local state_rank = { pending = 1, awaiting_transition = 2, awaiting_reinspection = 3 }
-			if (state_rank[incoming.state] or 0) > (state_rank[episode.state] or 0) then
-				episode.state = incoming.state
+			if next(unreset) then
+				-- A definition changed after the other episode's reset still needs a
+				-- reset, even if that older episode is awaiting reinspection.
+				episode.state = 'pending'
+			elseif episode.state == 'awaiting_reinspection'
+				or incoming.state == 'awaiting_reinspection' then
+				episode.state = 'awaiting_reinspection'
+			elseif episode.state == 'awaiting_transition'
+				or incoming.state == 'awaiting_transition' then
+				episode.state = 'awaiting_transition'
 			end
 		end
 	end
@@ -881,7 +912,8 @@ local function ensure_pdp_episode(scope_state)
 	if not scope_state.active_episode then
 		scope_state.next_episode = (scope_state.next_episode or 0) + 1
 		scope_state.active_episode = {
-			id = scope_state.next_episode, cids = {}, restart_count = 0, state = 'pending',
+			id = scope_state.next_episode, cids = {}, unreset_cids = {},
+			restart_count = 0, state = 'pending',
 		}
 	end
 	return scope_state.active_episode
@@ -911,9 +943,13 @@ function GsmModem:_reconcile_pdp_reservations(modem_state)
 			-- waiting for a state transition, is itself evidence that the reset took
 			-- effect.  The replacement must inspect the resulting context before it
 			-- can justify another correction or reset.
+			if inflight and inflight.stage == 'rpc_started' then
+				pdp_episode_clear_reset_cids(episode, inflight.covered_cids)
+			end
 			if (inflight and inflight.stage == 'rpc_started')
 				or episode.state == 'awaiting_transition' then
-				episode.state = 'awaiting_reinspection'
+				episode.state = pdp_episode_has_unreset_cids(episode)
+					and 'pending' or 'awaiting_reinspection'
 			end
 			episode.restart_inflight = nil
 		end
@@ -1517,12 +1553,18 @@ function GsmModem:_restart_after_pdp(scope_state, episode, generation)
 		if not self:_pdp_owner_active(generation) then return false, 'pdp_owner_stale' end
 		invocation.from = retained and retained.payload and retained.payload.to or self.current_state
 		episode.restart_count = (episode.restart_count or 0) + 1
-		episode.restart_inflight = { owner_generation = generation, stage = 'reserved' }
+		local covered_cids = {}
+		for cid in pairs(pdp_episode_unreset_cids(episode)) do covered_cids[cid] = true end
+		episode.restart_inflight = {
+			owner_generation = generation, stage = 'reserved', covered_cids = covered_cids,
+		}
 		episode.restart_inflight.stage = 'rpc_started'
 		local _, err = call_modem_rpc(self.cap, 'restart', {}, REQUEST_TIMEOUT)
 		if not self:_pdp_owner_active(generation) then return false, 'pdp_owner_stale' end
 		episode.restart_inflight = nil
-		episode.state = err == '' and 'awaiting_transition' or 'pending'
+		if err == '' then pdp_episode_clear_reset_cids(episode, covered_cids) end
+		episode.state = err == '' and not pdp_episode_has_unreset_cids(episode)
+			and 'awaiting_transition' or 'pending'
 		local safe_err = err == '' and '' or pdp_safe_error(err)
 		self.svc:obs_log(err == "" and 'info' or 'warn', {
 			what = 'pdp_restart', modem = self.name, err = safe_err,
@@ -1747,7 +1789,9 @@ function GsmModem:_configure_pdp()
 				})
 				if result.outcome == 'applied' or result.outcome == 'uncertain' then
 					local episode = ensure_pdp_episode(scope_state)
-					episode.cids[tostring(context.cid)] = true
+					local cid = tostring(context.cid)
+					episode.cids[cid] = true
+					pdp_episode_unreset_cids(episode)[cid] = true
 				end
 				if result.outcome == 'rejected' then
 					change_err = result.err ~= '' and result.err or 'pdp_correction_rejected'

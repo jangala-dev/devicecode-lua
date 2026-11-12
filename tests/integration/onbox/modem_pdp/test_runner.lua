@@ -101,36 +101,46 @@ end
 ---@return nil
 function tests.restart_order_requires_post_reset_inspection()
 	runner.check_restart_order([[
-[INFO] gsm: pdp_contexts_checked modem=primary contexts=1:IPV4V6:active pdp_type=IP
-[INFO] gsm: pdp_restart modem=primary count=1 limit=2
-[INFO] gsm: pdp_contexts_checked modem=primary contexts=1:IP:active pdp_type=IP
+LOG  gsm  info  pdp_contexts_checked  pdp_contexts_checked modem=primary contexts=1:IPV4V6:active pdp_type=IP
+LOG  gsm  info  pdp_restart           pdp_restart modem=primary count=1 limit=2
+LOG  gsm  info  pdp_contexts_checked  pdp_contexts_checked modem=primary contexts=1:IP:active pdp_type=IP
 ]])
 	runner.check_restart_order([[
-[INFO] gsm: pdp_restart modem=primary count=1 limit=2
-[INFO] gsm: pdp_contexts_checked modem=secondary contexts=1:IP:active pdp_type=IP
-[INFO] gsm: pdp_contexts_checked modem=primary contexts=1:IPV4V6:active pdp_type=IP
-[INFO] gsm: pdp_restart modem=primary count=2 limit=2
-[INFO] gsm: pdp_contexts_checked modem=primary contexts=1:IP:active pdp_type=IP
+LOG  gsm  warn  pdp_restart           pdp_restart modem=primary err=pdp_operation_failed count=1 limit=2
+LOG  gsm  info  pdp_restart           pdp_restart modem=primary count=2 limit=2
+LOG  gsm  info  pdp_contexts_checked  pdp_contexts_checked modem=secondary contexts=1:IP:active pdp_type=IP
+LOG  gsm  info  pdp_contexts_checked  pdp_contexts_checked modem=primary contexts=1:IP:active pdp_type=IP
+]])
+	runner.check_restart_order([[
+LOG  gsm  info   pdp_restart        pdp_restart modem=primary count=1 limit=2
+LOG gsm error autoconnect_failed autoconnect_failed modem=primary err=pdp_restart_state_timeout
+LOG  gsm  info   pdp_restart        pdp_restart modem=primary count=2 limit=2
+LOG  gsm  info   pdp_contexts_checked pdp_contexts_checked modem=primary contexts=1:IP:active pdp_type=IP
 ]])
 	rejects(function()
 		runner.check_restart_order([[
-[INFO] gsm: pdp_restart modem=primary count=1 limit=2
-[INFO] gsm: primary detected
-[INFO] gsm: pdp_restart modem=primary count=2 limit=2
+LOG  gsm  info  pdp_restart  pdp_restart modem=primary count=1 limit=2
+LOG  gsm  info  detected     primary detected
+LOG  gsm  info  pdp_restart  pdp_restart modem=primary count=2 limit=2
 ]])
 	end, 'restarted twice without an intervening context inspection')
 	rejects(function()
 		runner.check_restart_order([[
-[INFO] gsm: pdp_restart modem=primary count=1 limit=2
-[ERROR] gsm: pdp_enforcement_exhausted modem=primary budget_kind=restart count=2
+LOG  gsm  info   pdp_restart               pdp_restart modem=primary count=1 limit=2
+LOG  gsm  error  pdp_enforcement_exhausted pdp_enforcement_exhausted modem=primary budget_kind=restart count=2
 ]])
 	end, 'exhausted its restart budget before post-reset inspection')
 	rejects(function()
 		runner.check_restart_order([[
-[INFO] gsm: pdp_restart modem=primary count=1 limit=2
-[INFO] gsm: primary modem state -> connected
+LOG  gsm  info  pdp_restart  pdp_restart modem=primary count=1 limit=2
+LOG  gsm  info  state        primary modem state -> connected
 ]])
 	end, 'reached the end of the phase without post-reset inspection')
+	rejects(function()
+		runner.check_restart_order([[
+[INFO] gsm: pdp_contexts_checked modem=primary contexts=1:IP:active pdp_type=IP
+]])
+	end, 'No PDP lifecycle events recognised')
 end
 
 ---@return nil

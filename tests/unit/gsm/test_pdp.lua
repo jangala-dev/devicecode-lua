@@ -358,10 +358,14 @@ end
 
 function tests.test_pdp_restart_unobserved_transition_restores_retry_state()
 	runfibers.run(function()
-		local m, _, _, _, subs = fixture({ context(1, 'IPV6', true) }, {
-			call = function(method, _, active_subs)
+		local contexts = { context(1, 'IPV6', true) }
+		local m, calls, _, _, subs = fixture(contexts, {
+			call = function(method, opts, active_subs)
+				if method == 'set_pdn_type' then contexts[1].pdp_type = opts.pdp_type end
 				if method == 'restart' then
-					active_subs[1].recv_op = function() return op.always(nil) end
+					for _, sub in ipairs(active_subs) do
+						if not sub.closed then sub.recv_op = function() return op.always(nil) end end
+					end
 					return reply(true)
 				end
 			end,
@@ -372,6 +376,53 @@ function tests.test_pdp_restart_unobserved_transition_restores_retry_state()
 		eq(m.pdp_restart_waiting, false)
 		assert(m.svc.pdp_enforcement.modems['modem-1'].types.IP.fallback.active_episode)
 		eq(subs[1].closed, true)
+
+		-- Without replacement there is no evidence that the modem actually reset,
+		-- so the existing transition-timeout retry remains in force.
+		restarted, err = m:_configure_pdp()
+		eq(restarted, false)
+		eq(err, '')
+		eq(count(calls, 'restart'), 2)
+		eq(count(calls, 'get'), 1)
+	end)
+end
+
+function tests.test_pdp_scope_merge_preserves_a_correction_whose_reset_failed_after_an_older_reset()
+	runfibers.run(function()
+		local m, calls = fixture({ context(1, 'IP', true), context(2, 'IP', true) })
+		m:_claim_pdp_owner()
+		local modem_state = m.svc.pdp_enforcement.modems['modem-1']
+		modem_state.types.IP = {
+			iccids = {
+				sim = {
+					inspection_failures = 0, inspection_exhausted = false, next_episode = 1,
+					cids = { ['1'] = { corrections = 1, exhausted = false, blocked = false } },
+					active_episode = {
+						id = 1, cids = { ['1'] = true }, unreset_cids = {}, restart_count = 1,
+						state = 'awaiting_reinspection',
+					},
+					history = {},
+				},
+			},
+			fallback = {
+				inspection_failures = 0, inspection_exhausted = false, next_episode = 1,
+				cids = { ['2'] = { corrections = 1, exhausted = false, blocked = false } },
+				active_episode = {
+					id = 1, cids = { ['2'] = true }, unreset_cids = { ['2'] = true },
+					restart_count = 1, state = 'pending',
+				},
+				history = {},
+			},
+		}
+		m.pdp_iccid = 'sim'
+
+		local merged = m:_pdp_scope('IP')
+		eq(merged.active_episode.state, 'pending')
+		eq(merged.active_episode.unreset_cids['2'], true)
+		eq(m:_configure_pdp(), true)
+		eq(count(calls, 'restart'), 1)
+		eq(count(calls, 'get'), 0)
+		eq(next(merged.history[#merged.history].unreset_cids), nil)
 	end)
 end
 
@@ -1336,6 +1387,20 @@ function tests.test_pdp_owner_replacement_recorrects_a_reverted_context_before_s
 		eq(replacement_calls[1].opts.field, 'pdp_contexts')
 		eq(count(replacement_calls, 'set_pdn_type'), 1)
 		eq(count(replacement_calls, 'restart'), 1)
+
+		-- A third reversion is bounded by the per-CID correction budget.
+		contexts[1].pdp_type = 'IPV6'
+		local third, third_calls = fixture(contexts, { svc = svc })
+		third:_claim_pdp_owner()
+		restarted, err = third:_configure_pdp()
+		eq(restarted, false)
+		eq(err, '')
+		eq(count(third_calls, 'get'), 1)
+		eq(count(third_calls, 'set_pdn_type'), 0)
+		eq(count(third_calls, 'restart'), 0)
+		local record = svc.pdp_enforcement.modems['modem-1'].types.IP.fallback.cids['1']
+		eq(record.corrections, 2)
+		eq(record.exhausted, true)
 	end)
 end
 

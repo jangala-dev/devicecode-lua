@@ -78,24 +78,33 @@ end
 function M.check_restart_order(content)
 	-- A reset may replace the ModemManager object, but the next owner must establish
 	-- the current PDP facts before it spends another restart reservation or fails open.
-	local awaiting_inspection = {}
+	local awaiting_inspection, recognised = {}, 0
 	for line in content:gmatch('[^\n]+') do
-		local inspected = line:match('gsm:%s+pdp_contexts_checked%s+modem=([^%s]+)')
-		if inspected then awaiting_inspection[inspected] = nil end
-
-		local restarted = line:match('gsm:%s+pdp_restart%s+modem=([^%s]+)')
-		if restarted then
-			assert(not awaiting_inspection[restarted],
-				('PDP modem %s restarted twice without an intervening context inspection'):format(restarted))
-			awaiting_inspection[restarted] = true
-		end
-
-		local exhausted = line:match('gsm:%s+pdp_enforcement_exhausted%s+modem=([^%s]+)')
-		if exhausted and line:find('budget_kind=restart', 1, true) then
-			assert(not awaiting_inspection[exhausted],
-				('PDP modem %s exhausted its restart budget before post-reset inspection'):format(exhausted))
+		local service, _, event = line:match('^%s*LOG%s+(%S+)%s+(%S+)%s+(%S+)%s+')
+		if service == 'gsm' and (event == 'pdp_contexts_checked' or event == 'pdp_restart'
+			or event == 'pdp_enforcement_exhausted' or event == 'autoconnect_failed') then
+			recognised = recognised + 1
+			local modem = assert(line:match('%smodem=([^%s]+)'), event .. ' is missing modem')
+			if event == 'pdp_contexts_checked' then
+				awaiting_inspection[modem] = nil
+			elseif event == 'pdp_restart' and not line:match('%serr=[^%s]+') then
+				assert(not awaiting_inspection[modem],
+					('PDP modem %s restarted twice without an intervening context inspection'):format(modem))
+				awaiting_inspection[modem] = true
+			elseif event == 'pdp_enforcement_exhausted'
+				and line:find('budget_kind=restart', 1, true) then
+				assert(not awaiting_inspection[modem],
+					('PDP modem %s exhausted its restart budget before post-reset inspection'):format(modem))
+			elseif event == 'autoconnect_failed'
+				and (line:find('err=pdp_restart_state_timeout', 1, true)
+					or line:find('err=state subscription interrupted', 1, true)) then
+				-- A successful RPC without a transition is not proof that the modem
+				-- reset. Retrying it is existing behaviour and does not require inspection.
+				awaiting_inspection[modem] = nil
+			end
 		end
 	end
+	assert(recognised > 0, 'No PDP lifecycle events recognised in monitor-format logs')
 	for modem in pairs(awaiting_inspection) do
 		error(('PDP modem %s reached the end of the phase without post-reset inspection'):format(modem), 0)
 	end
