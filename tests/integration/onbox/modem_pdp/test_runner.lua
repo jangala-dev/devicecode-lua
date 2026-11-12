@@ -171,6 +171,19 @@ function tests.restart_order_accepts_complete_monitor_and_logread_lines()
 	assert(#failures == 0, table.concat(failures, '\n'))
 end
 
+function tests.restart_order_exempts_only_unobserved_transition_reasons()
+	local reset = 'LOG gsm info pdp_restart pdp_restart modem=primary count=2\n'
+	local exhausted = 'LOG gsm error pdp_enforcement_exhausted budget_kind=restart modem=primary\n'
+	for _, reason in ipairs({ 'pdp_restart_state_timeout', 'state subscription interrupted' }) do
+		runner.check_restart_order(reset
+			.. 'LOG gsm warn pdp_restart_unobserved modem=primary err=' .. reason .. '\n' .. exhausted)
+	end
+	rejects(function()
+		runner.check_restart_order(reset
+			.. 'LOG gsm warn pdp_restart_unobserved modem=primary err=unknown\n' .. exhausted)
+	end, 'exhausted its restart budget before post-reset inspection')
+end
+
 function tests.restart_order_requires_a_log_marker_boundary()
 	rejects(function()
 		runner.check_restart_order('BLOG gsm info pdp_contexts_checked modem=primary')

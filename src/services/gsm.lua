@@ -1580,11 +1580,16 @@ function GsmModem:_restart_after_pdp(scope_state, episode, generation)
 				state = state_sub:recv_op(),
 				timeout = sleep.sleep_op(math.max(0, deadline - fibers.now())),
 			}))
+			if not self:_pdp_owner_active(generation) then return false, 'pdp_owner_stale' end
 			if which == 'timeout' or not msg then
+				self.svc:obs_log('warn', {
+					what = 'pdp_restart_unobserved', modem = self.name,
+					err = which == 'timeout' and 'pdp_restart_state_timeout' or 'state subscription interrupted',
+					count = episode.restart_count,
+				})
 				if which == 'timeout' then return false, 'pdp_restart_state_timeout' end
 				return false, 'state subscription interrupted'
 			end
-			if not self:_pdp_owner_active(generation) then return false, 'pdp_owner_stale' end
 			local state = msg.payload and msg.payload.to
 			if msg.payload and pdp_restart_transition(msg.payload, invocation.from) then
 				return true, "", state

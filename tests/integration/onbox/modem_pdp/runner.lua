@@ -84,7 +84,8 @@ function M.check_restart_order(content)
 		-- Locate the LOG columns independently of those prefixes.
 		local service, _, event = line:match('%f[%w]LOG%s+(%S+)%s+(%S+)%s+(%S+)%s+')
 		if service == 'gsm' and (event == 'pdp_contexts_checked' or event == 'pdp_restart'
-			or event == 'pdp_enforcement_exhausted' or event == 'autoconnect_failed') then
+			or event == 'pdp_enforcement_exhausted' or event == 'autoconnect_failed'
+			or event == 'pdp_restart_unobserved') then
 			recognised = recognised + 1
 			local modem = assert(line:match('%smodem=([^%s]+)'), event .. ' is missing modem')
 			if event == 'pdp_contexts_checked' then
@@ -97,7 +98,7 @@ function M.check_restart_order(content)
 				and line:find('budget_kind=restart', 1, true) then
 				assert(not awaiting_inspection[modem],
 					('PDP modem %s exhausted its restart budget before post-reset inspection'):format(modem))
-			elseif event == 'autoconnect_failed'
+			elseif (event == 'autoconnect_failed' or event == 'pdp_restart_unobserved')
 				and (line:find('err=pdp_restart_state_timeout', 1, true)
 					or line:find('err=state subscription interrupted', 1, true)) then
 				-- A successful RPC without a transition is not proof that the modem

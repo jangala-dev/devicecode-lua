@@ -11,6 +11,7 @@ local at = require 'services.hal.backends.modem.at'
 local quectel = require 'services.hal.backends.modem.models.quectel'
 
 local tests = {}
+local prepare_autoconnect
 local function eq(a, b) assert(a == b, 'expected ' .. tostring(b) .. ', got ' .. tostring(a)) end
 local function reply(ok, reason) return op.always({ ok = ok, reason = reason or '' }) end
 local function correction(outcome, dispatched, err)
@@ -426,6 +427,56 @@ function tests.test_pdp_scope_merge_preserves_a_correction_whose_reset_failed_af
 	end)
 end
 
+function tests.test_pdp_unobserved_restart_exhaustion_is_accepted_by_log_checker()
+	local original_sleep_op = sleep.sleep_op
+	local ok, err = safe.pcall(function()
+		runfibers.run(function()
+			local contexts = { context(1, 'IPV6', true) }
+			local m, calls, logs
+			sleep.sleep_op = function(seconds)
+				if seconds >= 19 and seconds <= 20 then return op.always() end
+				return original_sleep_op(seconds)
+			end
+			m, calls, logs = fixture(contexts, { call = function(method, opts, subs)
+				if method == 'set_pdn_type' then contexts[1].pdp_type = opts.pdp_type end
+				if method == 'restart' then
+					-- Only reset subscriptions are interrupted; preserve the main loop's
+					-- card subscription so it can proceed to enable on exhaustion.
+					for index, sub in ipairs(subs) do
+						if index > 2 and not sub.closed then
+							sub.recv_op = function() return op.always(nil) end
+						end
+					end
+					return reply(true)
+				elseif method == 'enable' then
+					m.config_pulse:close()
+					return reply(true)
+				end
+			end })
+			prepare_autoconnect(m)
+			m:_autoconnect_loop()
+			eq(count(calls, 'restart'), 2)
+			eq(count(calls, 'enable'), 1)
+			local lines = {}
+			for _, payload in ipairs(logs) do
+				if type(payload) == 'table' then
+					local fields = {}
+					for key, value in pairs(payload) do
+						if key ~= 'what' and value ~= '' then
+							fields[#fields + 1] = key .. '=' .. tostring(value)
+						end
+					end
+					lines[#lines + 1] = '2026-11-12 14:30:00 (mono=100) LOG gsm info '
+						.. payload.what .. ' ' .. payload.what .. ' ' .. table.concat(fields, ' ')
+				end
+			end
+			require('onbox.modem_pdp.runner').check_restart_order(table.concat(lines, '\n'))
+		end)
+	end)
+	sleep.sleep_op = original_sleep_op
+	assert(ok, err)
+end
+
 function tests.test_pdp_recovered_correction_reset_is_retried_after_iccid_merge()
 	runfibers.run(function()
 		local contexts = { context(2, 'IPV6', true) }
@@ -642,7 +693,7 @@ end
 
 ---@param modem GsmModem
 ---@return nil
-local function prepare_autoconnect(modem)
+prepare_autoconnect = function(modem)
 	modem.cfg.autoconnect = true
 	modem.domain = { retain = function() end }
 	modem._publish_uplink_state = function() end
@@ -1456,6 +1507,41 @@ function tests.test_pdp_owner_replacement_recorrects_a_reverted_context_before_s
 		local record = svc.pdp_enforcement.modems['modem-1'].types.IP.fallback.cids['1']
 		eq(record.corrections, 2)
 		eq(record.exhausted, true)
+	end)
+end
+
+function tests.test_pdp_owner_replacement_suppresses_stale_unobserved_reset_log()
+	runfibers.run(function(scope)
+		local contexts, logs = { context(1, 'IPV6', true) }, {}
+		local svc = { obs_log = function(_, _, payload) logs[#logs + 1] = payload end }
+		local old, old_calls, _, _, old_subs = fixture(contexts, {
+			svc = svc,
+			call = function(method, opts)
+				if method == 'set_pdn_type' then contexts[1].pdp_type = opts.pdp_type end
+				if method == 'restart' then return reply(true) end
+			end,
+		})
+		local invocation = assert(scope:child())
+		local old_err
+		assert(invocation:spawn(function()
+			local _
+			_, old_err = old:_configure_pdp()
+		end))
+		while not old.pdp_restart_waiting do sleep.sleep(0.001) end
+		eq(count(old_calls, 'restart'), 1)
+
+		local replacement, replacement_calls = fixture(contexts, { svc = svc })
+		replacement:_claim_pdp_owner()
+		contexts[1].pdp_type = 'IPV6'
+		eq(replacement:_configure_pdp(), true)
+		eq(count(replacement_calls, 'restart'), 1)
+
+		-- A late subscription closure must not let the stale waiter report that
+		-- the replacement owner's latest reset had an unobserved transition.
+		old_subs[1].queue:put(nil)
+		fibers.perform(invocation:join_op())
+		eq(old_err, 'pdp_owner_stale')
+		eq(count_logs(logs, 'pdp_restart_unobserved'), 0)
 	end)
 end
 
