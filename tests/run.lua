@@ -20,6 +20,7 @@ end
 
 local safe = require 'coxpcall'
 local stdlib = require 'posix.stdlib'
+local clock = require 'posix.time'
 local discovery = require 'tests.support.discovery'
 
 assert(stdlib.setenv('CONFIG_TARGET', 'services'))
@@ -31,8 +32,10 @@ local files = discovery.discover({
 })
 
 local function monotonic_now()
-	if type(os.clock) == 'function' then return os.clock() end
-	return 0
+	-- Report real elapsed time, independently of the virtual fiber clock used
+	-- by tests to advance simulated timers without waiting.
+	local ts = assert(clock.clock_gettime(clock.CLOCK_MONOTONIC))
+	return ts.tv_sec + ts.tv_nsec / 1e9
 end
 
 local function sorted_keys(t)
