@@ -80,7 +80,9 @@ function M.check_restart_order(content)
 	-- the current PDP facts before it spends another restart reservation or fails open.
 	local awaiting_inspection, recognised = {}, 0
 	for line in content:gmatch('[^\n]+') do
-		local service, _, event = line:match('^%s*LOG%s+(%S+)%s+(%S+)%s+(%S+)%s+')
+		-- logread preserves the monitor timestamp and may add a syslog prefix.
+		-- Locate the LOG columns independently of those prefixes.
+		local service, _, event = line:match('%f[%w]LOG%s+(%S+)%s+(%S+)%s+(%S+)%s+')
 		if service == 'gsm' and (event == 'pdp_contexts_checked' or event == 'pdp_restart'
 			or event == 'pdp_enforcement_exhausted' or event == 'autoconnect_failed') then
 			recognised = recognised + 1

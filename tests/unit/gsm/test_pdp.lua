@@ -426,6 +426,61 @@ function tests.test_pdp_scope_merge_preserves_a_correction_whose_reset_failed_af
 	end)
 end
 
+function tests.test_pdp_recovered_correction_reset_is_retried_after_iccid_merge()
+	runfibers.run(function()
+		local contexts = { context(2, 'IPV6', true) }
+		local svc = { obs_log = function() end }
+		local replacement, replacement_calls
+		local reset_attempts = 0
+		local old, old_calls = fixture(contexts, {
+			svc = svc,
+			call = function(method, opts)
+				if method == 'set_pdn_type' then
+					contexts[1].pdp_type = opts.pdp_type
+					replacement, replacement_calls = fixture(contexts, {
+						svc = svc,
+						call = function(replacement_method)
+							if replacement_method == 'restart' then
+								reset_attempts = reset_attempts + 1
+								if reset_attempts == 1 then return reply(false, 'reset failed') end
+							end
+						end,
+					})
+					replacement:_claim_pdp_owner()
+					return correction('applied', true)
+				end
+			end,
+		})
+		old:_claim_pdp_owner()
+		-- Existing SIM bookkeeping from an earlier correction/reset. The new
+		-- owner starts without that SIM identity and uses the fallback scope.
+		old.pdp_iccid = 'sim'
+		local previous = old:_pdp_scope('IP')
+		previous.cids['1'] = { corrections = 1, exhausted = false, blocked = false }
+		previous.active_episode = {
+			id = 1, cids = { ['1'] = true }, unreset_cids = {},
+			restart_count = 1, state = 'awaiting_reinspection',
+		}
+		old.pdp_iccid = nil
+
+		eq(select(2, old:_configure_pdp()), 'pdp_owner_stale')
+		eq(count(old_calls, 'set_pdn_type'), 1)
+		eq(count(old_calls, 'restart'), 0)
+		local fallback = svc.pdp_enforcement.modems['modem-1'].types.IP.fallback
+		eq(fallback.cids['2'].last_result.outcome, 'uncertain')
+		eq(fallback.active_episode.unreset_cids['2'], true)
+		eq(select(2, replacement:_configure_pdp()), 'pdp_operation_failed')
+		eq(count(replacement_calls, 'restart'), 1)
+
+		replacement:_queue_pdp_iccid('sim')
+		local restarted, err = replacement:_configure_pdp()
+		eq(err, '')
+		eq(count(replacement_calls, 'restart'), 2)
+		eq(restarted, true)
+		eq(count(replacement_calls, 'get'), 0)
+	end)
+end
+
 function tests.test_pdp_restart_cancellation_cleans_wait_and_consumes_reservation()
 	runfibers.run(function(scope)
 		local m, calls = fixture({ context(1, 'IPV6', true) }, {

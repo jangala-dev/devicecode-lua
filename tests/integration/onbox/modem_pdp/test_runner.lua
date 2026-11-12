@@ -144,6 +144,39 @@ LOG  gsm  info  state        primary modem state -> connected
 end
 
 ---@return nil
+function tests.restart_order_accepts_complete_monitor_and_logread_lines()
+	local failures = {}
+	for _, prefix in ipairs({
+		'2026-11-12 12:40:54 (mono=437915.910)  ',
+		'Thu Nov 12 12:40:54 2026 daemon.info devicecode[123]: 2026-11-12 12:40:54 (mono=437915.910)  ',
+	}) do
+		local function lines(events)
+			return prefix .. table.concat(events, ' extra=ignored\n' .. prefix) .. ' extra=ignored\n'
+		end
+		local inspected = 'LOG gsm info pdp_contexts_checked pdp_contexts_checked modem=primary contexts=1:IP:active'
+		local reset = 'LOG gsm info pdp_restart pdp_restart modem=primary count=1 limit=2'
+		local failed = 'LOG gsm warn pdp_restart pdp_restart modem=primary err=pdp_operation_failed count=1'
+		for name, check in pairs({
+			success = function() runner.check_restart_order(lines({ reset, inspected })) end,
+			failed_retry = function() runner.check_restart_order(lines({ failed, reset, inspected })) end,
+			double_reset = function()
+				rejects(function() runner.check_restart_order(lines({ reset, reset, inspected })) end,
+					'restarted twice without an intervening context inspection')
+			end,
+		}) do
+			local ok, err = pcall(check)
+			if not ok then failures[#failures + 1] = name .. ': ' .. tostring(err) end
+		end
+	end
+	assert(#failures == 0, table.concat(failures, '\n'))
+end
+
+function tests.restart_order_requires_a_log_marker_boundary()
+	rejects(function()
+		runner.check_restart_order('BLOG gsm info pdp_contexts_checked modem=primary')
+	end, 'No PDP lifecycle events recognised')
+end
+
 function tests.arguments()
 	local args = runner.parse_args({}, repo, here)
 	equal(args.first, 'IP')

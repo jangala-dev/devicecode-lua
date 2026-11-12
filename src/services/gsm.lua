@@ -927,6 +927,7 @@ function GsmModem:_reconcile_pdp_reservations(modem_state)
 				if inflight.stage == 'rpc_started' then
 					local episode = ensure_pdp_episode(scope_state)
 					episode.cids[cid] = true
+					pdp_episode_unreset_cids(episode)[cid] = true
 					record.last_result = { outcome = 'uncertain', dispatched = true,
 						err = 'owner_replaced_after_correction_started' }
 				else
