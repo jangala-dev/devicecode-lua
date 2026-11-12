@@ -106,6 +106,53 @@ local function read_gid1(identity)
 	return nil, gid1_or_err or "Unknown error"
 end
 
+---@param out string?
+---@return string?
+---@return string error
+local function parse_spn(out)
+	if not out or out == "" then
+		return nil, "Command closed"
+	end
+
+	-- Do not fall back to "Operator Name" or PLMN/NITZ names: those describe
+	-- the network, whereas MVNO APN records must match the SIM's SPN.
+	local service_provider_section = out:match("Service Provider Name:?%s*\n(.-)\n%S")
+		or out:match("Service Provider Name:?%s*\n(.*)$")
+	local spn = service_provider_section
+		and service_provider_section:match("Name%s*:%s*'([^']+)'")
+	if not spn then
+		return nil, "Failed to parse qmicli Service Provider Name: " .. tostring(out)
+	end
+	return spn, ""
+end
+
+---@param identity ModemIdentity
+---@return string?
+---@return string error
+local function read_spn(identity)
+	local st, _, spn_or_err = fibers.run_scope(function()
+		local cmd = exec.command {
+			"qmicli", "-p", "-d", identity.mode_port, "--nas-get-operator-name",
+			stdin = "null",
+			stdout = "pipe",
+			stderr = "stdout"
+		}
+		local out, status, code, _, err = fibers.perform(cmd:combined_output_op())
+		if status ~= "exited" or code ~= 0 then
+			error("Failed to execute qmicli command: --nas-get-operator-name, reason: " .. tostring(err))
+		end
+
+		local spn, parse_err = parse_spn(out)
+		if not spn then error(parse_err) end
+		return spn
+	end)
+
+	if st == "ok" then
+		return spn_or_err, ""
+	end
+	return nil, spn_or_err or "Unknown error"
+end
+
 ---@param identity ModemIdentity
 ---@return string?
 ---@return string error
@@ -137,11 +184,16 @@ local function read_rf_band_info(identity)
 end
 
 ---@param info ModemSimInfo
+---@param spn string?
+---@param spn_err string
 ---@param gid1 string?
 ---@param gid_err string
 ---@return ModemSimInfo?
 ---@return string error
-local function sim_info_with_gid1(info, gid1, gid_err)
+local function sim_info_with_qmi_fields(info, spn, spn_err, gid1, gid_err)
+	if spn_err ~= "" then
+		spn = nil
+	end
 	if gid_err ~= "" then
 		gid1 = nil
 	end
@@ -153,7 +205,8 @@ local function sim_info_with_gid1(info, gid1, gid_err)
 		gid1,
 		info.sim_lock,
 		info.sim_lock_retries,
-		info.modem_state
+		info.modem_state,
+		spn
 	)
 end
 
@@ -349,7 +402,9 @@ local function add_mode_funcs(ModemBackend)
 
 		local active_band_class, band_err = read_rf_band_info(self.identity)
 		if band_err ~= "" then
-			return nil, band_err
+			-- RF-band data is optional enrichment. A modem can provide a valid home
+			-- network while temporarily failing (or omitting) this NAS response.
+			active_band_class = nil
 		end
 
 		return modem_types.new.ModemNetworkInfo(
@@ -369,14 +424,16 @@ local function add_mode_funcs(ModemBackend)
 			return nil, err
 		end
 
+		local spn, spn_err = read_spn(self.identity)
 		local gid1, gid_err = read_gid1(self.identity)
-		return sim_info_with_gid1(info, gid1, gid_err)
+		return sim_info_with_qmi_fields(info, spn, spn_err, gid1, gid_err)
 	end
 end
 
 return {
 	add_mode_funcs = add_mode_funcs,
 	_test = {
-		sim_info_with_gid1 = sim_info_with_gid1,
+		parse_spn = parse_spn,
+		sim_info_with_qmi_fields = sim_info_with_qmi_fields,
 	},
 }

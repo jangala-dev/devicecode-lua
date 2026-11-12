@@ -22,6 +22,7 @@ local fibers = require "fibers"
 local op = require "fibers.op"
 local sleep = require "fibers.sleep"
 local pulse = require "fibers.pulse"
+local time = require "fibers.utils.time"
 
 local perform = fibers.perform
 
@@ -600,7 +601,7 @@ end
 --- Phase 1: waits for the modem to enter 'connecting'. If the modem never enters
 --- 'connecting' within APN_SETTLE_TIMEOUT seconds (ModemManager rejected the command
 --- immediately), we consider it settled and return. Phase 2: once connecting, waits
---- (without a timeout) until the modem leaves 'connecting'.
+--- until the modem leaves 'connecting' or the settle deadline expires.
 --- Expects that the caller has already drained the retained current-state message from
 --- the subscription so only live transitions are seen here.
 ---@param name string
@@ -613,10 +614,11 @@ local function wait_for_connection(name, state_sub, log_fn)
 	log_fn = log_fn or function(_, _) end
 
 	-- Phase 1: wait for 'connecting', or give up after APN_SETTLE_TIMEOUT seconds.
+	local phase_one_deadline = time.monotonic() + APN_SETTLE_TIMEOUT
 	while true do
 		local which, msg = perform(op.named_choice({
 			state  = state_sub:recv_op(),
-			settle = sleep.sleep_op(APN_SETTLE_TIMEOUT),
+			settle = sleep.sleep_op(math.max(0, phase_one_deadline - time.monotonic())),
 		}))
 
 		if which == 'settle' then
@@ -641,9 +643,17 @@ local function wait_for_connection(name, state_sub, log_fn)
 	end
 
 	-- Phase 2: modem entered 'connecting'; wait until it leaves.
+	local phase_two_deadline = time.monotonic() + APN_SETTLE_TIMEOUT
 	while true do
-		local msg, err = state_sub:recv()
-		if err then
+		local which, msg = perform(op.named_choice({
+			state = state_sub:recv_op(),
+			settle = sleep.sleep_op(math.max(0, phase_two_deadline - time.monotonic())),
+		}))
+		if which == 'settle' then
+			log_fn('warn', { what = 'connection_settle_timeout', modem = name })
+			return true, ""
+		end
+		if not msg then
 			return false, "state subscription interrupted"
 		end
 		local state = msg.payload and msg.payload.to
@@ -1775,9 +1785,27 @@ function GsmModem:_apn_connect()
 		return nil, "mnc: " .. mnc_err, DEFAULT_RETRY_TIMEOUT
 	end
 
+	-- SPN may be unavailable before registration. Force a fresh SIM snapshot here,
+	-- matching the legacy behaviour of reading it immediately before APN ranking.
+	-- Read it before IMSI/GID1 so those fields reuse this refreshed grouped snapshot.
+	local spn, spn_err = modem_get_field(self.cap, 'spn', REQUEST_TIMEOUT, 0)
+	if spn_err ~= "" then
+		self.svc:obs_log('warn', {
+			what = 'spn_unavailable',
+			modem = self.name,
+			err = spn_err,
+		})
+		spn = nil
+	end
+
 	local imsi, imsi_err = modem_get_field(self.cap, 'imsi', REQUEST_TIMEOUT)
 	if imsi_err ~= "" then
-		return nil, "imsi: " .. imsi_err, DEFAULT_RETRY_TIMEOUT
+		self.svc:obs_log('warn', {
+			what = 'imsi_unavailable',
+			modem = self.name,
+			err = imsi_err,
+		})
+		imsi = nil
 	end
 
 	local gid1, gid1_err = modem_get_field(self.cap, 'gid1', REQUEST_TIMEOUT)
@@ -1792,7 +1820,7 @@ function GsmModem:_apn_connect()
 
 	-- Get ranked APNs
 	local rank_cutoff = tonumber(self.cfg.apn_rank_cutoff) or 4
-	local ranked_apns, rankings = apns.get_ranked_apns(mcc, mnc, imsi, nil, gid1, self.svc and self.svc.custom_apns)
+	local ranked_apns, rankings = apns.get_ranked_apns(mcc, mnc, imsi, spn, gid1, self.svc and self.svc.custom_apns)
 
 	-- Iterate through ranked APNs
 	for _, ranking in ipairs(rankings) do
@@ -2329,8 +2357,8 @@ function GsmService.start(conn, opts)
 		if type(spec) ~= 'table' or spec.import_v09_user_cfg ~= true then return store_ok, store_err end
 
 		local give_up_s = opts.apn_import_give_up_s or APN_IMPORT_GIVE_UP_S
-		local function read_op()
-			local read_opts, opts_err = cap_sdk.args.new.FilesystemReadOpts(apn_legacy_import.FILENAME)
+		local function read_op(filename)
+			local read_opts, opts_err = cap_sdk.args.new.FilesystemReadOpts(filename)
 			if not read_opts then return op.always(nil, opts_err or 'invalid_filesystem_read_opts') end
 			return cap_sdk.new_cap_ref(conn, 'fs', 'credentials'):call_control_op('read', read_opts, {
 				timeout = math.min(APN_IMPORT_READ_TIMEOUT, give_up_s),
@@ -2343,7 +2371,7 @@ function GsmService.start(conn, opts)
 			if store_ok and #custom_apns > 0 then return store_ok, store_err end
 			local result, err = nil, store_err
 			if store_ok then
-				result, err = perform(apn_legacy_import.run_op(apn_store, read_op))
+				result, err = perform(apn_legacy_import.run_op(apn_store, read_op, apn_legacy_import.FILENAMES))
 			end
 			if result then
 				if result.status == 'imported' then
@@ -2663,6 +2691,7 @@ end
 GsmService._test = {
 	normalize_config = normalize_config,
 	get_modem_config = get_modem_config,
+	wait_for_connection = wait_for_connection,
 	GsmModem = GsmModem,
 	build_sim_payload = build_sim_payload,
 	derive_access_tech = derive_access_tech,

@@ -61,7 +61,7 @@ local function start(scope, opts)
 	local bus = busmod.new()
 	local store = fake_store.new({ id = 'gsm', values = opts.values })
 	store:start(bus:connect({ origin_base = { kind = 'test', service = 'fake-hal' } }), { id = 'gsm', scope = scope })
-	local h = { bus = bus, store = store, reads = 0 }
+	local h = { bus = bus, store = store, reads = 0, read_files = {} }
 	if opts.replies then
 		local conn = bus:connect({ origin_base = { kind = 'test', service = 'fake-fs' } })
 		local ep = assert(bus_cleanup.bind(conn, { 'cap', 'fs', 'credentials', 'rpc', 'read' }, { queue_len = 8 }))
@@ -70,6 +70,7 @@ local function start(scope, opts)
 				local req = fibers.perform(ep:recv_op())
 				if req == nil then return end
 				h.reads = h.reads + 1
+				h.read_files[#h.read_files + 1] = req.payload and req.payload.filename
 				local reply = opts.replies[math.min(h.reads, #opts.replies)]
 				if type(reply) == 'function' then reply = reply() end
 				req:reply(reply)
@@ -127,7 +128,34 @@ function tests.test_first_boot_imports_v09_apns_and_publishes_them()
 		assert(state.records[1].apn == 'one')
 		local list = assert(stored(h))
 		assert(#list == 2 and list[2].apn == 'two')
-		assert(h.reads == 1)
+		assert(h.reads == 2)
+		assert(h.read_files[1] == 'remote.cfg' and h.read_files[2] == 'user.cfg')
+	end, { timeout = TIMEOUT })
+end
+
+function tests.test_first_boot_user_apns_replace_remote_apns()
+	runfibers.run(function(scope)
+		local h = start(scope, { replies = {
+			{ ok = true, reason = user_cfg({ rec('remote') }) },
+			{ ok = true, reason = user_cfg({ rec('user') }) },
+		} })
+		wait_until(function() return stored(h) ~= nil end, 'the imported APNs to be saved')
+		local list = assert(stored(h))
+		assert(#list == 1 and list[1].apn == 'user')
+		assert(h.read_files[1] == 'remote.cfg' and h.read_files[2] == 'user.cfg')
+	end, { timeout = TIMEOUT })
+end
+
+function tests.test_malformed_remote_still_imports_user_apns()
+	runfibers.run(function(scope)
+		local h = start(scope, { replies = {
+			{ ok = true, reason = '{' },
+			{ ok = true, reason = user_cfg({ rec('user') }) },
+		} })
+		wait_for_count(h, 1)
+		local list = assert(stored(h))
+		assert(#list == 1 and list[1].apn == 'user')
+		assert(h.reads == 2)
 	end, { timeout = TIMEOUT })
 end
 
@@ -154,7 +182,7 @@ function tests.test_read_failure_is_retried_until_it_works()
 			{ ok = true, reason = user_cfg({ rec('one') }) },
 		} })
 		wait_for_count(h, 1)
-		assert(h.reads == 2)
+		assert(h.reads == 3)
 		assert(stored(h)[1].apn == 'one')
 	end, { timeout = TIMEOUT })
 end
@@ -201,15 +229,18 @@ function tests.test_config_updates_cannot_starve_the_import()
 end
 
 function tests.test_missing_and_malformed_files_write_nothing()
-	for _, reply in ipairs({
-		{ ok = false, reason = 'failed to open file /data/configs/user.cfg: No such file or directory' },
-		{ ok = true, reason = 'not json' },
+	for _, case in ipairs({
+		{
+			reply = { ok = false, reason = 'failed to open file /data/configs/user.cfg: No such file or directory' },
+			reads = 2,
+		},
+		{ reply = { ok = true, reason = 'not json' }, reads = 2 },
 	}) do
 		runfibers.run(function(scope)
-			local h = start(scope, { replies = { reply } })
+			local h = start(scope, { replies = { case.reply } })
 			wait_until(function() return h.reads >= 1 end, 'the read')
 			fibers.perform(sleep.sleep_op(0.2))
-			assert(h.reads == 1, 'a final result must not be retried')
+			assert(h.reads == case.reads, 'a final result must not be retried')
 			assert(count_calls(h.store, 'put') == 0)
 		end, { timeout = TIMEOUT })
 	end
