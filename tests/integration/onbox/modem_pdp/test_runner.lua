@@ -99,6 +99,97 @@ function tests.invalid_contexts_fail()
 end
 
 ---@return nil
+function tests.restart_order_requires_post_reset_inspection()
+	runner.check_restart_order([[
+LOG  gsm  info  pdp_contexts_checked  pdp_contexts_checked modem=primary contexts=1:IPV4V6:active pdp_type=IP
+LOG  gsm  info  pdp_restart           pdp_restart modem=primary count=1 limit=2
+LOG  gsm  info  pdp_contexts_checked  pdp_contexts_checked modem=primary contexts=1:IP:active pdp_type=IP
+]])
+	runner.check_restart_order([[
+LOG  gsm  warn  pdp_restart           pdp_restart modem=primary err=pdp_operation_failed count=1 limit=2
+LOG  gsm  info  pdp_restart           pdp_restart modem=primary count=2 limit=2
+LOG  gsm  info  pdp_contexts_checked  pdp_contexts_checked modem=secondary contexts=1:IP:active pdp_type=IP
+LOG  gsm  info  pdp_contexts_checked  pdp_contexts_checked modem=primary contexts=1:IP:active pdp_type=IP
+]])
+	runner.check_restart_order([[
+LOG  gsm  info   pdp_restart        pdp_restart modem=primary count=1 limit=2
+LOG gsm error autoconnect_failed autoconnect_failed modem=primary err=pdp_restart_state_timeout
+LOG  gsm  info   pdp_restart        pdp_restart modem=primary count=2 limit=2
+LOG  gsm  info   pdp_contexts_checked pdp_contexts_checked modem=primary contexts=1:IP:active pdp_type=IP
+]])
+	rejects(function()
+		runner.check_restart_order([[
+LOG  gsm  info  pdp_restart  pdp_restart modem=primary count=1 limit=2
+LOG  gsm  info  detected     primary detected
+LOG  gsm  info  pdp_restart  pdp_restart modem=primary count=2 limit=2
+]])
+	end, 'restarted twice without an intervening context inspection')
+	rejects(function()
+		runner.check_restart_order([[
+LOG  gsm  info   pdp_restart               pdp_restart modem=primary count=1 limit=2
+LOG  gsm  error  pdp_enforcement_exhausted pdp_enforcement_exhausted modem=primary budget_kind=restart count=2
+]])
+	end, 'exhausted its restart budget before post-reset inspection')
+	rejects(function()
+		runner.check_restart_order([[
+LOG  gsm  info  pdp_restart  pdp_restart modem=primary count=1 limit=2
+LOG  gsm  info  state        primary modem state -> connected
+]])
+	end, 'reached the end of the phase without post-reset inspection')
+	rejects(function()
+		runner.check_restart_order([[
+[INFO] gsm: pdp_contexts_checked modem=primary contexts=1:IP:active pdp_type=IP
+]])
+	end, 'No PDP lifecycle events recognised')
+end
+
+---@return nil
+function tests.restart_order_accepts_complete_monitor_and_logread_lines()
+	local failures = {}
+	for _, prefix in ipairs({
+		'2026-11-12 12:40:54 (mono=437915.910)  ',
+		'Thu Nov 12 12:40:54 2026 daemon.info devicecode[123]: 2026-11-12 12:40:54 (mono=437915.910)  ',
+	}) do
+		local function lines(events)
+			return prefix .. table.concat(events, ' extra=ignored\n' .. prefix) .. ' extra=ignored\n'
+		end
+		local inspected = 'LOG gsm info pdp_contexts_checked pdp_contexts_checked modem=primary contexts=1:IP:active'
+		local reset = 'LOG gsm info pdp_restart pdp_restart modem=primary count=1 limit=2'
+		local failed = 'LOG gsm warn pdp_restart pdp_restart modem=primary err=pdp_operation_failed count=1'
+		for name, check in pairs({
+			success = function() runner.check_restart_order(lines({ reset, inspected })) end,
+			failed_retry = function() runner.check_restart_order(lines({ failed, reset, inspected })) end,
+			double_reset = function()
+				rejects(function() runner.check_restart_order(lines({ reset, reset, inspected })) end,
+					'restarted twice without an intervening context inspection')
+			end,
+		}) do
+			local ok, err = pcall(check)
+			if not ok then failures[#failures + 1] = name .. ': ' .. tostring(err) end
+		end
+	end
+	assert(#failures == 0, table.concat(failures, '\n'))
+end
+
+function tests.restart_order_exempts_only_unobserved_transition_reasons()
+	local reset = 'LOG gsm info pdp_restart pdp_restart modem=primary count=2\n'
+	local exhausted = 'LOG gsm error pdp_enforcement_exhausted budget_kind=restart modem=primary\n'
+	for _, reason in ipairs({ 'pdp_restart_state_timeout', 'state subscription interrupted' }) do
+		runner.check_restart_order(reset
+			.. 'LOG gsm warn pdp_restart_unobserved modem=primary err=' .. reason .. '\n' .. exhausted)
+	end
+	rejects(function()
+		runner.check_restart_order(reset
+			.. 'LOG gsm warn pdp_restart_unobserved modem=primary err=unknown\n' .. exhausted)
+	end, 'exhausted its restart budget before post-reset inspection')
+end
+
+function tests.restart_order_requires_a_log_marker_boundary()
+	rejects(function()
+		runner.check_restart_order('BLOG gsm info pdp_contexts_checked modem=primary')
+	end, 'No PDP lifecycle events recognised')
+end
+
 function tests.arguments()
 	local args = runner.parse_args({}, repo, here)
 	equal(args.first, 'IP')

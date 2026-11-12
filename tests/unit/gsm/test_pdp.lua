@@ -11,6 +11,7 @@ local at = require 'services.hal.backends.modem.at'
 local quectel = require 'services.hal.backends.modem.models.quectel'
 
 local tests = {}
+local prepare_autoconnect
 local function eq(a, b) assert(a == b, 'expected ' .. tostring(b) .. ', got ' .. tostring(a)) end
 local function reply(ok, reason) return op.always({ ok = ok, reason = reason or '' }) end
 local function correction(outcome, dispatched, err)
@@ -358,10 +359,14 @@ end
 
 function tests.test_pdp_restart_unobserved_transition_restores_retry_state()
 	runfibers.run(function()
-		local m, _, _, _, subs = fixture({ context(1, 'IPV6', true) }, {
-			call = function(method, _, active_subs)
+		local contexts = { context(1, 'IPV6', true) }
+		local m, calls, _, _, subs = fixture(contexts, {
+			call = function(method, opts, active_subs)
+				if method == 'set_pdn_type' then contexts[1].pdp_type = opts.pdp_type end
 				if method == 'restart' then
-					active_subs[1].recv_op = function() return op.always(nil) end
+					for _, sub in ipairs(active_subs) do
+						if not sub.closed then sub.recv_op = function() return op.always(nil) end end
+					end
 					return reply(true)
 				end
 			end,
@@ -372,6 +377,158 @@ function tests.test_pdp_restart_unobserved_transition_restores_retry_state()
 		eq(m.pdp_restart_waiting, false)
 		assert(m.svc.pdp_enforcement.modems['modem-1'].types.IP.fallback.active_episode)
 		eq(subs[1].closed, true)
+
+		-- Without replacement there is no evidence that the modem actually reset,
+		-- so the existing transition-timeout retry remains in force.
+		restarted, err = m:_configure_pdp()
+		eq(restarted, false)
+		eq(err, '')
+		eq(count(calls, 'restart'), 2)
+		eq(count(calls, 'get'), 1)
+	end)
+end
+
+function tests.test_pdp_scope_merge_preserves_a_correction_whose_reset_failed_after_an_older_reset()
+	runfibers.run(function()
+		local m, calls = fixture({ context(1, 'IP', true), context(2, 'IP', true) })
+		m:_claim_pdp_owner()
+		local modem_state = m.svc.pdp_enforcement.modems['modem-1']
+		modem_state.types.IP = {
+			iccids = {
+				sim = {
+					inspection_failures = 0, inspection_exhausted = false, next_episode = 1,
+					cids = { ['1'] = { corrections = 1, exhausted = false, blocked = false } },
+					active_episode = {
+						id = 1, cids = { ['1'] = true }, unreset_cids = {}, restart_count = 1,
+						state = 'awaiting_reinspection',
+					},
+					history = {},
+				},
+			},
+			fallback = {
+				inspection_failures = 0, inspection_exhausted = false, next_episode = 1,
+				cids = { ['2'] = { corrections = 1, exhausted = false, blocked = false } },
+				active_episode = {
+					id = 1, cids = { ['2'] = true }, unreset_cids = { ['2'] = true },
+					restart_count = 1, state = 'pending',
+				},
+				history = {},
+			},
+		}
+		m.pdp_iccid = 'sim'
+
+		local merged = m:_pdp_scope('IP')
+		eq(merged.active_episode.state, 'pending')
+		eq(merged.active_episode.unreset_cids['2'], true)
+		eq(m:_configure_pdp(), true)
+		eq(count(calls, 'restart'), 1)
+		eq(count(calls, 'get'), 0)
+		eq(next(merged.history[#merged.history].unreset_cids), nil)
+	end)
+end
+
+function tests.test_pdp_unobserved_restart_exhaustion_is_accepted_by_log_checker()
+	local original_sleep_op = sleep.sleep_op
+	local ok, err = safe.pcall(function()
+		runfibers.run(function()
+			local contexts = { context(1, 'IPV6', true) }
+			local m, calls, logs
+			sleep.sleep_op = function(seconds)
+				if seconds >= 19 and seconds <= 20 then return op.always() end
+				return original_sleep_op(seconds)
+			end
+			m, calls, logs = fixture(contexts, { call = function(method, opts, subs)
+				if method == 'set_pdn_type' then contexts[1].pdp_type = opts.pdp_type end
+				if method == 'restart' then
+					-- Only reset subscriptions are interrupted; preserve the main loop's
+					-- card subscription so it can proceed to enable on exhaustion.
+					for index, sub in ipairs(subs) do
+						if index > 2 and not sub.closed then
+							sub.recv_op = function() return op.always(nil) end
+						end
+					end
+					return reply(true)
+				elseif method == 'enable' then
+					m.config_pulse:close()
+					return reply(true)
+				end
+			end })
+			prepare_autoconnect(m)
+			m:_autoconnect_loop()
+			eq(count(calls, 'restart'), 2)
+			eq(count(calls, 'enable'), 1)
+			local lines = {}
+			for _, payload in ipairs(logs) do
+				if type(payload) == 'table' then
+					local fields = {}
+					for key, value in pairs(payload) do
+						if key ~= 'what' and value ~= '' then
+							fields[#fields + 1] = key .. '=' .. tostring(value)
+						end
+					end
+					lines[#lines + 1] = '2026-11-12 14:30:00 (mono=100) LOG gsm info '
+						.. payload.what .. ' ' .. payload.what .. ' ' .. table.concat(fields, ' ')
+				end
+			end
+			require('onbox.modem_pdp.runner').check_restart_order(table.concat(lines, '\n'))
+		end)
+	end)
+	sleep.sleep_op = original_sleep_op
+	assert(ok, err)
+end
+
+function tests.test_pdp_recovered_correction_reset_is_retried_after_iccid_merge()
+	runfibers.run(function()
+		local contexts = { context(2, 'IPV6', true) }
+		local svc = { obs_log = function() end }
+		local replacement, replacement_calls
+		local reset_attempts = 0
+		local old, old_calls = fixture(contexts, {
+			svc = svc,
+			call = function(method, opts)
+				if method == 'set_pdn_type' then
+					contexts[1].pdp_type = opts.pdp_type
+					replacement, replacement_calls = fixture(contexts, {
+						svc = svc,
+						call = function(replacement_method)
+							if replacement_method == 'restart' then
+								reset_attempts = reset_attempts + 1
+								if reset_attempts == 1 then return reply(false, 'reset failed') end
+							end
+						end,
+					})
+					replacement:_claim_pdp_owner()
+					return correction('applied', true)
+				end
+			end,
+		})
+		old:_claim_pdp_owner()
+		-- Existing SIM bookkeeping from an earlier correction/reset. The new
+		-- owner starts without that SIM identity and uses the fallback scope.
+		old.pdp_iccid = 'sim'
+		local previous = old:_pdp_scope('IP')
+		previous.cids['1'] = { corrections = 1, exhausted = false, blocked = false }
+		previous.active_episode = {
+			id = 1, cids = { ['1'] = true }, unreset_cids = {},
+			restart_count = 1, state = 'awaiting_reinspection',
+		}
+		old.pdp_iccid = nil
+
+		eq(select(2, old:_configure_pdp()), 'pdp_owner_stale')
+		eq(count(old_calls, 'set_pdn_type'), 1)
+		eq(count(old_calls, 'restart'), 0)
+		local fallback = svc.pdp_enforcement.modems['modem-1'].types.IP.fallback
+		eq(fallback.cids['2'].last_result.outcome, 'uncertain')
+		eq(fallback.active_episode.unreset_cids['2'], true)
+		eq(select(2, replacement:_configure_pdp()), 'pdp_operation_failed')
+		eq(count(replacement_calls, 'restart'), 1)
+
+		replacement:_queue_pdp_iccid('sim')
+		local restarted, err = replacement:_configure_pdp()
+		eq(err, '')
+		eq(count(replacement_calls, 'restart'), 2)
+		eq(restarted, true)
+		eq(count(replacement_calls, 'get'), 0)
 	end)
 end
 
@@ -536,7 +693,7 @@ end
 
 ---@param modem GsmModem
 ---@return nil
-local function prepare_autoconnect(modem)
+prepare_autoconnect = function(modem)
 	modem.cfg.autoconnect = true
 	modem.domain = { retain = function() end }
 	modem._publish_uplink_state = function() end
@@ -1207,24 +1364,184 @@ function tests.test_pdp_owner_replacement_at_restart_return_completes_without_fa
 		eq(count(old_calls, 'restart'), 1)
 
 		local restarted, err = replacement:_configure_pdp()
-		eq(restarted, true)
+		eq(restarted, false)
 		eq(err, '')
-		eq(count(replacement_calls, 'restart'), 1)
+		eq(count(replacement_calls, 'restart'), 0)
 
 		prepare_autoconnect(replacement)
 		replacement:_autoconnect_loop()
-		eq(count(replacement_calls, 'restart'), 1)
+		eq(count(replacement_calls, 'restart'), 0)
 		eq(count(replacement_calls, 'enable'), 1)
 		eq(count(replacement_calls, 'connect'), 1)
-		local restart_index, inspect_index, enable_index, connect_index
+		local inspect_index, enable_index, connect_index
 		for index, call in ipairs(replacement_calls) do
-			if call.method == 'restart' then restart_index = restart_index or index end
 			if call.method == 'get' and call.opts.field == 'pdp_contexts' then inspect_index = inspect_index or index end
 			if call.method == 'enable' then enable_index = enable_index or index end
 			if call.method == 'connect' then connect_index = connect_index or index end
 		end
-		assert(restart_index < inspect_index and inspect_index < enable_index and enable_index < connect_index)
+		assert(inspect_index < enable_index and enable_index < connect_index)
 		eq(count_logs(logs, 'autoconnect_failed'), 0)
+	end)
+end
+
+function tests.test_pdp_owner_replacement_after_successful_reset_reinspects_before_another_reset()
+	runfibers.run(function()
+		local contexts = { context(1, 'IPV6', true) }
+		local svc = { obs_log = function() end }
+		local replacement, replacement_calls
+		local old, old_calls = fixture(contexts, {
+			svc = svc,
+			call = function(method, opts)
+				if method == 'set_pdn_type' then
+					contexts[1].pdp_type = opts.pdp_type
+				elseif method == 'restart' then
+					replacement, replacement_calls = fixture(contexts, { svc = svc })
+					replacement:_claim_pdp_owner()
+					return reply(true)
+				end
+			end,
+		})
+
+		local restarted, err = old:_configure_pdp()
+		eq(restarted, false)
+		eq(err, 'pdp_owner_stale')
+		eq(count(old_calls, 'set_pdn_type'), 1)
+		eq(count(old_calls, 'restart'), 1)
+
+		-- The successful write survived the reset.  A replacement owner must inspect
+		-- that fact before deciding whether another correction or reset is necessary.
+		restarted, err = replacement:_configure_pdp()
+		eq(restarted, false)
+		eq(err, '')
+		eq(count(replacement_calls, 'get'), 1)
+		eq(replacement_calls[1].opts.field, 'pdp_contexts')
+		eq(count(replacement_calls, 'set_pdn_type'), 0)
+		eq(count(replacement_calls, 'restart'), 0)
+	end)
+end
+
+function tests.test_pdp_owner_replacement_while_waiting_for_reset_transition_reinspects()
+	runfibers.run(function(scope)
+		local contexts = { context(1, 'IPV6', true) }
+		local svc = { obs_log = function() end }
+		local old, old_calls = fixture(contexts, {
+			svc = svc,
+			call = function(method, opts)
+				if method == 'set_pdn_type' then
+					contexts[1].pdp_type = opts.pdp_type
+				elseif method == 'restart' then
+					-- The RPC succeeds, but this owner never observes a card-state
+					-- transition because ModemManager replaces it.
+					return reply(true)
+				end
+			end,
+		})
+		local invocation = assert(scope:child())
+		assert(invocation:spawn(function() old:_configure_pdp() end))
+		while not old.pdp_restart_waiting do sleep.sleep(0.001) end
+		eq(count(old_calls, 'restart'), 1)
+
+		local replacement, replacement_calls = fixture(contexts, { svc = svc })
+		replacement:_claim_pdp_owner()
+		local restarted, err = replacement:_configure_pdp()
+		eq(restarted, false)
+		eq(err, '')
+		eq(count(replacement_calls, 'get'), 1)
+		eq(replacement_calls[1].opts.field, 'pdp_contexts')
+		eq(count(replacement_calls, 'restart'), 0)
+
+		invocation:cancel('owner replaced')
+		eq(select(1, fibers.perform(invocation:join_op())), 'cancelled')
+	end)
+end
+
+function tests.test_pdp_owner_replacement_recorrects_a_reverted_context_before_second_reset()
+	runfibers.run(function()
+		local contexts = { context(1, 'IPV6', true) }
+		local svc = { obs_log = function() end }
+		local replacement, replacement_calls
+		local old, old_calls = fixture(contexts, {
+			svc = svc,
+			call = function(method, opts)
+				if method == 'set_pdn_type' then
+					contexts[1].pdp_type = opts.pdp_type
+				elseif method == 'restart' then
+					-- Model firmware/carrier state restoring the old definition while the
+					-- ModemManager object is replaced by the reset.
+					contexts[1].pdp_type = 'IPV6'
+					replacement, replacement_calls = fixture(contexts, {
+						svc = svc,
+						call = function(replacement_method, replacement_opts)
+							if replacement_method == 'set_pdn_type' then
+								contexts[1].pdp_type = replacement_opts.pdp_type
+							end
+						end,
+					})
+					replacement:_claim_pdp_owner()
+					return reply(true)
+				end
+			end,
+		})
+
+		eq(select(2, old:_configure_pdp()), 'pdp_owner_stale')
+		eq(count(old_calls, 'restart'), 1)
+
+		local restarted, err = replacement:_configure_pdp()
+		eq(restarted, true)
+		eq(err, '')
+		eq(count(replacement_calls, 'get'), 1)
+		eq(replacement_calls[1].opts.field, 'pdp_contexts')
+		eq(count(replacement_calls, 'set_pdn_type'), 1)
+		eq(count(replacement_calls, 'restart'), 1)
+
+		-- A third reversion is bounded by the per-CID correction budget.
+		contexts[1].pdp_type = 'IPV6'
+		local third, third_calls = fixture(contexts, { svc = svc })
+		third:_claim_pdp_owner()
+		restarted, err = third:_configure_pdp()
+		eq(restarted, false)
+		eq(err, '')
+		eq(count(third_calls, 'get'), 1)
+		eq(count(third_calls, 'set_pdn_type'), 0)
+		eq(count(third_calls, 'restart'), 0)
+		local record = svc.pdp_enforcement.modems['modem-1'].types.IP.fallback.cids['1']
+		eq(record.corrections, 2)
+		eq(record.exhausted, true)
+	end)
+end
+
+function tests.test_pdp_owner_replacement_suppresses_stale_unobserved_reset_log()
+	runfibers.run(function(scope)
+		local contexts, logs = { context(1, 'IPV6', true) }, {}
+		local svc = { obs_log = function(_, _, payload) logs[#logs + 1] = payload end }
+		local old, old_calls, _, _, old_subs = fixture(contexts, {
+			svc = svc,
+			call = function(method, opts)
+				if method == 'set_pdn_type' then contexts[1].pdp_type = opts.pdp_type end
+				if method == 'restart' then return reply(true) end
+			end,
+		})
+		local invocation = assert(scope:child())
+		local old_err
+		assert(invocation:spawn(function()
+			local _
+			_, old_err = old:_configure_pdp()
+		end))
+		while not old.pdp_restart_waiting do sleep.sleep(0.001) end
+		eq(count(old_calls, 'restart'), 1)
+
+		local replacement, replacement_calls = fixture(contexts, { svc = svc })
+		replacement:_claim_pdp_owner()
+		contexts[1].pdp_type = 'IPV6'
+		eq(replacement:_configure_pdp(), true)
+		eq(count(replacement_calls, 'restart'), 1)
+
+		-- A late subscription closure must not let the stale waiter report that
+		-- the replacement owner's latest reset had an unobserved transition.
+		old_subs[1].queue:put(nil)
+		fibers.perform(invocation:join_op())
+		eq(old_err, 'pdp_owner_stale')
+		eq(count_logs(logs, 'pdp_restart_unobserved'), 0)
 	end)
 end
 
