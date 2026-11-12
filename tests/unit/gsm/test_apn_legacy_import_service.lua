@@ -133,16 +133,29 @@ function tests.test_first_boot_imports_v09_apns_and_publishes_them()
 	end, { timeout = TIMEOUT })
 end
 
-function tests.test_first_boot_merges_remote_then_user_apns()
+function tests.test_first_boot_user_apns_replace_remote_apns()
 	runfibers.run(function(scope)
 		local h = start(scope, { replies = {
 			{ ok = true, reason = user_cfg({ rec('remote') }) },
 			{ ok = true, reason = user_cfg({ rec('user') }) },
 		} })
-		wait_for_count(h, 2)
+		wait_until(function() return stored(h) ~= nil end, 'the imported APNs to be saved')
 		local list = assert(stored(h))
-		assert(list[1].apn == 'remote' and list[2].apn == 'user')
+		assert(#list == 1 and list[1].apn == 'user')
 		assert(h.read_files[1] == 'remote.cfg' and h.read_files[2] == 'user.cfg')
+	end, { timeout = TIMEOUT })
+end
+
+function tests.test_malformed_remote_still_imports_user_apns()
+	runfibers.run(function(scope)
+		local h = start(scope, { replies = {
+			{ ok = true, reason = '{' },
+			{ ok = true, reason = user_cfg({ rec('user') }) },
+		} })
+		wait_for_count(h, 1)
+		local list = assert(stored(h))
+		assert(#list == 1 and list[1].apn == 'user')
+		assert(h.reads == 2)
 	end, { timeout = TIMEOUT })
 end
 
@@ -221,7 +234,7 @@ function tests.test_missing_and_malformed_files_write_nothing()
 			reply = { ok = false, reason = 'failed to open file /data/configs/user.cfg: No such file or directory' },
 			reads = 2,
 		},
-		{ reply = { ok = true, reason = 'not json' }, reads = 1 },
+		{ reply = { ok = true, reason = 'not json' }, reads = 2 },
 	}) do
 		runfibers.run(function(scope)
 			local h = start(scope, { replies = { case.reply } })

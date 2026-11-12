@@ -47,6 +47,141 @@ local function run(conn, read_op)
 	return fibers.perform(import.run_op(store_mod.new(conn), read_op))
 end
 
+local function run_sources(conn, remote_body, user_body)
+	local reads = {}
+	local bodies = { ['remote.cfg'] = remote_body, ['user.cfg'] = user_body }
+	local result, err = fibers.perform(import.run_op(store_mod.new(conn), function(filename)
+		reads[#reads + 1] = filename
+		return op.always({ ok = true, reason = assert(bodies[filename]) })
+	end, import.FILENAMES))
+	return result, err, reads
+end
+
+function tests.test_user_apn_subsection_replaces_remote_list()
+	runfibers.run(function()
+		local conn = fake_conn()
+		local result, err = run_sources(conn, user_cfg({ rec('old-remote') }), user_cfg({ rec('user-choice') }))
+		assert(result and result.status == 'imported', tostring(err))
+		local records = cjson.decode(assert(conn.data[KEY])).records
+		assert(#records == 1, 'user APNs must replace remote APNs; saved ' .. tostring(#records))
+		assert(records[1].apn == 'user-choice')
+	end)
+end
+
+function tests.test_explicit_empty_user_apn_subsection_clears_remote_list()
+	runfibers.run(function()
+		local conn = fake_conn()
+		local result, err = run_sources(conn, user_cfg({ rec('old-remote') }), '{"default":{"apns":[]}}')
+		assert(result, tostring(err))
+		assert(conn.puts == 0, 'explicit user empty list must not persist remote APNs')
+		assert(result.status == 'no_source', result.status)
+	end)
+end
+
+function tests.test_absent_user_apn_subsection_preserves_remote_list()
+	runfibers.run(function()
+		local conn = fake_conn()
+		local result, err, reads = run_sources(conn, user_cfg({ rec('remote') }), '{"default":{"other":true}}')
+		assert(result and result.status == 'imported', tostring(err))
+		local records = cjson.decode(assert(conn.data[KEY])).records
+		assert(#records == 1 and records[1].apn == 'remote')
+		assert(#reads == 2 and reads[2] == 'user.cfg')
+	end)
+end
+
+function tests.test_malformed_remote_source_does_not_hide_valid_user_apns()
+	runfibers.run(function()
+		local conn = fake_conn()
+		local result, err, reads = run_sources(conn, '{', user_cfg({ rec('user-choice') }))
+		assert(#reads == 2 and reads[2] == 'user.cfg', 'malformed remote source prevented reading user.cfg')
+		assert(result and result.status == 'imported', tostring(err or (result and result.status)))
+		local records = cjson.decode(assert(conn.data[KEY])).records
+		assert(#records == 1 and records[1].apn == 'user-choice')
+	end)
+end
+
+function tests.test_malformed_user_source_preserves_remote_apns()
+	runfibers.run(function()
+		local conn = fake_conn()
+		local result, err = run_sources(conn, user_cfg({ rec('remote') }), '{')
+		assert(result and result.status == 'imported', tostring(err))
+		assert(result.imported == 1 and conn.puts == 1)
+		assert(cjson.decode(assert(conn.data[KEY])).records[1].apn == 'remote')
+	end)
+end
+
+function tests.test_missing_source_does_not_hide_the_other_source()
+	for _, missing_filename in ipairs(import.FILENAMES) do
+		runfibers.run(function()
+			local conn, reads = fake_conn(), {}
+			local result, err = fibers.perform(import.run_op(store_mod.new(conn), function(filename)
+				reads[#reads + 1] = filename
+				if filename == missing_filename then
+					return op.always({ ok = false, reason = 'No such file or directory' })
+				end
+				return op.always({ ok = true, reason = user_cfg({ rec(filename) }) })
+			end, import.FILENAMES))
+			assert(result and result.status == 'imported', tostring(err))
+			assert(result.imported == 1 and conn.puts == 1 and #reads == 2)
+			local expected = missing_filename == 'remote.cfg' and 'user.cfg' or 'remote.cfg'
+			assert(cjson.decode(assert(conn.data[KEY])).records[1].apn == expected)
+		end)
+	end
+end
+
+function tests.test_invalid_user_records_still_replace_remote_subsection()
+	runfibers.run(function()
+		local conn = fake_conn()
+		local result, err = run_sources(conn, user_cfg({ rec('remote') }), user_cfg({ { apn = 'invalid' } }))
+		assert(result and result.status == 'no_source', tostring(err))
+		assert(result.skipped == 1 and conn.puts == 0 and conn.data[KEY] == nil)
+	end)
+end
+
+function tests.test_replacement_preserves_normalized_user_order_and_counts()
+	runfibers.run(function()
+		local conn = fake_conn()
+		local remote = user_cfg({ rec('old'), rec('old'), { apn = 'invalid' } })
+		local user = user_cfg({
+			rec(' same ', { user = ' first ', password = ' one ' }),
+			rec('same', { user = 'first', password = 'one' }),
+			rec('same', { user = 'second', password = 'two' }),
+		})
+		local result, err = run_sources(conn, remote, user)
+		assert(result and result.status == 'imported', tostring(err))
+		assert(result.imported == 2 and result.skipped == 1, 'only the effective list contributes counts')
+		local records = cjson.decode(assert(conn.data[KEY])).records
+		assert(#records == 2 and records[1].apn == 'same')
+		assert(records[1].user == 'first' and records[1].password == 'one')
+		assert(records[2].user == 'second' and records[2].password == 'two')
+	end)
+end
+
+function tests.test_malformed_source_combinations_do_not_write()
+	for _, case in ipairs({
+		{ remote = '{', user = '{', status = 'malformed' },
+		{ remote = '{', user = '{}', status = 'no_source' },
+		{ remote = '{}', user = '{', status = 'no_source' },
+		{ remote = '{', user = '{"default":{"apns":[]}}', status = 'no_source' },
+	}) do
+		runfibers.run(function()
+			local conn = fake_conn()
+			local result, err, reads = run_sources(conn, case.remote, case.user)
+			assert(result and result.status == case.status, tostring(err or (result and result.status)))
+			assert(#reads == 2 and conn.puts == 0 and conn.data[KEY] == nil)
+		end)
+	end
+end
+
+function tests.test_parse_distinguishes_absent_and_explicit_empty_subsections()
+	for _, body in ipairs({ '{}', '{"default":{}}', '{"addn":{"apns":[]}}' }) do
+		local records, skipped, has_apns = import.parse(body)
+		assert(records and #records == 0 and skipped == 0 and has_apns == false, body)
+	end
+	local records, skipped, has_apns = import.parse('{"default":{"apns":[]}}')
+	assert(records and #records == 0 and skipped == 0 and has_apns == true)
+end
+
 function tests.test_legacy_sources_include_remote_before_user_cfg()
 	local filenames = import.FILENAMES or { import.FILENAME }
 	assert(filenames[1] == 'remote.cfg', 'remote.cfg must be the first legacy APN source')

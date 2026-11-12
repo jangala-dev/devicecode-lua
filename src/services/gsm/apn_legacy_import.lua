@@ -59,15 +59,16 @@ end
 ---@param body any
 ---@return table? records
 ---@return integer|string skipped_or_err count of records dropped, or 'malformed'
+---@return boolean? has_apns distinguishes an explicit empty list from an absent subsection
 function M.parse(body)
 	if type(body) ~= 'string' then return nil, 'malformed' end
 	local doc = cjson.decode(body)
 	if type(doc) ~= 'table' then return nil, 'malformed' end
 	local section = doc.default
-	if section == nil then return {}, 0 end
+	if section == nil then return {}, 0, false end
 	if type(section) ~= 'table' then return nil, 'malformed' end
 	local list = section.apns
-	if list == nil then return {}, 0 end
+	if list == nil then return {}, 0, false end
 	if type(list) ~= 'table' then return nil, 'malformed' end
 
 	-- normalise_list rejects a whole list for one bad record, so go one at a time.
@@ -82,7 +83,7 @@ function M.parse(body)
 			skipped = skipped + 1
 		end
 	end
-	return records, skipped
+	return records, skipped, true
 end
 
 local function is_missing_file(reason)
@@ -105,7 +106,8 @@ function M.run_op(store, read_op, filenames)
 		if exists == nil then return nil, xerr or 'control_store_get_failed' end
 		if exists then return { status = 'exists' }, nil end
 
-		local records, seen, skipped = {}, {}, 0
+		local records, skipped = {}, 0
+		local malformed, usable_source = false, false
 		for _, filename in ipairs(filenames or { M.FILENAME }) do
 			local reply, rerr = perform(read_op(filename))
 			if reply == nil then return nil, tostring(rerr or 'legacy_cfg_read_failed') end
@@ -114,21 +116,25 @@ function M.run_op(store, read_op, filenames)
 					return nil, tostring(reply.reason or 'legacy_cfg_read_failed')
 				end
 			else
-				local parsed, parse_result = M.parse(reply.reason)
-				if not parsed then return { status = 'malformed' }, nil end
-				skipped = skipped + parse_result
-				for _, record in ipairs(parsed) do
-					local key = record_key(record)
-					if not seen[key] then
-						seen[key] = true
-						records[#records + 1] = record
-					else
-						skipped = skipped + 1
+				local parsed, parse_result, has_apns = M.parse(reply.reason)
+				if not parsed then
+					-- Legacy config discards an invalid source and continues with later
+					-- files. Never return file contents (which can include credentials).
+					malformed = true
+				else
+					usable_source = true
+					if has_apns then
+						-- Configuration subsections replace earlier ones wholesale. In
+						-- particular, an explicit user [] clears the remote APN list.
+						records, skipped = parsed, parse_result
 					end
 				end
 			end
 		end
-		if #records == 0 then return { status = 'no_source', skipped = skipped }, nil end
+		if #records == 0 then
+			if malformed and not usable_source then return { status = 'malformed' }, nil end
+			return { status = 'no_source', skipped = skipped }, nil
+		end
 
 		local saved, serr = perform(store:save_op(records))
 		if not saved then return nil, serr or 'control_store_put_failed' end
