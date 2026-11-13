@@ -2,7 +2,7 @@ local cjson          = require 'cjson.safe'
 local busmod         = require 'bus'
 local safe           = require 'coxpcall'
 
-local runfibers      = require 'tests.support.run_fibers'
+local runfibers      = require 'tests.support.run_virtual_fibers'
 local probe          = require 'tests.support.bus_probe'
 local fake_hal_mod   = require 'tests.support.fake_hal'
 local test_diag      = require 'tests.support.test_diag'
@@ -29,7 +29,7 @@ local function config_timings()
 end
 
 function T.devhost_config_recovers_after_failed_persist_retry()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus = busmod.new()
 		local fake_hal = fake_hal_mod.new({
 			backend = 'fakehal',

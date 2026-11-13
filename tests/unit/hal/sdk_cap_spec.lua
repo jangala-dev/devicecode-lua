@@ -4,7 +4,7 @@ local sleep     = require 'fibers.sleep'
 local op        = require 'fibers.op'
 
 local probe     = require 'tests.support.bus_probe'
-local runfibers = require 'tests.support.run_fibers'
+local runfibers = require 'tests.support.run_virtual_fibers'
 
 local cap_sdk = require 'services.hal.sdk.cap'
 
@@ -32,7 +32,7 @@ local function wait_for_cap(listener, timeout)
 end
 
 function T.cap_sdk_legacy_listener_accepts_added_on_public_state_topic()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus      = busmod.new()
 		local pub      = bus:connect()
 		local client   = bus:connect()
@@ -60,7 +60,7 @@ function T.cap_sdk_legacy_listener_accepts_added_on_public_state_topic()
 end
 
 function T.cap_sdk_curated_listener_accepts_available_status_payload()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus      = busmod.new()
 		local pub      = bus:connect()
 		local client   = bus:connect()
@@ -88,7 +88,7 @@ function T.cap_sdk_curated_listener_accepts_available_status_payload()
 end
 
 function T.cap_sdk_curated_listener_accepts_available_true_payload()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus      = busmod.new()
 		local pub      = bus:connect()
 		local client   = bus:connect()
@@ -116,7 +116,7 @@ function T.cap_sdk_curated_listener_accepts_available_true_payload()
 end
 
 function T.cap_sdk_curated_listener_ignores_removed_status_payload()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus      = busmod.new()
 		local pub      = bus:connect()
 		local client   = bus:connect()
@@ -145,7 +145,7 @@ function T.cap_sdk_curated_listener_ignores_removed_status_payload()
 end
 
 function T.cap_sdk_raw_host_listener_and_ref_follow_raw_host_topics()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus      = busmod.new()
 		local pub      = bus:connect()
 		local client   = bus:connect()
@@ -219,7 +219,7 @@ function T.cap_sdk_raw_host_listener_and_ref_follow_raw_host_topics()
 end
 
 function T.cap_sdk_raw_member_listener_and_ref_follow_raw_member_topics()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus      = busmod.new()
 		local pub      = bus:connect()
 		local client   = bus:connect()

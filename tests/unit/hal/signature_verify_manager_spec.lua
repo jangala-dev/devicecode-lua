@@ -2,7 +2,7 @@ local fibers     = require 'fibers'
 local sleep      = require 'fibers.sleep'
 local channel    = require 'fibers.channel'
 
-local runfibers  = require 'tests.support.run_fibers'
+local runfibers  = require 'tests.support.run_virtual_fibers'
 
 local T = {}
 
@@ -30,7 +30,7 @@ end
 function T.apply_config_fails_when_not_started()
 	local M = fresh_manager()
 
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local ok, err = fibers.perform(M.apply_config_op({
 			providers = {
 				{ id = 'main', backend = fake_backend('fake-a', true, nil) },
@@ -44,7 +44,7 @@ end
 function T.start_apply_config_and_stop_round_trip()
 	local M = fresh_manager()
 
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local dev_ev_ch = channel.new(8)
 		local cap_emit_ch = channel.new(8)
 
@@ -97,7 +97,7 @@ function T.reapply_same_config_is_idempotent()
 	local M = fresh_manager()
 	local backend = fake_backend('same-backend', true, nil)
 
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local dev_ev_ch = channel.new(8)
 		local cap_emit_ch = channel.new(8)
 
@@ -137,7 +137,7 @@ function T.config_change_removes_then_adds_provider()
 	local M = fresh_manager()
 	local backend = fake_backend('change-backend', true, nil)
 
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local dev_ev_ch = channel.new(8)
 		local cap_emit_ch = channel.new(8)
 
@@ -182,7 +182,7 @@ end
 function T.invalid_config_is_rejected()
 	local M = fresh_manager()
 
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local dev_ev_ch = channel.new(8)
 		local cap_emit_ch = channel.new(8)
 
@@ -203,7 +203,7 @@ end
 function T.shutdown_op_before_start_is_ok_and_fault_op_is_inert()
 	local M = fresh_manager()
 
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local ok_stop, err_stop = fibers.perform(M.shutdown_op())
 		assert(ok_stop == true, tostring(err_stop))
 

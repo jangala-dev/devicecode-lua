@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/fabric/test_transfer_sender.lua
 --
 -- Contract tests for the doctrinal transfer sender worker.
@@ -83,7 +84,7 @@ local function collect_result(req, driver, opts)
 	opts = opts or {}
 	local out = {}
 
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local st, rep, value = fibers.run_scope(function (scope)
 			local control_tx, control_rx = mailbox.new(opts.control_queue_len or 32, { full = 'reject_newest' })
 			local bulk_tx, bulk_rx       = mailbox.new(opts.bulk_queue_len or 32, { full = 'reject_newest' })

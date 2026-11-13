@@ -6,6 +6,7 @@ local op = require 'fibers.op'
 local sleep = require 'fibers.sleep'
 local runtime = require 'fibers.runtime'
 local virtual_time = require 'tests.support.virtual_time'
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 
 local system = require 'services.system'
 
@@ -116,7 +117,7 @@ local function with_wall_clock(body)
 	local start = os.time()
 	start = start - start % 3600 + 3599 -- one second before the next hour
 	local real_time = os.time
-	fibers.run(function()
+	run_virtual_fibers.run_auto(function()
 		local mono0 = fibers.now()
 		local function wall() return start + (fibers.now() - mono0) end
 		os.time = function(tbl)
@@ -225,7 +226,7 @@ local function run_handle_alarm(get_power_cap, attempts_wanted)
 		obs_event = function() end,
 	}
 	local result = { logs = logs, retained = retained }
-	fibers.run(function(scope)
+	run_virtual_fibers.run_auto(function(scope)
 		local child = assert(scope:child())
 		assert(child:spawn(function()
 			system._test.handle_alarm(svc, get_power_cap, { payload = { name = 'daily reboot', type = 'reboot' } }, {

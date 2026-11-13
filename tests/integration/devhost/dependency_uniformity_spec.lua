@@ -2,7 +2,7 @@ local fibers = require 'fibers'
 local sleep = require 'fibers.sleep'
 local busmod = require 'bus'
 
-local runfibers = require 'tests.support.run_fibers'
+local runfibers = require 'tests.support.run_virtual_fibers'
 local probe = require 'tests.support.bus_probe'
 local mainmod = require 'devicecode.main'
 
@@ -186,7 +186,7 @@ local function retain_artifact_store_available(bus)
 end
 
 function T.ui_waits_for_http_capability_before_starting_listener()
-	runfibers.run(function (scope)
+	runfibers.run_auto(function (scope)
 		local bus = busmod.new()
 		local conn = bus:connect()
 		local reader = bus:connect()
@@ -222,7 +222,7 @@ function T.ui_waits_for_http_capability_before_starting_listener()
 end
 
 function T.fabric_waits_for_raw_transport_and_recovers_after_route_missing()
-	runfibers.run(function (scope)
+	runfibers.run_auto(function (scope)
 		local bus = busmod.new()
 		local conn = bus:connect()
 		local reader = bus:connect()
@@ -302,7 +302,7 @@ local function make_loader(configs)
 end
 
 function T.real_main_launches_modern_services_with_fake_hal_and_config_dependencies_delayed()
-	runfibers.run(function (scope)
+	runfibers.run_auto(function (scope)
 		local bus = busmod.new()
 		local conn = bus:connect()
 		local configs = {

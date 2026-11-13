@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 local fibers = require 'fibers'
 local sleep  = require 'fibers.sleep'
 local runtime = require 'fibers.runtime'
@@ -109,7 +110,7 @@ function M.test_pollable_ready_op_uses_poke_as_step_hint()
 		timeout = function () return nil end,
 	}
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local reason, err
 		assert(scope:spawn(function ()
 			reason, err = fibers.perform(drv:pollable_ready_op(pollable))
@@ -127,7 +128,7 @@ function M.test_pollable_ready_op_reports_due_timeout_immediately()
 	local drv = assert(driver_mod.new { create_controller = false })
 	local pollable = { timeout = function () return 0 end }
 
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local reason, err = fibers.perform(drv:pollable_ready_op(pollable))
 		eq(reason, 'timeout')
 		eq(err, nil)
@@ -145,7 +146,7 @@ function M.test_pollable_step_op_treats_spurious_timeout_step_as_nonfatal()
 		end,
 	}
 
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local ok1, err = fibers.perform(drv:pollable_step_op(pollable))
 		eq(ok1, true)
 		eq(err, nil)
@@ -157,7 +158,7 @@ function M.test_run_op_completes_inside_driver_pump()
 	local ctl = fake_controller()
 	local drv = assert(driver_mod.new { controller = ctl })
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		assert(drv:start(scope))
 		local a, b = fibers.perform(drv:run_op('unit.job', function ()
 			return 'done', 42
@@ -174,7 +175,7 @@ function M.test_run_op_reports_lua_errors_as_failed_results()
 	local ctl = fake_controller()
 	local drv = assert(driver_mod.new { controller = ctl })
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		assert(drv:start(scope))
 		local v, err = fibers.perform(drv:run_op('unit.error', function ()
 			error('boom', 0)
@@ -191,7 +192,7 @@ function M.test_losing_run_op_aborts_without_running_job()
 	local aborted = false
 	local ran = false
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		assert(drv:start(scope))
 
 		local which = fibers.perform(fibers.named_choice {
@@ -219,7 +220,7 @@ function M.test_losing_active_run_op_calls_active_abort_without_closing_driver()
 	local release = false
 	local active_abort
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		assert(drv:start(scope))
 
 		local waiter = assert(scope:child())
@@ -260,7 +261,7 @@ function M.test_losing_active_run_op_can_detach_and_cleanup_after_cqueues_comple
 	local cleanup_reason
 	local cleanup_result
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		assert(drv:start(scope))
 
 		local waiter = assert(scope:child())
@@ -305,7 +306,7 @@ function M.test_losing_active_run_op_without_owner_terminates_driver()
 	local drv = assert(driver_mod.new { controller = ctl })
 	local active = false
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		assert(drv:start(scope))
 
 		local waiter = assert(scope:child())
@@ -332,7 +333,7 @@ function M.test_active_aborted_job_late_completion_is_ignored()
 	local release = false
 	local active_abort = 0
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		assert(drv:start(scope))
 
 		local waiter = assert(scope:child())
@@ -366,7 +367,7 @@ function M.test_terminate_wakes_pending_run_op_without_pump()
 	local ctl = fake_controller()
 	local drv = assert(driver_mod.new { controller = ctl })
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local result, err
 		assert(scope:spawn(function ()
 			result, err = fibers.perform(drv:run_op('unit.never', function ()
@@ -387,7 +388,7 @@ function M.test_multiple_concurrent_run_ops_are_completed_by_one_pump()
 	local ctl = fake_controller()
 	local drv = assert(driver_mod.new { controller = ctl })
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local a, b
 		assert(drv:start(scope))
 		assert(scope:spawn(function () a = fibers.perform(drv:run_op('a', function () return 'A' end)) end))
@@ -405,7 +406,7 @@ function M.test_driver_scope_finaliser_terminates_driver_after_scope_cancel()
 	local ctl = fake_controller()
 	local drv = assert(driver_mod.new { controller = ctl })
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local child = assert(scope:child())
 		assert(child:spawn(function (s)
 			assert(drv:start(s))
@@ -424,7 +425,7 @@ function M.test_driver_start_can_target_started_parent_scope_from_child_scope()
 	local ctl = fake_controller()
 	local drv = assert(driver_mod.new { controller = ctl })
 
-	fibers.run(function (parent)
+	run_virtual_fibers.run_auto(function (parent)
 		local child = assert(parent:child())
 		local started, start_err
 

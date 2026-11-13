@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/update/test_publisher.lua
 
 local fibers = require 'fibers'
@@ -17,7 +18,7 @@ local function assert_true(v, msg) if v ~= true then fail(msg or ('expected true
 local function assert_not_nil(v, msg) if v == nil then fail(msg or 'expected non-nil value') end end
 
 function tests.test_publisher_retains_initial_and_changed_state()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local bus = busmod.new()
 		local conn = bus:connect()
 		local view_conn = bus:connect()
@@ -54,7 +55,7 @@ end
 
 
 function tests.test_publisher_publishes_compact_component_and_no_workflow_timeline()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local bus = busmod.new()
 		local conn = bus:connect()
 		local m = model_mod.new(model_mod.service_initial('update', 1))

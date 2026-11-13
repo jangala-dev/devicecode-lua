@@ -2,6 +2,7 @@ local fibers     = require 'fibers'
 local channel    = require 'fibers.channel'
 
 local runfibers  = require 'tests.support.run_fibers'
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 local pty        = require 'tests.support.pty'
 
 local T = {}
@@ -192,7 +193,7 @@ end
 function T.fault_op_is_inert_before_start()
 	local M = fresh_manager()
 
-	runfibers.run(function()
+	run_virtual_fibers.run_auto(function()
 		local which = fibers.perform(fibers.named_choice{
 			fault = M.fault_op():wrap(function(...) return 'fault', ... end),
 			timeout = require('fibers.sleep').sleep_op(0.05):wrap(function() return 'timeout' end),

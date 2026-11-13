@@ -6,7 +6,7 @@
 local busmod = require 'bus'
 local fibers = require 'fibers'
 local sleep = require 'fibers.sleep'
-local runfibers = require 'tests.support.run_fibers'
+local runfibers = require 'tests.support.run_virtual_fibers'
 local gen = require 'services.wifi.gen'
 local wifi = require 'services.wifi'
 
@@ -55,7 +55,7 @@ local function start_loop(scope, conn, sessions)
 end
 
 function T.sessions_and_hostnames_follow_clients_and_survive_a_loop_restart()
-	runfibers.run(function (scope)
+	runfibers.run_auto(function (scope)
 		local b = busmod.new()
 		local conn = b:connect()
 		local metrics = collect_metrics(scope, b:connect())
@@ -95,7 +95,7 @@ function T.sessions_and_hostnames_follow_clients_and_survive_a_loop_restart()
 end
 
 function T.interface_counts_are_independent_and_radio_total_counts_each_mac_once()
-	runfibers.run(function (scope)
+	runfibers.run_auto(function (scope)
 		local b = busmod.new()
 		local conn = b:connect()
 		local metrics = collect_metrics(scope, b:connect())
@@ -119,7 +119,7 @@ function T.interface_counts_are_independent_and_radio_total_counts_each_mac_once
 end
 
 function T.removed_radio_drops_out_of_global_num_sta_and_ends_its_sessions()
-	runfibers.run(function (scope)
+	runfibers.run_auto(function (scope)
 		local b = busmod.new()
 		local conn = b:connect()
 		local metrics = collect_metrics(scope, b:connect())

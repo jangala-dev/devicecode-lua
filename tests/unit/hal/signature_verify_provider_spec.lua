@@ -3,7 +3,7 @@ local op         = require 'fibers.op'
 local sleep      = require 'fibers.sleep'
 local channel    = require 'fibers.channel'
 
-local runfibers  = require 'tests.support.run_fibers'
+local runfibers  = require 'tests.support.run_virtual_fibers'
 local core_types = require 'services.hal.types.core'
 local cap_args   = require 'services.hal.types.capability_args'
 
@@ -50,7 +50,7 @@ local function request(driver, verb, opts)
 end
 
 function T.capabilities_op_returns_signature_verify_capability()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local emit_ch = channel.new(8)
 		local driver = provider_mod.new('main', {
 			backend = fake_backend(true, nil),
@@ -69,7 +69,7 @@ function T.capabilities_op_returns_signature_verify_capability()
 end
 
 function T.start_op_emits_initial_meta_and_available_state()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local emit_ch = channel.new(8)
 		local driver = provider_mod.new('main', {
 			backend = fake_backend(true, nil, { backend_name = 'fake-sig' }),
@@ -108,7 +108,7 @@ function T.start_op_emits_initial_meta_and_available_state()
 end
 
 function T.verify_ed25519_request_round_trips_success()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local seen = {}
 		local emit_ch = channel.new(8)
 		local driver = provider_mod.new('main', {
@@ -144,7 +144,7 @@ function T.verify_ed25519_request_round_trips_success()
 end
 
 function T.busy_is_returned_when_max_in_flight_reached()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local gate = channel.new(1)
 
 		local backend = {
@@ -203,7 +203,7 @@ function T.busy_is_returned_when_max_in_flight_reached()
 end
 
 function T.unsupported_verb_returns_negative_reply()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local emit_ch = channel.new(8)
 		local driver = provider_mod.new('main', {
 			backend = fake_backend(true, nil),
@@ -225,7 +225,7 @@ function T.unsupported_verb_returns_negative_reply()
 end
 
 function T.shutdown_op_before_start_is_ok_and_fault_op_is_inert()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local driver = provider_mod.new('main', {
 			backend = fake_backend(true, nil),
 		}, nil)

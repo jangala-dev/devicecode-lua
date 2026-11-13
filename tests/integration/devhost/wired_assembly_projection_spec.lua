@@ -1,7 +1,7 @@
 local fibers = require 'fibers'
 local busmod = require 'bus'
 
-local runfibers = require 'tests.support.run_fibers'
+local runfibers = require 'tests.support.run_virtual_fibers'
 local probe = require 'tests.support.bus_probe'
 
 local wired_service = require 'services.wired.service'
@@ -138,7 +138,7 @@ local function retain_wired_config(conn)
 end
 
 function T.state_device_assembly_and_raw_switch_observations_project_to_state_wired()
-	runfibers.run(function (scope)
+	runfibers.run_auto(function (scope)
 		local b = busmod.new()
 		local service_conn = b:connect({ origin_base = { kind = 'local', component = 'wired-service-test' } })
 		local writer = b:connect({ origin_base = { kind = 'local', component = 'wired-test-writer' } })

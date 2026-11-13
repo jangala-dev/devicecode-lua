@@ -42,10 +42,10 @@ end
 
 function tests.test_stats_loop_stops_when_client_monitor_cannot_start()
 	local channel = require 'fibers.channel'
-	local runfibers = require 'tests.support.run_fibers'
+	local runfibers = require 'tests.support.run_virtual_fibers'
 	local radio = require 'services.hal.drivers.radio'
 
-	runfibers.run(function ()
+	runfibers.run_auto(function ()
 		local start_calls = 0
 		local watch_calls = 0
 		local errors = {}
@@ -89,10 +89,10 @@ end
 function tests.test_stats_loop_stops_when_client_monitor_stream_closes()
 	local channel = require 'fibers.channel'
 	local op = require 'fibers.op'
-	local runfibers = require 'tests.support.run_fibers'
+	local runfibers = require 'tests.support.run_virtual_fibers'
 	local radio = require 'services.hal.drivers.radio'
 
-	runfibers.run(function ()
+	runfibers.run_auto(function ()
 		local start_calls = 0
 		local watch_calls = 0
 		local stop_calls = 0
@@ -191,10 +191,10 @@ local function emitted(h, mode, key)
 end
 
 function tests.test_stats_loop_tracks_clients_once_and_retains_the_set()
-	local runfibers = require 'tests.support.run_fibers'
+	local runfibers = require 'tests.support.run_virtual_fibers'
 	local sleep = require 'fibers.sleep'
 
-	runfibers.run(function (scope)
+	runfibers.run_auto(function (scope)
 		local h = start_stats_loop(scope)
 		h.stations.radio0_i0 = { 'aa' }
 		h.driver.iface_update_ch:put({ op = 'add', name = 'radio0_i0' })
@@ -231,10 +231,10 @@ function tests.test_stats_loop_tracks_clients_once_and_retains_the_set()
 end
 
 function tests.test_stats_loop_keeps_reporting_under_client_churn()
-	local runfibers = require 'tests.support.run_fibers'
+	local runfibers = require 'tests.support.run_virtual_fibers'
 	local sleep = require 'fibers.sleep'
 
-	runfibers.run(function (scope)
+	runfibers.run_auto(function (scope)
 		local h = start_stats_loop(scope)
 		h.driver.iface_update_ch:put({ op = 'add', name = 'radio0_i0' })
 		h.driver.report_period_ch:put(0.05)
@@ -249,10 +249,10 @@ function tests.test_stats_loop_keeps_reporting_under_client_churn()
 end
 
 function tests.test_stats_loop_passes_64bit_counters_through()
-	local runfibers = require 'tests.support.run_fibers'
+	local runfibers = require 'tests.support.run_virtual_fibers'
 	local sleep = require 'fibers.sleep'
 
-	runfibers.run(function (scope)
+	runfibers.run_auto(function (scope)
 		local h = start_stats_loop(scope, {
 			SYSFS_STATS = { 'rx_bytes' },
 			read_sysfs_stat = function () return 5000000000, nil end,

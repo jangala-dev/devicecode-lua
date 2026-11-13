@@ -1,7 +1,7 @@
 local fibers      = require 'fibers'
 local channel     = require 'fibers.channel'
 
-local runfibers   = require 'tests.support.run_fibers'
+local runfibers   = require 'tests.support.run_virtual_fibers'
 local core_types  = require 'services.hal.types.core'
 local cap_args    = require 'services.hal.types.capability_args'
 local blob_source = require 'devicecode.blob_source'
@@ -46,7 +46,7 @@ function T.capabilities_op_returns_artifact_store_capability()
 	local durable_root = base .. '/durable'
 	local emit_ch = channel.new(8)
 
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local driver = provider_mod.new('main', {
 			transient_root = transient_root,
 			durable_root = durable_root,
@@ -78,7 +78,7 @@ function T.start_op_emits_initial_meta_and_available_state()
 	local durable_root = base .. '/durable'
 	local emit_ch = channel.new(8)
 
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local driver = provider_mod.new('main', {
 			transient_root = transient_root,
 			durable_root = durable_root,
@@ -125,7 +125,7 @@ function T.create_sink_commit_open_and_delete_round_trip()
 	local durable_root = base .. '/durable'
 	local emit_ch = channel.new(8)
 
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local driver = provider_mod.new('main', {
 			transient_root = transient_root,
 			durable_root = durable_root,
@@ -185,7 +185,7 @@ function T.import_source_request_round_trips_success()
 	local durable_root = base .. '/durable'
 	local emit_ch = channel.new(8)
 
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local driver = provider_mod.new('main', {
 			transient_root = transient_root,
 			durable_root = durable_root,
@@ -224,7 +224,7 @@ function T.shutdown_op_before_start_is_ok_and_fault_op_is_inert()
 	local transient_root = base .. '/transient'
 	local durable_root = base .. '/durable'
 
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local driver = provider_mod.new('main', {
 			transient_root = transient_root,
 			durable_root = durable_root,
@@ -250,7 +250,7 @@ function T.create_sink_close_aborts_partial_artifact()
 	local durable_root = base .. '/durable'
 	local emit_ch = channel.new(8)
 
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local driver = provider_mod.new('main', {
 			transient_root = transient_root,
 			durable_root = durable_root,
@@ -298,7 +298,7 @@ function T.commit_is_idempotent_for_same_provider_sink_session()
 	local durable_root = base .. '/durable'
 	local emit_ch = channel.new(8)
 
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local driver = provider_mod.new('main', {
 			transient_root = transient_root,
 			durable_root = durable_root,

@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/device/test_model.lua
 
 local fibers = require 'fibers'
@@ -30,7 +31,7 @@ local function catalogue_one()
 end
 
 function tests.test_snapshot_returns_copy()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local m = model_mod.new()
 		m:apply_catalogue(1, catalogue_one())
 		local snap = m:snapshot()
@@ -40,7 +41,7 @@ function tests.test_snapshot_returns_copy()
 end
 
 function tests.test_observation_updates_current_generation_only()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local m = model_mod.new()
 		m:apply_catalogue(7, catalogue_one())
 		local changed, _, err = m:apply_observation(6, {
@@ -60,7 +61,7 @@ function tests.test_observation_updates_current_generation_only()
 end
 
 function tests.test_changed_op_wakes_on_material_change()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local m = model_mod.new()
 		local seen = m:version()
 		local tx, rx = mailbox.new(1, { full = 'reject_newest' })
@@ -79,7 +80,7 @@ function tests.test_changed_op_wakes_on_material_change()
 end
 
 function tests.test_terminate_wakes_changed_op_with_reason()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local m = model_mod.new()
 		local seen = m:version()
 		local tx, rx = mailbox.new(1, { full = 'reject_newest' })

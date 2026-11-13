@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 local fibers = require 'fibers'
 local sleep  = require 'fibers.sleep'
 local cond   = require 'fibers.cond'
@@ -90,7 +91,7 @@ local function blocking_store_for_create()
 end
 
 function tests.test_admitted_old_generation_create_completion_remains_durable_after_replacement()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local store, store_state = blocking_store_for_create()
 		local child, caller, cfg_conn = start_service(root_scope, {
 			job_store = store,
@@ -128,7 +129,7 @@ function tests.test_admitted_old_generation_create_completion_remains_durable_af
 end
 
 function tests.test_generation_replacement_does_not_cancel_accepted_active_work()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local active_started = cond.new()
 		local active_finalised = false
 		local active_finalised_cond = cond.new()
@@ -180,7 +181,7 @@ function tests.test_generation_replacement_does_not_cancel_accepted_active_work(
 end
 
 function tests.test_start_job_request_finalises_on_generation_cancellation()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local gate = cond.new()
 		local start_save_seen = false
 		local backend = { jobs = {} }
@@ -226,7 +227,7 @@ function tests.test_start_job_request_finalises_on_generation_cancellation()
 end
 
 function tests.test_accepted_start_is_saved_durably_before_reply()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local save_log = {}
 		local backend = { jobs = {} }
 
@@ -263,7 +264,7 @@ function tests.test_accepted_start_is_saved_durably_before_reply()
 end
 
 function tests.test_active_completion_and_ready_start_cannot_double_own_slot()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local run_count = 0
 		local backend = {}
 		function backend:stage_op(job)
@@ -346,7 +347,7 @@ function tests.test_generation_event_selector_rechecks_completion_after_manager_
 		return rx
 	end
 
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local bus = { ready = {}, fired = false }
 		local pending = {}
 		local done_rx = staged_rx('done', { kind = 'active_job_done', job_id = 'j1' }, bus, false)
@@ -398,7 +399,7 @@ function tests.test_generation_event_selector_rechecks_completion_after_manager_
 end
 
 function tests.test_report_failure_does_not_lose_stored_active_completion()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local state = active_runtime.new_state()
 		local done_tx = mailbox.new(0, { full = 'reject_newest' })
 		local report_scope = assert(root_scope:child())
@@ -423,7 +424,7 @@ end
 
 
 function tests.test_active_completion_starts_durable_job_save()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local save_log = {}
 		local backend = { jobs = {} }
 
@@ -462,7 +463,7 @@ function tests.test_active_completion_starts_durable_job_save()
 end
 
 function tests.test_service_owns_active_completion_persistence_after_generation_replacement()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local saves = {}
 		local store = {
 			load_all_op = function () return op.always({ jobs = {}, order = {} }, nil) end,

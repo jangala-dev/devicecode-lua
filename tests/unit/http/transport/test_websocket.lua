@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 local fibers = require 'fibers'
 local sleep  = require 'fibers.sleep'
 local runtime = require 'fibers.runtime'
@@ -111,7 +112,7 @@ function M.test_from_context_op_constructs_websocket_inside_context()
 		end,
 	}
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local ws, err
 		assert(scope:spawn(function ()
 			ws, err = fibers.perform(websocket.from_context_op(ctx, { token = 'h' }, {
@@ -137,7 +138,7 @@ function M.test_websocket_receive_and_send_are_context_commands()
 	-- Avoid reaching through the metatable from production callers; this is a unit seam.
 	if not ws then error('missing WebSocket class') end
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local data, opcode, sent
 		assert(scope:spawn(function () data, opcode = fibers.perform(ws:receive_op()) end))
 		yield_many(3)
@@ -167,7 +168,7 @@ function M.test_websocket_close_op_marks_wrapper_closed()
 	local raw = fake_ws()
 	local ws = setmetatable({ _ctx = ctx, _ws = raw }, websocket.WebSocket)
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local closed_ok
 		assert(scope:spawn(function () closed_ok = fibers.perform(ws:close_op(1000, 'bye')) end))
 		yield_many(3)
@@ -210,7 +211,7 @@ function M.test_server_websocket_active_receive_abort_terminates_context_and_wra
 	local ws = setmetatable({ _ctx = ctx, _ws = raw }, websocket.WebSocket)
 	ctx._http_transport_websocket = ws
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local waiter = assert(scope:child())
 		assert(waiter:spawn(function () fibers.perform(ws:receive_op()) end))
 		assert(scope:spawn(function () ctx:_drain_one_for_test() end))
@@ -240,7 +241,7 @@ function M.test_client_websocket_active_receive_abort_terminates_websocket()
 	end
 	local ws = setmetatable({ _driver = drv, _ws = raw }, websocket.ClientWebSocket)
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		assert(drv:start(scope))
 		local waiter = assert(scope:child())
 		assert(waiter:spawn(function () fibers.perform(ws:receive_op()) end))
@@ -270,7 +271,7 @@ function M.test_client_websocket_active_send_abort_terminates_websocket()
 	end
 	local ws = setmetatable({ _driver = drv, _ws = raw }, websocket.ClientWebSocket)
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		assert(drv:start(scope))
 		local waiter = assert(scope:child())
 		assert(waiter:spawn(function () fibers.perform(ws:send_op('payload', 'text')) end))
