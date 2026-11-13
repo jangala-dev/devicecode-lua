@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/fabric/test_transfer.lua
 --
 -- Tests for the transfer manager after removing injected attempt callbacks.
@@ -140,7 +141,7 @@ function tests.test_reducer_requires_session_context_for_claims()
 end
 
 function tests.test_slot_admission_without_session_waits_for_peer_session()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local h = start_manager(scope)
 		local req = slot_request('req-wait-session')
 		assert_true(h.admission_tx:send(req))
@@ -164,7 +165,7 @@ function tests.test_slot_admission_without_session_waits_for_peer_session()
 end
 
 function tests.test_slot_admission_grants_lease_and_release_clears_slot()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local h = start_manager(scope)
 		local c = ctx()
 		h.outbound:bind(c)
@@ -185,7 +186,7 @@ function tests.test_slot_admission_grants_lease_and_release_clears_slot()
 end
 
 function tests.test_real_sender_attempt_uses_session_bound_outbound_gate()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local h = start_manager(scope, { chunk_size = 3 })
 		local c = ctx()
 		h.outbound:bind(c)
@@ -246,7 +247,7 @@ function tests.test_real_sender_attempt_uses_session_bound_outbound_gate()
 end
 
 function tests.test_session_drop_poisoned_lease_cannot_start_attempt()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local h = start_manager(scope)
 		local c = ctx()
 		h.outbound:bind(c)
@@ -268,7 +269,7 @@ function tests.test_session_drop_poisoned_lease_cannot_start_attempt()
 end
 
 function tests.test_manager_receives_inbound_transfer_for_registered_target()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local received = {}
 		local committed = false
 		local target = {}
@@ -345,7 +346,7 @@ function tests.test_manager_receives_inbound_transfer_for_registered_target()
 end
 
 function tests.test_manager_reasks_same_offset_after_bad_chunk_digest_and_accepts_retry()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local received = {}
 		local target = {}
 		function target:open_sink_op(req)
@@ -417,7 +418,7 @@ function tests.test_manager_reasks_same_offset_after_bad_chunk_digest_and_accept
 end
 
 function tests.test_manager_aborts_inbound_transfer_for_unknown_target()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local h = start_manager(scope)
 		local c = ctx()
 		h.outbound:bind(c)

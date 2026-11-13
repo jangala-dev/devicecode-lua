@@ -4,7 +4,7 @@ local channel = require 'fibers.channel'
 local pulse = require 'fibers.pulse'
 local sleep = require 'fibers.sleep'
 local safe = require 'coxpcall'
-local runfibers = require 'tests.support.run_fibers'
+local runfibers = require 'tests.support.run_virtual_fibers'
 local gsm = require 'services.gsm'
 local apns = require 'services.gsm.apn'
 local at = require 'services.hal.backends.modem.at'
@@ -125,7 +125,7 @@ function tests.test_pdp_config_without_type_defaults_to_ip_without_mutating_inpu
 end
 
 function tests.test_pdp_recovery_uses_configured_type_and_skips_matching_contexts()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		for _, pdp_type in ipairs({ 'IP', 'IPV4V6', 'IPV6' }) do
 			local m, calls = fixture({
 				context(1, 'IP', true), context(2, 'IPV4V6', true), context(3, 'IPV6', true),
@@ -147,7 +147,7 @@ function tests.test_pdp_recovery_uses_configured_type_and_skips_matching_context
 end
 
 function tests.test_pdp_recovery_does_not_restart_when_configured_type_already_matches()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		for _, pdp_type in ipairs({ 'IP', 'IPV4V6', 'IPV6' }) do
 			local m, calls = fixture({ context(1, pdp_type, true) })
 			m.cfg.pdp_type = pdp_type
@@ -161,7 +161,7 @@ function tests.test_pdp_recovery_does_not_restart_when_configured_type_already_m
 end
 
 function tests.test_pdp_configuration_changes_active_mismatched_contexts_and_restarts_once()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local m, calls, _, _, subs = fixture({
 			context(3, 'IPV6', true), context(2, 'IP', true),
 			context(1, 'IPV4V6', true), context(4, 'IPV6', false),
@@ -181,7 +181,7 @@ function tests.test_pdp_configuration_changes_active_mismatched_contexts_and_res
 end
 
 function tests.test_pdp_configuration_skips_empty_inactive_and_matching_contexts()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		for _, contexts in ipairs({ {}, { context(1, 'IP', true), context(2, 'IPV6', false) } }) do
 			local m, calls = fixture(contexts)
 			local restarted, err = m:_configure_pdp()
@@ -194,7 +194,7 @@ function tests.test_pdp_configuration_skips_empty_inactive_and_matching_contexts
 end
 
 function tests.test_pdp_recovery_read_and_verification_failures_do_not_restart()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		for _, failure_method in ipairs({ 'get', 'set_pdn_type' }) do
 			local m, calls = fixture({ context(1, 'IPV6', true) }, {
 				call = function(method)
@@ -213,7 +213,7 @@ function tests.test_pdp_recovery_read_and_verification_failures_do_not_restart()
 end
 
 function tests.test_pdp_recovery_restarts_when_change_verification_is_unavailable()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local m, calls = fixture({ context(1, 'IPV6', true) }, {
 			call = function(method)
 				if method == 'set_pdn_type' then
@@ -230,7 +230,7 @@ function tests.test_pdp_recovery_restarts_when_change_verification_is_unavailabl
 end
 
 function tests.test_pdp_recovery_restarts_once_after_partial_verified_changes()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local m, calls = fixture({ context(1, 'IPV6', true), context(2, 'IPV6', true) }, {
 			call = function(method, opts)
 				if method == 'set_pdn_type' and opts.cid == 1 then
@@ -246,7 +246,7 @@ end
 
 ---@return nil
 function tests.test_pdp_recovery_stops_commands_on_state_error_and_restarts_verified_changes()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local m, calls = fixture({
 			context(1, 'IPV6', true), context(2, 'IPV6', true), context(3, 'IPV6', true),
 		}, {
@@ -267,7 +267,7 @@ end
 
 ---@return nil
 function tests.test_pdp_recovery_restarts_after_verified_change_without_querying_modem_state()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		for _, state in ipairs({ 'connected', 'disabled', 'connecting', 'failed', 'unknown' }) do
 			local m, calls = fixture({ context(1, 'IPV6', true) }, {
 				call = function(method, opts, _, values)
@@ -286,7 +286,7 @@ end
 
 ---@return nil
 function tests.test_pdp_recovery_retries_required_restart_even_when_inspection_is_state_rejected()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local restart_failed = false
 		local m, calls = fixture({ context(1, 'IPV6', true) }, {
 			call = function(method, opts)
@@ -308,7 +308,7 @@ end
 
 ---@return nil
 function tests.test_pdp_recovery_does_not_restart_after_state_rejection_without_verified_change()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local m, calls = fixture({ context(1, 'IPV6', true), context(2, 'IPV6', true) }, {
 			call = function(method)
 				if method == 'set_pdn_type' then
@@ -326,7 +326,7 @@ function tests.test_pdp_recovery_does_not_restart_after_state_rejection_without_
 end
 
 function tests.test_pdp_recovery_late_connection_and_state_errors_do_not_restart()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		for _, state in ipairs({ 'connected', 'enabling', 'connecting' }) do
 			local m, calls = fixture({}, {
 				call = function(method, opts)
@@ -344,7 +344,7 @@ function tests.test_pdp_recovery_late_connection_and_state_errors_do_not_restart
 end
 
 function tests.test_pdp_restart_failure_preserves_verified_change_and_closes_subscription()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local m, _, _, _, subs = fixture({ context(1, 'IPV6', true) }, {
 			call = function(method) if method == 'restart' then return reply(false, 'reset failed') end end,
 		})
@@ -357,7 +357,7 @@ function tests.test_pdp_restart_failure_preserves_verified_change_and_closes_sub
 end
 
 function tests.test_pdp_restart_unobserved_transition_restores_retry_state()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local m, _, _, _, subs = fixture({ context(1, 'IPV6', true) }, {
 			call = function(method, _, active_subs)
 				if method == 'restart' then
@@ -376,7 +376,7 @@ function tests.test_pdp_restart_unobserved_transition_restores_retry_state()
 end
 
 function tests.test_pdp_restart_cancellation_cleans_wait_and_consumes_reservation()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local m, calls = fixture({ context(1, 'IPV6', true) }, {
 			call = function(method)
 				if method == 'restart' then return reply(true) end
@@ -398,7 +398,7 @@ function tests.test_pdp_restart_cancellation_cleans_wait_and_consumes_reservatio
 end
 
 function tests.test_pdp_correction_limit_survives_modem_recreation()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local svc = { obs_log = function() end }
 		local contexts = { context(1, 'IPV6', true) }
 		local function correction_fixture()
@@ -431,7 +431,7 @@ function tests.test_pdp_correction_limit_survives_modem_recreation()
 end
 
 function tests.test_pdp_restart_discards_stale_disabled_events()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local m = fixture({ context(1, 'IPV6', true) }, {
 			call = function(method, _, subs)
 				if method == 'restart' then
@@ -455,7 +455,7 @@ local function with_rankings(body)
 		return { first = { apn = 'first' }, second = { apn = 'second' } },
 			{ { name = 'first', rank = 0 }, { name = 'second', rank = 1 } }
 	end
-	local ok, err = safe.pcall(function() runfibers.run(body) end)
+	local ok, err = safe.pcall(function() runfibers.run_auto(body) end)
 	apns.get_ranked_apns = saved
 	assert(ok, err)
 end
@@ -607,7 +607,7 @@ end
 
 ---@return nil
 function tests.test_pdp_disabled_check_prevents_enable_on_read_or_write_failure()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		for _, fail_method in ipairs({ 'get', 'set_pdn_type' }) do
 			local m, calls
 			m, calls = fixture({ context(1, 'IPV6', true) }, {
@@ -634,7 +634,7 @@ end
 function tests.test_pdp_disabled_gate_rejects_shifted_backend_replies_before_enabling()
 	local saved_send = at.send_op
 	local ok, err = safe.pcall(function()
-		runfibers.run(function()
+		runfibers.run_auto(function()
 			for _, activation_reply in ipairs({
 				{ '+CGDCONT: 1,"IP","","0.0.0.0",0,0,0,0' },
 				{ '+CGACT: 1,1' },
@@ -674,7 +674,7 @@ end
 
 ---@return nil
 function tests.test_pdp_inspection_logs_requested_type_and_context_activity()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local m, _, logs = fixture({ context(2, 'IPV6', false), context(1, 'IP', true) })
 		m.cfg.pdp_type = 'IP'
 		local _, err = m:_configure_pdp()
@@ -745,7 +745,7 @@ end
 
 ---@return nil
 function tests.test_pdp_disabled_check_does_not_run_when_autoconnect_is_off()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local contexts = { context(1, 'IPV6', true) }
 		local m, calls = fixture(contexts)
 		prepare_autoconnect(m)
@@ -818,7 +818,7 @@ local function assert_logs_private(logs, secrets)
 end
 
 function tests.test_pdp_inspection_failures_are_scope_wide_monotonic_and_fail_open_at_two()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local reads = 0
 		local m, calls, logs = fixture({}, { call = function(method, opts)
 			if method == 'get' and opts.field == 'pdp_contexts' then
@@ -858,7 +858,7 @@ function tests.test_pdp_inspection_failures_are_scope_wide_monotonic_and_fail_op
 end
 
 function tests.test_pdp_scope_persists_across_sim_absence_and_config_apply_but_types_are_independent()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local m, _, logs = fixture({}, { call = function(method, opts)
 			if method == 'get' and opts.field == 'pdp_contexts' then return reply(false, 'read failed') end
 		end })
@@ -879,7 +879,7 @@ end
 function tests.test_pdp_inspection_exhaustion_enables_in_the_same_disabled_pass()
 	local saved_sleep_op = sleep.sleep_op
 	local ok, err = safe.pcall(function()
-		runfibers.run(function(scope)
+		runfibers.run_auto(function(scope)
 			local reads, passes = 0, 0
 			local m, calls, logs, unused_values, subs
 			m, calls, logs, unused_values, subs = fixture({}, { call = function(method, opts, active_subs)
@@ -930,7 +930,7 @@ function tests.test_pdp_inspection_exhaustion_enables_in_the_same_disabled_pass(
 end
 
 function tests.test_pdp_late_iccid_merge_does_not_persist_instance_enable_latch()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local private_iccid = '8901000000000000001'
 		local reads = 0
 		local old
@@ -966,7 +966,7 @@ function tests.test_pdp_late_iccid_merge_does_not_persist_instance_enable_latch(
 end
 
 function tests.test_pdp_result_precedence_continues_rejections_and_applied_but_stops_on_uncertain()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local contexts = {
 			context(1, 'IPV6', true), context(2, 'IPV6', true), context(3, 'IPV6', true),
 			context(4, 'IPV6', true), context(5, 'IPV6', true),
@@ -990,7 +990,7 @@ function tests.test_pdp_result_precedence_continues_rejections_and_applied_but_s
 end
 
 function tests.test_pdp_second_rejection_services_prior_episode_then_fails_open()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local m, calls, logs, values = fixture({ context(2, 'IPV6', true) }, {
 			call = function(method, opts)
 				if method == 'set_pdn_type' and opts.cid == 2 then
@@ -1019,7 +1019,7 @@ function tests.test_pdp_second_rejection_services_prior_episode_then_fails_open(
 end
 
 function tests.test_pdp_preexhausted_later_cid_services_earlier_sibling_episode_first()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local m, calls, logs = fixture({
 			context(1, 'IPV6', true), context(2, 'IPV6', true),
 		})
@@ -1047,7 +1047,7 @@ function tests.test_pdp_preexhausted_later_cid_services_earlier_sibling_episode_
 end
 
 function tests.test_pdp_exhausted_cid_is_skipped_while_new_cid_is_corrected()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local m, calls, _, values = fixture({ context(1, 'IPV6', true) }, {
 			call = function(method, opts)
 				if method == 'set_pdn_type' and opts.cid == 1 then
@@ -1066,7 +1066,7 @@ function tests.test_pdp_exhausted_cid_is_skipped_while_new_cid_is_corrected()
 end
 
 function tests.test_pdp_restart_reservations_exhaust_episode_only_and_allow_new_cids()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local restart_calls = 0
 		local m, calls, logs, values = fixture({ context(1, 'IPV6', true) }, {
 			call = function(method)
@@ -1092,7 +1092,7 @@ function tests.test_pdp_restart_reservations_exhaust_episode_only_and_allow_new_
 end
 
 function tests.test_pdp_fallback_scope_merges_atomically_into_iccid_without_logging_it()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local reads = 0
 		local private_iccid = '8901000000000000001'
 		local next_iccid = '8901000000000000002'
@@ -1118,7 +1118,7 @@ function tests.test_pdp_fallback_scope_merges_atomically_into_iccid_without_logg
 end
 
 function tests.test_pdp_owner_replacement_reconciles_rpc_started_once_and_blocks_stale_logs()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local logs, replacement, replacement_calls = {}, nil, nil
 		local svc = { obs_log = function(_, _, payload) logs[#logs + 1] = payload end }
 		local old, old_calls = fixture({ context(1, 'IPV6', true) }, {
@@ -1148,7 +1148,7 @@ function tests.test_pdp_owner_replacement_reconciles_rpc_started_once_and_blocks
 end
 
 function tests.test_pdp_owner_replacement_reconciles_reserved_correction_as_not_dispatched()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local svc = { obs_log = function() end }
 		local old = fixture({}, { svc = svc })
 		local scope_state = assert(old:_begin_pdp_operation('IP'))
@@ -1166,7 +1166,7 @@ function tests.test_pdp_owner_replacement_reconciles_reserved_correction_as_not_
 end
 
 function tests.test_pdp_owner_replacement_at_restart_return_completes_without_false_stale_error()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local logs, replacement, replacement_calls = {}, nil, nil
 		local contexts = { context(1, 'IPV6', true) }
 		local svc = { obs_log = function(_, _, payload) logs[#logs + 1] = payload end }

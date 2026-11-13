@@ -3,7 +3,7 @@ local fibers     = require 'fibers'
 local cjson_ok, cjson = pcall(require, 'cjson.safe')
 if not cjson_ok then cjson = require 'cjson' end
 
-local run_fibers = require 'tests.support.run_fibers'
+local run_fibers = require 'tests.support.run_virtual_fibers'
 local probe      = require 'tests.support.bus_probe'
 local monitor    = require 'services.monitor'
 local request    = require 'services.ui.http.request'
@@ -63,7 +63,7 @@ local function publish_log(conn, service, level, what, summary)
 end
 
 function T.monitor_public_capability_feeds_ui_initial_logs()
-	run_fibers.run(function (scope)
+	run_fibers.run_auto(function (scope)
 		local b = busmod.new()
 		local monitor_conn = b:connect({ origin_base = { service = 'monitor' } })
 		local app_conn = b:connect({ origin_base = { service = 'app' } })
@@ -97,7 +97,7 @@ function T.monitor_public_capability_feeds_ui_initial_logs()
 end
 
 function T.ui_logs_endpoint_can_request_boot_buffer()
-	run_fibers.run(function (scope)
+	run_fibers.run_auto(function (scope)
 		local b = busmod.new()
 		local admin = b:connect({ origin_base = { service = 'monitor-test-admin' } })
 		admin:retain({ 'cfg', 'monitor' }, {
@@ -148,7 +148,7 @@ function T.ui_logs_endpoint_can_request_boot_buffer()
 end
 
 function T.monitor_profile_endpoint_changes_profile_through_ui_route()
-	run_fibers.run(function (scope)
+	run_fibers.run_auto(function (scope)
 		local b = busmod.new()
 		local monitor_conn = b:connect({ origin_base = { service = 'monitor' } })
 		local ui_conn = b:connect({ origin_base = { service = 'ui' } })

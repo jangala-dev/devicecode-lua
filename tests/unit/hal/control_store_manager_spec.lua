@@ -1,6 +1,6 @@
 local fibers     = require 'fibers'
 local channel    = require 'fibers.channel'
-local runfibers  = require 'tests.support.run_fibers'
+local runfibers  = require 'tests.support.run_virtual_fibers'
 
 local T = {}
 
@@ -32,7 +32,7 @@ function T.start_apply_config_and_stop_round_trip()
 	local root = mk_tmpdir('csm-roundtrip')
 	local M = fresh_manager()
 
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local dev_ev_ch = channel.new(8)
 		local cap_emit_ch = channel.new(8)
 
@@ -62,7 +62,7 @@ function T.apply_config_creates_missing_control_store_root()
 	local root = base .. '/nested/control-store'
 	local M = fresh_manager()
 
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local dev_ev_ch = channel.new(8)
 		local cap_emit_ch = channel.new(8)
 
@@ -95,7 +95,7 @@ function T.apply_config_fails_when_not_started()
 	local root = mk_tmpdir('csm-not-started')
 	local M = fresh_manager()
 
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local ok, err = fibers.perform(M.apply_config_op({
 			{ name = 'main', root = root },
 		}))
@@ -110,7 +110,7 @@ function T.cap_emit_channel_receives_initial_meta_and_state()
 	local root = mk_tmpdir('csm-emit')
 	local M = fresh_manager()
 
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local dev_ev_ch = channel.new(8)
 		local cap_emit_ch = channel.new(8)
 
@@ -150,7 +150,7 @@ function T.reapply_same_config_is_idempotent()
 	local root = mk_tmpdir('csm-idempotent')
 	local M = fresh_manager()
 
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local dev_ev_ch = channel.new(8)
 		local cap_emit_ch = channel.new(8)
 
@@ -183,7 +183,7 @@ function T.reconcile_root_change_emits_removed_then_added()
 	local root2 = mk_tmpdir('csm-root2')
 	local M = fresh_manager()
 
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local dev_ev_ch = channel.new(8)
 		local cap_emit_ch = channel.new(8)
 
@@ -215,7 +215,7 @@ end
 function T.shutdown_op_before_start_is_ok_and_fault_op_is_inert()
 	local M = fresh_manager()
 
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local ok_stop, err_stop = fibers.perform(M.shutdown_op())
 		assert(ok_stop == true, tostring(err_stop))
 

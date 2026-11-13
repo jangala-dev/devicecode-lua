@@ -5,7 +5,6 @@ local op = require 'fibers.op'
 local pulse = require 'fibers.pulse'
 local channel = require 'fibers.channel'
 local sleep = require 'fibers.sleep'
-local runfibers = require 'tests.support.run_fibers'
 local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 local time_harness = require 'tests.support.time_harness'
 local safe = require 'coxpcall'
@@ -105,7 +104,7 @@ local function modem_fixture(request, current, supported)
 end
 
 function T.reconcile_applies_exact_match_verifies_and_does_not_repeat_writes()
-	runfibers.run(function()
+	run_virtual_fibers.run_auto(function()
 		local target = pair('4g', { '4g' })
 		local modem, state = modem_fixture(target, pair('none', { '3g' }), { target })
 		local settled, wrote = modem:_reconcile_modes()
@@ -121,7 +120,7 @@ function T.reconcile_applies_exact_match_verifies_and_does_not_repeat_writes()
 end
 
 function T.invalid_and_unsupported_settings_leave_modes_unchanged()
-	runfibers.run(function()
+	run_virtual_fibers.run_auto(function()
 		for _, request in ipairs({ false, {}, { preferred = 'lte', allowed = { '4g' } },
 			{ preferred = '4g', allowed = {} }, pair('5g', { '5g' }),
 			pair('4g', { '3g', '4g' }), pair('none', { '3g', '4g' }), pair('4g', { '3g' }) }) do
@@ -136,7 +135,7 @@ function T.invalid_and_unsupported_settings_leave_modes_unchanged()
 end
 
 function T.read_write_and_verification_failures_remain_pending()
-	runfibers.run(function()
+	run_virtual_fibers.run_auto(function()
 		local target = pair('4g', { '3g', '4g' })
 		for _, failure in ipairs({ 'read_failure', 'write_failure', 'mismatch' }) do
 			local modem, state = modem_fixture(target, pair('none', { '3g', '4g' }), { target })
@@ -178,7 +177,7 @@ local function loop_fixture(scope, autoconnect)
 end
 
 function T.control_loop_applies_without_autoconnect_and_handles_live_changes_and_recovery()
-	runfibers.run(function(scope)
+	run_virtual_fibers.run_auto(function(scope)
 		local modem, state, events = loop_fixture(scope, false)
 		state.modem_state = 'connected'
 		events:put({ payload = { to = 'connected' } })
@@ -205,7 +204,7 @@ function T.control_loop_applies_without_autoconnect_and_handles_live_changes_and
 end
 
 function T.control_loop_refreshes_state_before_connecting_and_defers_locked_modem()
-	runfibers.run(function(scope)
+	run_virtual_fibers.run_auto(function(scope)
 		local _, state, events, connections = loop_fixture(scope, true)
 		events:put({ payload = { to = 'initializing' } })
 		sleep.sleep(0.01)
@@ -224,7 +223,7 @@ function T.control_loop_refreshes_state_before_connecting_and_defers_locked_mode
 end
 
 function T.failed_state_refresh_prevents_connecting_from_a_queued_state_event()
-	runfibers.run(function(scope)
+	run_virtual_fibers.run_auto(function(scope)
 		local modem, state, events = loop_fixture(scope, true)
 		local connects = 0
 		modem._apn_connect = function() connects = connects + 1; return nil, '', nil end
@@ -272,6 +271,7 @@ function T.state_refresh_recovery_preserves_a_future_apn_retry_deadline()
 		events:put({ payload = { to = 'registered' } })
 		advance(clock, 0.01)
 		assert(connects == 1)
+		local apn_deadline = clock:monotonic() + 360
 
 		state.write_failure, state.refresh_failure = false, true
 		advance(clock, 20.05)
@@ -283,6 +283,10 @@ function T.state_refresh_recovery_preserves_a_future_apn_retry_deadline()
 		assert(modem.current_state == 'registered')
 		assert(connects == 1, 'state-read recovery must not shorten the APN backoff')
 		assert(state.writes == 2, 'recovery should not rewrite already-applied modes')
+		advance(clock, apn_deadline - clock:monotonic() - 0.01)
+		assert(connects == 1, 'the original APN cooldown must still be active just before expiry')
+		advance(clock, 0.02)
+		assert(connects == 2, 'connecting must resume at the original APN deadline')
 	end)
 end
 
@@ -311,6 +315,7 @@ function T.state_event_recovery_preserves_and_resumes_the_apn_retry_deadline()
 			events:put({ payload = { to = 'registered' } })
 			advance(clock, 0.01)
 			assert(connects == 1 and state.writes == 1)
+			local apn_deadline = clock:monotonic() + 50
 			local initial_refresh_reads = refresh_reads
 
 			state.write_failure, state.refresh_failure = false, true
@@ -328,7 +333,9 @@ function T.state_event_recovery_preserves_and_resumes_the_apn_retry_deadline()
 			assert(connects == 1, 'state-event recovery must not preempt the APN cooldown')
 			assert(state.writes == 2, 'state recovery must not rewrite already-applied modes')
 
-			advance(clock, 10.05)
+			advance(clock, apn_deadline - clock:monotonic() - 0.01)
+			assert(connects == 1, 'state recovery must retain the original deadline right up to expiry')
+			advance(clock, 0.02)
 			assert(connects == 2, 'the original APN deadline must resume connecting without another event')
 		end)
 	end)
@@ -348,11 +355,16 @@ function T.mode_retry_does_not_preempt_apn_backoff()
 		events:put({ payload = { to = 'registered' } })
 		advance(clock, 0.01)
 		assert(state.writes == 1 and connects == 1)
+		local apn_deadline = clock:monotonic() + 360
 		state.write_failure = false
 		advance(clock, 20.05)
 		assert(state.writes == 2, 'mode settings should retry without a state event')
 		assert(connects == 1, 'mode retry must preserve the APN backoff')
 		assert(state.current.preferred == '4g')
+		advance(clock, apn_deadline - clock:monotonic() - 0.01)
+		assert(connects == 1, 'the original APN cooldown must still be active just before expiry')
+		advance(clock, 0.02)
+		assert(connects == 2, 'connecting must resume at the original APN deadline')
 	end)
 end
 

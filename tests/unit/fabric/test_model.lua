@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/fabric/test_model.lua
 
 local fibers = require 'fibers'
@@ -48,7 +49,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_snapshot_returns_copy()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local m = model_mod.new({ state = 'idle', count = 1 })
 
 		local snap = m:snapshot()
@@ -67,7 +68,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_set_snapshot_unchanged_does_not_increment_version()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local m = model_mod.new({ state = 'idle', count = 1 })
 
 		local v0 = m:version()
@@ -85,7 +86,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_set_snapshot_changed_increments_version()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local m = model_mod.new({ state = 'idle', count = 1 })
 
 		local v0 = m:version()
@@ -107,7 +108,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_changed_op_returns_immediately_when_version_is_stale()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local m = model_mod.new({ state = 'idle' })
 
 		local seen = m:version()
@@ -127,7 +128,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_changed_op_waits_for_change()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local m = model_mod.new({ state = 'idle' })
 		local seen = m:version()
 
@@ -163,7 +164,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_terminate_wakes_observer_with_reason()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local m = model_mod.new({ state = 'idle' })
 		local seen = m:version()
 
@@ -198,7 +199,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_close_is_idempotent_and_preserves_first_reason()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local m = model_mod.new({ state = 'idle' })
 
 		assert_true(m:terminate('first'))
@@ -214,7 +215,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_set_snapshot_after_terminate_fails_without_incrementing_version()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local m = model_mod.new({ state = 'idle' })
 
 		local v0 = m:version()
@@ -237,7 +238,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_stale_observer_after_close_sees_unseen_snapshot_first()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local m = model_mod.new({ state = 'idle' })
 
 		local seen = m:version()

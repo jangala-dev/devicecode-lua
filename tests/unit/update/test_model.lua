@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/update/test_model.lua
 
 local fibers = require 'fibers'
@@ -17,7 +18,7 @@ local function assert_nil(v, msg) if v ~= nil then fail(msg or ('expected nil, g
 local function assert_not_nil(v, msg) if v == nil then fail(msg or 'expected non-nil value') end end
 
 function tests.test_snapshot_returns_deep_copy()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local m = model_mod.new({ state = 'idle', nested = { n = 1 } })
 		local snap = m:snapshot()
 		snap.nested.n = 99
@@ -26,7 +27,7 @@ function tests.test_snapshot_returns_deep_copy()
 end
 
 function tests.test_unchanged_snapshot_does_not_signal()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local m = model_mod.new({ a = 1, b = { c = 2 } })
 		local v0 = m:version()
 		local changed, v = m:set_snapshot({ a = 1, b = { c = 2 } })
@@ -36,7 +37,7 @@ function tests.test_unchanged_snapshot_does_not_signal()
 end
 
 function tests.test_changed_op_returns_snapshot()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local m = model_mod.new({ state = 'idle' })
 		local seen = m:version()
 		local tx, rx = mailbox.new(1, { full = 'reject_newest' })
@@ -59,7 +60,7 @@ function tests.test_changed_op_returns_snapshot()
 end
 
 function tests.test_terminate_wakes_observer()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local m = model_mod.new({ state = 'idle' })
 		local seen = m:version()
 		local tx, rx = mailbox.new(1, { full = 'reject_newest' })

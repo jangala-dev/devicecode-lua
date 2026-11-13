@@ -1,13 +1,13 @@
 local fibers      = require 'fibers'
 local sleep       = require 'fibers.sleep'
 local op          = require 'fibers.op'
-local runfibers   = require 'tests.support.run_fibers'
+local runfibers   = require 'tests.support.run_virtual_fibers'
 local blob_source = require 'devicecode.blob_source'
 
 local T = {}
 
 function T.string_source_reads_chunks_and_reaches_eof()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local src = blob_source.from_string('abcdef')
 
 		local c1, e1 = fibers.perform(src:read_chunk_op(2))
@@ -25,7 +25,7 @@ function T.string_source_reads_chunks_and_reaches_eof()
 end
 
 function T.string_source_rejects_invalid_max_bytes()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local src = blob_source.from_string('abc')
 		local chunk, err = fibers.perform(src:read_chunk_op(0))
 		assert(chunk == nil)
@@ -34,7 +34,7 @@ function T.string_source_rejects_invalid_max_bytes()
 end
 
 function T.memory_sink_accumulates_written_chunks()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local sink = blob_source.to_memory()
 		local ok1, err1 = fibers.perform(sink:write_chunk_op('ab'))
 		local ok2, err2 = fibers.perform(sink:write_chunk_op('cd'))
@@ -45,7 +45,7 @@ function T.memory_sink_accumulates_written_chunks()
 end
 
 function T.copy_op_copies_string_source_to_memory_sink()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local src = blob_source.from_string('hello world')
 		local sink = blob_source.to_memory()
 
@@ -57,7 +57,7 @@ function T.copy_op_copies_string_source_to_memory_sink()
 end
 
 function T.copy_op_does_not_close_when_disabled()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local src_closed = 0
 		local sink_closed = 0
 		local src = {
@@ -102,7 +102,7 @@ function T.copy_op_does_not_close_when_disabled()
 end
 
 function T.copy_op_closes_on_timeout_losing_arm()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local src_closed = 0
 		local sink_closed = 0
 		local src = {
@@ -138,7 +138,7 @@ function T.copy_op_closes_on_timeout_losing_arm()
 end
 
 function T.copy_op_fails_when_sink_write_fails()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local src = blob_source.from_string('boom')
 		local sink = {
 			write_chunk_op = function(self, chunk)

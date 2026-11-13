@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/ui/test_update_upload.lua
 
 local fibers = require 'fibers'
@@ -30,7 +31,7 @@ local function ingest_client(handle)
 end
 
 function tests.test_upload_abort_finaliser_runs_when_append_fails()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local handle = {
 			aborted = nil,
 			append_chunk_op = function () return fibers.always(nil, 'append_failed') end,
@@ -51,7 +52,7 @@ function tests.test_upload_abort_finaliser_runs_when_append_fails()
 end
 
 function tests.test_committed_artifact_is_not_aborted_when_update_job_create_fails()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local handle = {
 			aborted = nil,
 			chunks = {},
@@ -80,7 +81,7 @@ end
 
 
 function tests.test_upload_fails_when_create_job_reply_has_no_job_id()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local handle = {
 			append_chunk_op = function () return fibers.always(true, nil) end,
 			commit_op = function () return fibers.always('artifact-missing-job-id', nil) end,
@@ -104,7 +105,7 @@ function tests.test_upload_fails_when_create_job_reply_has_no_job_id()
 end
 
 function tests.test_upload_disconnects_owned_update_connection_after_success()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local handle = {
 			append_chunk_op = function () return fibers.always(true, nil) end,
 			commit_op = function () return fibers.always('artifact-2', nil) end,
@@ -140,7 +141,7 @@ end
 
 
 function tests.test_upload_uses_borrowed_service_connection_for_public_route()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local handle = {
 			append_chunk_op = function () return fibers.always(true, nil) end,
 			commit_op = function () return fibers.always('artifact-borrowed', nil) end,
@@ -177,7 +178,7 @@ end
 
 
 function tests.test_upload_timeout_cancels_scope_and_aborts_uncommitted_ingest()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local handle = {
 			aborted = nil,
 			append_chunk_op = function () return fibers.always(true, nil) end,
@@ -205,7 +206,7 @@ end
 
 
 function tests.test_upload_requires_read_chunk_op_body_contract()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local handle = {
 			append_chunk_op = function () error('append must not be called') end,
 			commit_op = function () error('commit must not be called') end,
@@ -226,7 +227,7 @@ end
 
 function tests.test_artifact_ingest_boundary_requires_op_methods_and_abort_now()
 	local ingest = require 'services.ui.update.artifact_ingest'
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local handle, err = fibers.perform(ingest.open_ingest_op({ open_ingest = function () return {} end }, {}))
 		assert_nil(handle)
 		assert_eq(err, 'artifact ingest client must expose open_ingest_op')
@@ -250,7 +251,7 @@ function tests.test_artifact_ingest_boundary_requires_op_methods_and_abort_now()
 end
 
 function tests.test_upload_timeout_while_append_pending_aborts_uncommitted_ingest()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local handle = {
 			aborted = nil,
 			append_chunk_op = function ()

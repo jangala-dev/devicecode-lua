@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 local fibers = require 'fibers'
 local sleep  = require 'fibers.sleep'
 local runtime = require 'fibers.runtime'
@@ -122,7 +123,7 @@ local function request_module(body_text)
 end
 
 function M.test_exchange_op_streams_response_to_sink_without_returning_body()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local sink = blob.to_memory()
 		local result = ok(fibers.perform(client.exchange_op(fake_driver(), {
 			uri = 'http://example.test/path',
@@ -139,7 +140,7 @@ function M.test_exchange_op_streams_response_to_sink_without_returning_body()
 end
 
 function M.test_open_exchange_rejects_raw_body_before_backend_job()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local called = false
 		local drv = { run_op = function () called = true; return fibers.always('bad') end }
 		local ex, err = fibers.perform(client.open_exchange_op(drv, {
@@ -184,7 +185,7 @@ function M.test_request_source_streams_through_fibers_native_body_pipe()
 		end,
 	}
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		assert(drv:start(scope))
 		local result = ok(fibers.perform(client.exchange_op(drv, {
 			uri = 'http://example.test/', method = 'POST', body_source = blob.from_string('abcd'),
@@ -200,7 +201,7 @@ end
 
 
 function M.test_exchange_op_does_not_terminate_committed_response_sink_after_success()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local committed = false
 		local terminated = nil
 		local sink = {
@@ -221,7 +222,7 @@ function M.test_exchange_op_does_not_terminate_committed_response_sink_after_suc
 end
 
 function M.test_exchange_op_terminates_uncommitted_response_sink_on_copy_failure()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local terminated = nil
 		local sink = {
 			write_chunk_op = function () return fibers.always(nil, 'sink_failed') end,
@@ -242,7 +243,7 @@ end
 
 
 function M.test_request_body_source_without_read_op_rejects_before_request_construction()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local constructed = 0
 		local request_mod = {
 			new_from_uri = function () constructed = constructed + 1; return request_module().new_from_uri('http://example.test/') end,
@@ -280,7 +281,7 @@ function M.test_open_exchange_active_abort_detaches_then_cleans_request_in_cqueu
 		end,
 	}
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		assert(drv:start(scope))
 		local waiter = assert(scope:child())
 		local result, err
@@ -330,7 +331,7 @@ function M.test_exchange_read_active_abort_detaches_then_cleans_stream_in_cqueue
 	}
 	local ex = require('services.http.exchange').make(drv, fake_headers(200), stream, { intra_stream_timeout = 0.125 })
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		assert(drv:start(scope))
 		local waiter = assert(scope:child())
 		local result, err

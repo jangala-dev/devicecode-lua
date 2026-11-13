@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/update/test_events.lua
 
 local fibers = require 'fibers'
@@ -11,7 +12,7 @@ local function fail(msg) error(msg or 'assertion failed', 2) end
 local function assert_eq(a, b, msg) if a ~= b then fail(msg or ('expected ' .. tostring(b) .. ', got ' .. tostring(a))) end end
 
 function tests.test_next_event_prefers_generation_done_over_manager_when_both_ready()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local done_tx, done_rx = mailbox.new(4, { full = 'reject_newest' })
 		local mgr_tx, mgr_rx = mailbox.new(4, { full = 'reject_newest' })
 
@@ -29,7 +30,7 @@ function tests.test_next_event_prefers_generation_done_over_manager_when_both_re
 end
 
 function tests.test_next_event_rechecks_priority_after_wake()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local done_tx, done_rx = mailbox.new(4, { full = 'reject_newest' })
 		local mgr_tx, mgr_rx = mailbox.new(4, { full = 'reject_newest' })
 

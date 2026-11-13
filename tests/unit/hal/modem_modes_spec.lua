@@ -6,7 +6,7 @@ local channel = require 'fibers.channel'
 local exec = require 'fibers.io.exec'
 local op = require 'fibers.op'
 local sleep = require 'fibers.sleep'
-local runfibers = require 'tests.support.run_fibers'
+local runfibers = require 'tests.support.run_virtual_fibers'
 local T = {}
 
 function T.typed_modes_reject_invalid_values_and_normalize_allowed_sets()
@@ -59,7 +59,7 @@ function T.backend_submits_both_options_and_propagates_command_failure()
 		end }
 	end
 	local ok, err = pcall(function()
-		runfibers.run(function()
+		runfibers.run_auto(function()
 			local backend = setmetatable({ identity = { address = '7' } }, linux_mm._test.ModemBackend)
 			assert(backend:set_modes('4g', { '4g', '3g' }))
 			assert(argv[1] == 'mmcli' and argv[3] == '7')
@@ -76,7 +76,7 @@ function T.backend_submits_both_options_and_propagates_command_failure()
 end
 
 function T.driver_exposes_modes_and_invalidates_cached_read_after_write()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local cap = assert(cap_types.new.ModemCapability('one', channel.new()))
 		assert(cap.offerings.get and cap.offerings.set_modes)
 		local modem = assert(driver.new('7', { debug = function() end, error = function() end }))
@@ -104,7 +104,7 @@ function T.driver_exposes_modes_and_invalidates_cached_read_after_write()
 end
 
 function T.emitter_never_fetches_or_publishes_modes_but_explicit_gets_do()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local modem = assert(driver.new('7', { debug = function() end, error = function() end }))
 		local current = { preferred = 'none', allowed = { '4g' } }
 		local reads, emitted = 0, {}

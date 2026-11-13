@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/hal/openwrt_uci_manager_spec.lua
 
 local fibers = require 'fibers'
@@ -47,7 +48,7 @@ local function fake_cursor(calls)
 end
 
 function tests.test_commit_converts_values_and_runs_restart_commands()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local calls = {}
 		local restarts = {}
 		local mgr = ok(uci_manager.new({
@@ -85,7 +86,7 @@ end
 
 
 function tests.test_start_accepts_already_started_owner_scope_from_caller_scope()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local owner = ok(scope:child())
 		local hold_tx, hold_rx = mailbox.new(1)
 		ok(owner:spawn(function () fibers.perform(hold_rx:recv_op()) end))
@@ -103,7 +104,7 @@ function tests.test_start_accepts_already_started_owner_scope_from_caller_scope(
 end
 
 function tests.test_queue_full_is_reported_without_admission()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local mgr = ok(uci_manager.new({ queue_len = 0, cursor = fake_cursor({}) }))
 		local ok_submit, err, admitted = fibers.perform(mgr:submit_op({
 			config = 'network',
@@ -118,7 +119,7 @@ function tests.test_queue_full_is_reported_without_admission()
 end
 
 function tests.test_restart_commands_are_deduplicated_across_debounce_batch()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local calls = {}
 		local restarts = {}
 		local mgr = ok(uci_manager.new({
@@ -176,7 +177,7 @@ function tests.test_record_normalisation_does_not_mutate_caller_owned_record()
 end
 
 function tests.test_add_alias_lists_rename_and_reorder_are_applied_in_order()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local calls = {}
 		local cursor = fake_cursor(calls)
 		cursor.add = function (_, config, stype)
@@ -254,7 +255,7 @@ end
 
 
 function tests.test_transaction_rolls_back_touched_packages_on_partial_failure()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local calls = {}
 		local snapshots = {
 			network = {
@@ -292,7 +293,7 @@ end
 
 
 function tests.test_replace_package_deletes_existing_sections_before_writing_desired_state()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local calls = {}
 		local cursor = fake_cursor(calls)
 		cursor.get_all = function (_, pkg)
@@ -326,7 +327,7 @@ function tests.test_replace_package_deletes_existing_sections_before_writing_des
 end
 
 function tests.test_manager_creates_missing_package_files_before_transaction()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local tmp = os.tmpname()
 		os.remove(tmp)
 		local calls = {}
@@ -353,7 +354,7 @@ function tests.test_manager_creates_missing_package_files_before_transaction()
 end
 
 function tests.test_activation_command_replies_without_waiting_for_command_completion()
-	fibers.run(function(scope)
+	run_virtual_fibers.run_auto(function(scope)
 		local calls = {}
 		local activation_restarts = {}
 		local unblock_tx, unblock_rx = mailbox.new(1, { full = 'reject_newest' })

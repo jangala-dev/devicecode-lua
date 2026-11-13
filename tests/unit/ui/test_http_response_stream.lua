@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/ui/test_http_response_stream.lua
 
 local fibers = require 'fibers'
@@ -34,7 +35,7 @@ local function ctx()
 end
 
 function tests.test_stream_headers_chunks_and_end_state()
-	fibers.run(function()
+	run_virtual_fibers.run_auto(function()
 		local raw = ctx()
 		local owner = response.new(raw)
 		local ok, err = fibers.perform(owner:write_headers_op(200, { ['content-type'] = 'text/plain' }))
@@ -51,7 +52,7 @@ function tests.test_stream_headers_chunks_and_end_state()
 end
 
 function tests.test_invalid_response_state_transitions_fail()
-	fibers.run(function()
+	run_virtual_fibers.run_auto(function()
 		local owner = response.new(ctx())
 		local ok, err = fibers.perform(owner:write_chunk_op('late'))
 		assert_nil(ok)
@@ -65,7 +66,7 @@ function tests.test_invalid_response_state_transitions_fail()
 end
 
 function tests.test_reply_op_uses_streaming_transport()
-	fibers.run(function()
+	run_virtual_fibers.run_auto(function()
 		local raw = ctx()
 		local owner = response.new(raw)
 		local ok, err = fibers.perform(owner:reply_op(201, 'hello', { ['content-type'] = 'text/plain' }))
@@ -91,7 +92,7 @@ function tests.test_terminate_abandons_without_writing()
 end
 
 function tests.test_transport_write_failure_abandons_response()
-	fibers.run(function()
+	run_virtual_fibers.run_auto(function()
 		local raw = ctx()
 		raw.write_chunk_op = function()
 			return fibers.always(nil, 'chunk_failed')
@@ -107,7 +108,7 @@ function tests.test_transport_write_failure_abandons_response()
 end
 
 function tests.test_cancellation_while_streaming_chunk_abandons_response_now()
-	fibers.run(function()
+	run_virtual_fibers.run_auto(function()
 		local raw = ctx()
 		local abandoned
 		raw.terminate = function(_, reason)
@@ -134,7 +135,7 @@ end
 
 
 function tests.test_headers_op_losing_choice_releases_start_token_and_abandons()
-	fibers.run(function()
+	run_virtual_fibers.run_auto(function()
 		local sleep = require 'fibers.sleep'
 		local raw = ctx()
 		local abandoned

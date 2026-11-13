@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/ui/test_user_operation.lua
 
 local fibers = require 'fibers'
@@ -12,7 +13,7 @@ local function assert_nil(v, msg) if v ~= nil then fail(msg or ('expected nil, g
 local function assert_not_nil(v, msg) if v == nil then fail(msg or 'expected non-nil') end end
 
 function tests.test_user_operation_success_disconnects_owned_connection()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local disconnected = false
 		local conn = { disconnect = function () disconnected = true; return true end }
 		local result, err = user_operation.run {
@@ -30,7 +31,7 @@ function tests.test_user_operation_success_disconnects_owned_connection()
 end
 
 function tests.test_user_operation_timeout_returns_cancelled_shape_and_disconnects()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local disconnected = false
 		local conn = { disconnect = function () disconnected = true; return true end }
 		local result, err, rep = user_operation.run {
@@ -50,7 +51,7 @@ function tests.test_user_operation_timeout_returns_cancelled_shape_and_disconnec
 end
 
 function tests.test_user_operation_borrowed_connection_is_not_disconnected_by_default()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local disconnected = false
 		local conn = { disconnect = function () disconnected = true; return true end }
 		local result, err = user_operation.run {

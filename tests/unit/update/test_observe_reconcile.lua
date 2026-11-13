@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 local fibers = require 'fibers'
 local sleep  = require 'fibers.sleep'
 local op     = require 'fibers.op'
@@ -10,7 +11,7 @@ local function assert_eq(a,b,msg) if a ~= b then fail(msg or ('expected '..tostr
 local function assert_true(v,msg) if v ~= true then fail(msg or ('expected true, got '..tostring(v))) end end
 
 function tests.test_observer_changed_op_wakes_with_snapshot_copy()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local obs = observe.new({ components = { cm5 = { component = 'cm5' } } })
 		local seen = obs:version()
 		local got
@@ -28,7 +29,7 @@ function tests.test_observer_changed_op_wakes_with_snapshot_copy()
 end
 
 function tests.test_reconcile_worker_waits_on_component_observer()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local obs = observe.new({ components = { cm5 = { component = 'cm5' } } })
 		local backend = {}
 		function backend:evaluate_reconcile(job, snapshot)
@@ -56,7 +57,7 @@ end
 
 
 function tests.test_stage_worker_runs_single_stage_op()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local called = 0
 		local backend = {}
 		function backend:stage_op(job, ctx)
@@ -78,7 +79,7 @@ function tests.test_stage_worker_runs_single_stage_op()
 	end)
 end
 function tests.test_reconcile_worker_returns_observer_closed_result()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local obs = observe.new({ components = { cm5 = { component = 'cm5' } } })
 		local backend = {}
 		function backend:evaluate_reconcile()
@@ -103,7 +104,7 @@ function tests.test_reconcile_worker_returns_observer_closed_result()
 end
 
 function tests.test_reconcile_worker_returns_deadline_result()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local backend = {}
 		function backend:evaluate_reconcile()
 			return { done = false }
@@ -123,7 +124,7 @@ end
 
 
 function tests.test_commit_worker_persists_awaiting_return_before_backend_commit_and_passes_token()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local order = {}
 		local jobs = {}
 		function jobs:admit_transition(cmd)
@@ -165,7 +166,7 @@ function tests.test_commit_worker_persists_awaiting_return_before_backend_commit
 end
 
 function tests.test_commit_worker_rejects_backend_without_commit_policy()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local backend = { commit_op = function () return op.always({ accepted = true }, nil) end }
 		local ok, err = pcall(function ()
 			active_job.commit(scope, {
@@ -182,7 +183,7 @@ end
 
 
 function tests.test_commit_worker_surfaces_critical_inconsistent_outcome_after_backend_acceptance()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local calls = 0
 		local jobs = {}
 		function jobs:admit_transition(cmd)
