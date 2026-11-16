@@ -1731,6 +1731,10 @@ function GsmModem:_configure_pdp()
 		return restarted, err, state, enable_decision
 	end
 	if scope_state.active_episode and scope_state.active_episode.state == 'awaiting_reinspection' then
+		-- The reset this episode ordered has happened, so a fail-open decision deferred
+		-- until it ran is due now. Re-inspection skips the exhausted CID, so this is
+		-- its only chance to be reported.
+		self:_log_pending_pdp_fail_open(scope_state, scope_state.active_episode, pdp_type, generation)
 		archive_pdp_episode(scope_state, scope_state.active_episode, 'completed_restart_requires_inspection')
 	elseif scope_state.active_episode then
 		local restarted, episode_err, next_state = self:_service_pdp_episode(scope_state, pdp_type, generation)

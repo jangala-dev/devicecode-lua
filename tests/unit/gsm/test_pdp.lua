@@ -1420,6 +1420,57 @@ function tests.test_pdp_owner_replacement_after_successful_reset_reinspects_befo
 	end)
 end
 
+function tests.test_pdp_owner_replacement_reports_a_fail_open_deferred_to_the_reset()
+	runfibers.run_auto(function()
+		local contexts = { context(1, 'IPV6', true), context(2, 'IPV6', true) }
+		local logs = {}
+		local svc = { obs_log = function(_, _, payload) logs[#logs + 1] = payload end }
+		local replacement, replacement_calls
+		local old, old_calls = fixture(contexts, {
+			svc = svc,
+			call = function(method, opts)
+				if method == 'set_pdn_type' then
+					contexts[opts.cid].pdp_type = opts.pdp_type
+				elseif method == 'restart' then
+					replacement, replacement_calls = fixture(contexts, { svc = svc })
+					replacement:_claim_pdp_owner()
+					return reply(true)
+				end
+			end,
+		})
+		-- CID 2 has used its correction budget, so its fail-open is deferred until the
+		-- reset that CID 1's correction needs.
+		local scope_state = assert(old:_begin_pdp_operation('IP'))
+		scope_state.cids['2'] = {
+			corrections = 2,
+			exhausted = false,
+			blocked = false,
+			last_result = { outcome = 'rejected', dispatched = true, err = 'pdp_correction_rejected' },
+		}
+		old:_finish_pdp_operation(old.pdp_owner_generation, 'IP')
+
+		eq(select(2, old:_configure_pdp()), 'pdp_owner_stale')
+		eq(count(old_calls, 'set_pdn_type'), 1)
+		eq(count(old_calls, 'restart'), 1)
+		eq(count_logs(logs, 'pdp_enforcement_exhausted', 'correction'), 0)
+
+		-- The reset replaced the owner. The replacement re-inspects instead of resetting
+		-- again, and still reports the fail-open, which re-inspection would skip.
+		local restarted, err = replacement:_configure_pdp()
+		eq(restarted, false)
+		eq(err, '')
+		eq(count(replacement_calls, 'restart'), 0)
+		eq(count(replacement_calls, 'set_pdn_type'), 0)
+		eq(count_logs(logs, 'pdp_enforcement_exhausted', 'correction'), 1)
+		local terminal = assert(find_log(logs, 'pdp_enforcement_exhausted', 'correction'))
+		eq(terminal.cid, 2)
+		eq(terminal.outcome, 'rejected')
+		local episode = scope_state.history[#scope_state.history]
+		eq(episode.state, 'completed_restart_requires_inspection')
+		eq(episode.pending_fail_open, nil)
+	end)
+end
+
 function tests.test_pdp_owner_replacement_while_waiting_for_reset_transition_reinspects()
 	runfibers.run_auto(function(scope)
 		local contexts = { context(1, 'IPV6', true) }

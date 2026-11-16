@@ -113,6 +113,24 @@ function M.check_restart_order(content)
 	end
 end
 
+---@param content string
+---@return string
+function M.current_capture(content)
+	-- `logread -f` replays the syslog ring before following it, so a capture starts
+	-- with older lines, possibly from an earlier run or firmware. Only lines after the
+	-- last BEGIN marker, which Logs:start writes once the capture is running, belong
+	-- to this run.
+	local marker, from = 'onbox-test: BEGIN ', nil
+	local at = content:find(marker, 1, true)
+	while at do
+		from = at
+		at = content:find(marker, at + 1, true)
+	end
+	assert(from, 'Log capture has no onbox-test BEGIN marker')
+	local line_end = content:find('\n', from, true)
+	return line_end and content:sub(line_end + 1) or ''
+end
+
 ---@class PdpBoxArgs: OnboxArgs
 ---@field first string
 ---@field second string
@@ -204,7 +222,7 @@ function Runner:inspect(label, config)
 			label, self.targets[imei].name, imei:sub(-4), table.concat(cids, ','), expected))
 	end
 	self.modems:wait(self.targets, 'connected')
-	M.check_restart_order(util.read(self.box.logs.path))
+	M.check_restart_order(M.current_capture(util.read(self.box.logs.path)))
 	self.summary[#self.summary + 1] = { phase = label, modems = results }
 	util.write(self.box.artifacts .. '/results.json', util.encode(self.summary))
 end

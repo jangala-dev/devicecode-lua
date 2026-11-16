@@ -144,6 +144,30 @@ LOG  gsm  info  state        primary modem state -> connected
 end
 
 ---@return nil
+function tests.restart_order_ignores_lines_replayed_before_the_capture_began()
+	-- logread -f replays the ring first: here an earlier run's double reset and its marker.
+	local reset = 'LOG  gsm  info  pdp_restart  pdp_restart modem=primary limit=2 count='
+	local inspected = 'LOG  gsm  info  pdp_contexts_checked  pdp_contexts_checked modem=primary contexts=1:IP:active'
+	local capture = table.concat({
+		'Mon Nov 16 09:00:00 2026 user.notice onbox-test: BEGIN run',
+		'Mon Nov 16 09:00:01 2026 daemon.info devicecode[11]: ' .. reset .. '1',
+		'Mon Nov 16 09:00:02 2026 daemon.info devicecode[11]: ' .. reset .. '2',
+		'Mon Nov 16 10:00:00 2026 user.notice onbox-test: BEGIN run',
+		'Mon Nov 16 10:00:01 2026 daemon.info devicecode[22]: ' .. reset .. '1',
+		'Mon Nov 16 10:00:02 2026 daemon.info devicecode[22]: ' .. inspected,
+		'',
+	}, '\n')
+	rejects(function() runner.check_restart_order(capture) end,
+		'restarted twice without an intervening context inspection')
+	local current = runner.current_capture(capture)
+	assert(not current:find('devicecode[11]', 1, true), 'replayed lines were kept')
+	assert(current:find('devicecode[22]', 1, true), 'current lines were dropped')
+	runner.check_restart_order(current)
+	rejects(function() runner.current_capture('LOG  gsm  info  pdp_restart  pdp_restart modem=primary\n') end,
+		'no onbox-test BEGIN marker')
+end
+
+---@return nil
 function tests.restart_order_accepts_complete_monitor_and_logread_lines()
 	local failures = {}
 	for _, prefix in ipairs({
