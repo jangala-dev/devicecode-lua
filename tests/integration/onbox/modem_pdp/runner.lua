@@ -2,6 +2,7 @@ local support = require 'onbox.support.runner'
 local devicecode = require 'onbox.support.devicecode'
 local modem_support = require 'onbox.support.modem'
 local util = require 'onbox.support.util'
+local process = require 'onbox.support.process'
 local tablex = require 'shared.table'
 
 local M = {}
@@ -71,6 +72,64 @@ function M.check_contexts(response, expected)
 	assert(#active > 0, 'No active contexts: refusing to treat an empty result as a pass')
 	table.sort(active, function(a, b) return a.cid < b.cid end)
 	return active
+end
+
+---@param content string
+---@return nil
+function M.check_restart_order(content)
+	-- A reset may replace the ModemManager object, but the next owner must establish
+	-- the current PDP facts before it spends another restart reservation or fails open.
+	local awaiting_inspection, recognised = {}, 0
+	for line in content:gmatch('[^\n]+') do
+		-- logread preserves the monitor timestamp and may add a syslog prefix.
+		-- Locate the LOG columns independently of those prefixes.
+		local service, _, event = line:match('%f[%w]LOG%s+(%S+)%s+(%S+)%s+(%S+)%s+')
+		if service == 'gsm' and (event == 'pdp_contexts_checked' or event == 'pdp_restart'
+			or event == 'pdp_enforcement_exhausted' or event == 'autoconnect_failed'
+			or event == 'pdp_restart_unobserved') then
+			recognised = recognised + 1
+			local modem = assert(line:match('%smodem=([^%s]+)'), event .. ' is missing modem')
+			if event == 'pdp_contexts_checked' then
+				awaiting_inspection[modem] = nil
+			elseif event == 'pdp_restart' and not line:match('%serr=[^%s]+') then
+				assert(not awaiting_inspection[modem],
+					('PDP modem %s restarted twice without an intervening context inspection'):format(modem))
+				awaiting_inspection[modem] = true
+			elseif event == 'pdp_enforcement_exhausted'
+				and line:find('budget_kind=restart', 1, true) then
+				assert(not awaiting_inspection[modem],
+					('PDP modem %s exhausted its restart budget before post-reset inspection'):format(modem))
+			elseif (event == 'autoconnect_failed' or event == 'pdp_restart_unobserved')
+				and (line:find('err=pdp_restart_state_timeout', 1, true)
+					or line:find('err=state subscription interrupted', 1, true)) then
+				-- A successful RPC without a transition is not proof that the modem
+				-- reset. Retrying it is existing behaviour and does not require inspection.
+				awaiting_inspection[modem] = nil
+			end
+		end
+	end
+	assert(recognised > 0, 'No PDP lifecycle events recognised in monitor-format logs')
+	for modem in pairs(awaiting_inspection) do
+		error(('PDP modem %s reached the end of the phase without post-reset inspection'):format(modem), 0)
+	end
+end
+
+---@param content string
+---@return string
+function M.current_capture(content)
+	-- `logread -f` replays the syslog ring before following it, so a capture starts
+	-- with older lines, possibly from an earlier run or firmware. Only lines after the
+	-- last BEGIN marker, which Logs:start writes once the capture is running, belong
+	-- to this run.
+	local marker, from = 'onbox-test: BEGIN ', nil
+	local at = content:find(marker, 1, true)
+	while at do
+		from = at
+		at = content:find(marker, at + 1, true)
+	end
+	assert(from, 'Log capture has no onbox-test BEGIN marker')
+	local line_end = content:find('\n', from, true)
+	return line_end and content:sub(line_end + 1) or ''
 end
 
 ---@class PdpBoxArgs: OnboxArgs
@@ -164,8 +223,19 @@ function Runner:inspect(label, config)
 			label, self.targets[imei].name, imei:sub(-4), table.concat(cids, ','), expected))
 	end
 	self.modems:wait(self.targets, 'connected')
+	M.check_restart_order(M.current_capture(util.read(self.box.logs.path)))
 	self.summary[#self.summary + 1] = { phase = label, modems = results }
 	util.write(self.box.artifacts .. '/results.json', util.encode(self.summary))
+end
+
+-- Logs:start writes the capture's first BEGIN marker before deploy stops the runtime
+-- being replaced, which can still log PDP events while the archive uploads. This
+-- marker comes after that stop and before the tested runtime starts, so the restart
+-- order check in inspect (which reads from the last marker) sees only the tested runtime.
+---@param label string
+---@return nil
+function Runner:mark_tested_runtime(label)
+	self.box.ssh:run('logger -t onbox-test ' .. process.quote('BEGIN ' .. label .. ' tested runtime'))
 end
 
 ---@param label string
@@ -177,6 +247,7 @@ function Runner:phase(label, config, archive, write_config)
 	print('[' .. label .. '] Deploying and resetting modems for a clean-boot test')
 	self.box:phase(label, function()
 		self.runtime:deploy(archive)
+		self:mark_tested_runtime(label)
 		if write_config then write_config() else self.runtime:write_config(config) end
 		self.modems:clean_boot(self.targets, true)
 		self.runtime:service('restart')
