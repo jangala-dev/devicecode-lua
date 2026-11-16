@@ -2,6 +2,7 @@ local support = require 'onbox.support.runner'
 local devicecode = require 'onbox.support.devicecode'
 local modem_support = require 'onbox.support.modem'
 local util = require 'onbox.support.util'
+local process = require 'onbox.support.process'
 local tablex = require 'shared.table'
 
 local M = {}
@@ -227,6 +228,16 @@ function Runner:inspect(label, config)
 	util.write(self.box.artifacts .. '/results.json', util.encode(self.summary))
 end
 
+-- Logs:start writes the capture's first BEGIN marker before deploy stops the runtime
+-- being replaced, which can still log PDP events while the archive uploads. This
+-- marker comes after that stop and before the tested runtime starts, so the restart
+-- order check in inspect (which reads from the last marker) sees only the tested runtime.
+---@param label string
+---@return nil
+function Runner:mark_tested_runtime(label)
+	self.box.ssh:run('logger -t onbox-test ' .. process.quote('BEGIN ' .. label .. ' tested runtime'))
+end
+
 ---@param label string
 ---@param config table
 ---@param archive string?
@@ -236,6 +247,7 @@ function Runner:phase(label, config, archive, write_config)
 	print('[' .. label .. '] Deploying and resetting modems for a clean-boot test')
 	self.box:phase(label, function()
 		self.runtime:deploy(archive)
+		self:mark_tested_runtime(label)
 		if write_config then write_config() else self.runtime:write_config(config) end
 		self.modems:clean_boot(self.targets, true)
 		self.runtime:service('restart')

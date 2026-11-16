@@ -148,23 +148,43 @@ function tests.restart_order_ignores_lines_replayed_before_the_capture_began()
 	-- logread -f replays the ring first: here an earlier run's double reset and its marker.
 	local reset = 'LOG  gsm  info  pdp_restart  pdp_restart modem=primary limit=2 count='
 	local inspected = 'LOG  gsm  info  pdp_contexts_checked  pdp_contexts_checked modem=primary contexts=1:IP:active'
+	-- Then this phase's capture marker, the runtime being replaced double-resetting while
+	-- the archive uploads, and the marker written once that runtime has stopped.
 	local capture = table.concat({
-		'Mon Nov 16 09:00:00 2026 user.notice onbox-test: BEGIN run',
+		'Mon Nov 16 09:00:00 2026 user.notice onbox-test: BEGIN 01-ip tested runtime',
 		'Mon Nov 16 09:00:01 2026 daemon.info devicecode[11]: ' .. reset .. '1',
 		'Mon Nov 16 09:00:02 2026 daemon.info devicecode[11]: ' .. reset .. '2',
-		'Mon Nov 16 10:00:00 2026 user.notice onbox-test: BEGIN run',
+		'Mon Nov 16 10:00:00 2026 user.notice onbox-test: BEGIN 01-ip',
 		'Mon Nov 16 10:00:01 2026 daemon.info devicecode[22]: ' .. reset .. '1',
-		'Mon Nov 16 10:00:02 2026 daemon.info devicecode[22]: ' .. inspected,
+		'Mon Nov 16 10:00:02 2026 daemon.info devicecode[22]: ' .. reset .. '2',
+		'Mon Nov 16 10:00:30 2026 user.notice onbox-test: BEGIN 01-ip tested runtime',
+		'Mon Nov 16 10:00:41 2026 daemon.info devicecode[33]: ' .. reset .. '1',
+		'Mon Nov 16 10:00:42 2026 daemon.info devicecode[33]: ' .. inspected,
 		'',
 	}, '\n')
 	rejects(function() runner.check_restart_order(capture) end,
 		'restarted twice without an intervening context inspection')
 	local current = runner.current_capture(capture)
 	assert(not current:find('devicecode[11]', 1, true), 'replayed lines were kept')
-	assert(current:find('devicecode[22]', 1, true), 'current lines were dropped')
+	assert(not current:find('devicecode[22]', 1, true), 'the replaced runtime\'s lines were kept')
+	assert(current:find('devicecode[33]', 1, true), 'the tested runtime\'s lines were dropped')
 	runner.check_restart_order(current)
 	rejects(function() runner.current_capture('LOG  gsm  info  pdp_restart  pdp_restart modem=primary\n') end,
 		'no onbox-test BEGIN marker')
+end
+
+---@return nil
+function tests.tested_runtime_marker_is_a_capture_boundary()
+	local commands = {}
+	local instance = runner.from_session({
+		args = {},
+		ssh = { run = function(_, command) commands[#commands + 1] = command end },
+	})
+	instance:mark_tested_runtime('02-alternate')
+	equal(commands, { "logger -t onbox-test 'BEGIN 02-alternate tested runtime'" })
+	-- logread shows the tag and message as "onbox-test: <message>", which current_capture finds.
+	local capture = 'old\nMon Nov 16 10:00:30 2026 user.notice onbox-test: BEGIN 02-alternate tested runtime\nnew\n'
+	equal(runner.current_capture(capture), 'new\n')
 end
 
 ---@return nil
@@ -288,6 +308,7 @@ end
 function tests.phase_waits_for_at_readiness_before_starting_service()
 	local calls = {}
 	local instance = runner.from_session({ args = {}, phase = function(_, _, body) body() end })
+	instance.mark_tested_runtime = function() calls[#calls + 1] = 'mark' end
 	instance.runtime = {
 		deploy = function() calls[#calls + 1] = 'deploy' end,
 		write_config = function() calls[#calls + 1] = 'config' end,
@@ -299,7 +320,7 @@ function tests.phase_waits_for_at_readiness_before_starting_service()
 		error('primary=disabled (no AT port)')
 	end }
 	rejects(function() instance:phase('test', {}) end, 'primary=disabled (no AT port)')
-	equal(calls, { 'deploy', 'config' })
+	equal(calls, { 'deploy', 'mark', 'config' })
 end
 
 ---@return nil
@@ -385,10 +406,11 @@ function tests.phases_use_the_active_config_and_restore_it_before_restarting()
 	})
 	instance.prepare = function(self) self.active = active end
 	instance.inspect = function(_, label, cfg) calls[#calls + 1] = 'inspect ' .. label; written[label] = cfg end
+	instance.mark_tested_runtime = function(_, label) calls[#calls + 1] = 'mark ' .. label end
 	instance.runtime = {
 		original = config,
 		build = function(_, label) return label .. '.tar.gz' end,
-		deploy = function() end,
+		deploy = function() calls[#calls + 1] = 'deploy' end,
 		write_config = function(_, cfg)
 			calls[#calls + 1] = 'write ' .. (cfg == config and 'bootstrap' or cfg.net.data.preserve)
 		end,
@@ -401,10 +423,13 @@ function tests.phases_use_the_active_config_and_restore_it_before_restarting()
 	equal(written['02-alternate'].net.data.preserve, 'active network settings')
 	equal(written['01-ip'].gsm.rev, 12)
 	equal(written['03-restored-config'], active)
+	-- Each phase marks the log after deploy has stopped the old runtime and before the
+	-- restart starts the tested one, so the restart order check ignores the old runtime.
 	equal(calls, {
-		'write active network settings', 'reset', 'restart', 'inspect 01-ip',
-		'write active network settings', 'reset', 'restart', 'inspect 02-alternate',
-		'write bootstrap', 'restore persistent', 'reset', 'restart', 'inspect 03-restored-config',
+		'deploy', 'mark 01-ip', 'write active network settings', 'reset', 'restart', 'inspect 01-ip',
+		'deploy', 'mark 02-alternate', 'write active network settings', 'reset', 'restart', 'inspect 02-alternate',
+		'deploy', 'mark 03-restored-config', 'write bootstrap', 'restore persistent', 'reset', 'restart',
+		'inspect 03-restored-config',
 	})
 end
 
