@@ -1,7 +1,7 @@
 local safe = require 'coxpcall'
 local pulse = require 'fibers.pulse'
 local cache = require 'shared.cache'
-local runfibers = require 'tests.support.run_fibers'
+local runfibers = require 'tests.support.run_virtual_fibers'
 local driver = require 'services.hal.drivers.modem'
 local args = require 'services.hal.types.capability_args'
 
@@ -58,7 +58,7 @@ end
 
 ---@return nil
 function tests.test_modem_default_groups_emit_existing_fields()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local fetched, emitted, count = {}, nil, 0
 		local snapshots = {
 			identity = { imei = 'test' },
@@ -112,7 +112,7 @@ function tests.test_modem_non_emitting_group_remains_requestable()
 	local original = network.does_emit
 	network.does_emit = false
 	local ok, err = safe.pcall(function()
-		runfibers.run(function()
+		runfibers.run_auto(function()
 			local emitted, count, network_reads = nil, 0, 0
 			local snapshots = {
 				identity = { imei = 'test' },

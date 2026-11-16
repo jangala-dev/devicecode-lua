@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 local fibers = require 'fibers'
 local runtime = require 'fibers.runtime'
 local op      = require 'fibers.op'
@@ -89,7 +90,7 @@ local function fake_driver()
 end
 
 function M.test_service_retains_capability_metadata_and_status()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local drv = fake_driver()
@@ -105,7 +106,7 @@ end
 
 
 function M.test_http_failure_recovery_is_visible_and_resets_suppression()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local topics = require 'services.http.topics'
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
@@ -157,7 +158,7 @@ function M.test_http_failure_recovery_is_visible_and_resets_suppression()
 end
 
 function M.test_non_local_handle_returning_call_is_rejected_before_backend_work()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local drv = fake_driver()
@@ -173,7 +174,7 @@ end
 
 
 function M.test_registry_callbacks_do_not_mutate_model_until_coordinator_receives_event()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
@@ -204,7 +205,7 @@ function M.test_registry_callbacks_do_not_mutate_model_until_coordinator_receive
 end
 
 function M.test_model_fields_are_recomputed_from_identity_records_and_duplicate_termination_is_idempotent()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
@@ -231,7 +232,7 @@ function M.test_model_fields_are_recomputed_from_identity_records_and_duplicate_
 end
 
 function M.test_stale_generation_events_are_ignored()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
@@ -253,7 +254,7 @@ function M.test_stale_generation_events_are_ignored()
 end
 
 function M.test_completed_exchange_prunes_one_shot_request_and_operation_records()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main', max_event_history = 16 }))
@@ -275,7 +276,7 @@ function M.test_completed_exchange_prunes_one_shot_request_and_operation_records
 end
 
 function M.test_http_event_history_is_bounded()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main', max_event_history = 3 }))
@@ -290,7 +291,7 @@ function M.test_http_event_history_is_bounded()
 end
 
 function M.test_cap_request_received_then_service_shutdown_finalises_request_owner()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
@@ -309,7 +310,7 @@ function M.test_cap_request_received_then_service_shutdown_finalises_request_own
 end
 
 function M.test_event_queue_overflow_for_completion_fails_observing_service()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local child = ok(scope:child())
 		local tx, rx = mailbox.new(1, { full = 'reject_newest' })
 		ok(child:spawn(function ()
@@ -337,7 +338,7 @@ end
 
 
 function M.test_bus_request_abandonment_cancels_admitted_http_operation()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
@@ -392,7 +393,7 @@ function M.test_http_sdk_uses_compositional_timeout_by_default()
 		end,
 	}, 'main')
 
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local v = fibers.perform(ref:exchange_op({ method = 'GET', url = 'http://example.invalid/' }))
 		eq(v, 'ok')
 	end)
@@ -402,7 +403,7 @@ function M.test_http_sdk_uses_compositional_timeout_by_default()
 end
 
 function M.test_service_shutdown_terminates_registry_handles_and_finalises_unresolved_requests()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
@@ -422,7 +423,7 @@ end
 
 
 function M.test_context_transfer_keeps_context_active_after_listener_termination_until_context_terminates()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
@@ -567,7 +568,7 @@ local function event_seen(events, kind, pred)
 end
 
 function M.test_backend_failure_terminates_service_owned_handles()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
@@ -610,7 +611,7 @@ function M.test_backend_failure_terminates_service_owned_handles()
 end
 
 function M.test_listener_setup_failure_leaves_no_live_ownership()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local counters = {}
 		local failing_server = {
 			listen = function ()
@@ -642,7 +643,7 @@ function M.test_listener_setup_failure_leaves_no_live_ownership()
 end
 
 function M.test_handle_returning_rpcs_return_public_wrappers()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local counters = {}
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
@@ -674,7 +675,7 @@ function M.test_handle_returning_rpcs_return_public_wrappers()
 end
 
 function M.test_each_local_handle_rpc_rejects_non_local_before_backend_admission()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local counters = {}
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
@@ -707,7 +708,7 @@ end
 
 
 function M.test_initial_retained_status_is_not_available_before_backend_ready_event_is_reduced()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local topics = require 'services.http.topics'
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
@@ -722,7 +723,7 @@ function M.test_initial_retained_status_is_not_available_before_backend_ready_ev
 end
 
 function M.test_listener_owner_reports_identity_completion_when_listener_runtime_ends()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local counters = {}
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
@@ -756,7 +757,7 @@ end
 
 
 function M.test_onstream_context_admission_emits_service_event_without_reducing_in_callback()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local counters = {}
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
@@ -791,7 +792,7 @@ function M.test_onstream_context_admission_emits_service_event_without_reducing_
 end
 
 function M.test_unaccepted_context_is_listener_owned_until_accept()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local svc = ok(http_service.open_handle(root, {
@@ -826,7 +827,7 @@ function M.test_unaccepted_context_is_listener_owned_until_accept()
 end
 
 function M.test_listener_termination_terminates_unaccepted_context_and_emits_context_terminated()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local terminated_reason
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
@@ -857,7 +858,7 @@ function M.test_listener_termination_terminates_unaccepted_context_and_emits_con
 end
 
 function M.test_accepted_context_survives_listener_termination_until_context_terminates()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local svc = ok(http_service.open_handle(root, {
@@ -885,7 +886,7 @@ function M.test_accepted_context_survives_listener_termination_until_context_ter
 end
 
 function M.test_cancel_listen_start_while_waiting_for_ready_cleans_up_setup_listener()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local closed_reason
 		local server = {
 			listen = function () return true end,
@@ -915,7 +916,7 @@ function M.test_cancel_listen_start_while_waiting_for_ready_cleans_up_setup_list
 end
 
 function M.test_server_side_websocket_upgrade_registers_and_deregisters_service_websocket_record()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local svc = ok(http_service.open_handle(root, {
@@ -953,7 +954,7 @@ function M.test_server_side_websocket_upgrade_registers_and_deregisters_service_
 end
 
 function M.test_service_shutdown_terminates_server_side_upgraded_websocket()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local svc = ok(http_service.open_handle(root, {
@@ -984,7 +985,7 @@ end
 
 
 function M.test_public_context_read_cancellation_terminates_context_and_service_record()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local svc = ok(http_service.open_handle(root, {
@@ -1027,7 +1028,7 @@ function M.test_public_context_read_cancellation_terminates_context_and_service_
 end
 
 function M.test_public_server_websocket_receive_cancellation_terminates_websocket_and_registry_record()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local svc = ok(http_service.open_handle(root, {
@@ -1120,7 +1121,7 @@ function M.test_public_open_exchange_handle_read_cancellation_keeps_service_back
 		end,
 	}
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local svc = ok(http_service.open_handle(root, {
@@ -1164,7 +1165,7 @@ function M.test_public_open_exchange_handle_read_cancellation_keeps_service_back
 end
 
 function M.test_retained_http_config_updates_policy_generation_and_policy()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		root:retain({ 'cfg', 'http' }, {
@@ -1184,7 +1185,7 @@ function M.test_retained_http_config_updates_policy_generation_and_policy()
 end
 
 function M.test_invalid_retained_http_config_marks_service_degraded_without_replacing_policy()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		root:retain({ 'cfg', 'http' }, { rev = 3, data = { schema = 'wrong' } })

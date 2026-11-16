@@ -3,7 +3,7 @@ local fibers        = require 'fibers'
 local sleep         = require 'fibers.sleep'
 local op            = require 'fibers.op'
 
-local runfibers     = require 'tests.support.run_fibers'
+local runfibers     = require 'tests.support.run_virtual_fibers'
 local probe         = require 'tests.support.bus_probe'
 local service_base  = require 'devicecode.service_base'
 
@@ -27,7 +27,7 @@ local function expect_no_message(conn, topic, timeout)
 end
 
 function T.new_service_publishes_meta_announce_and_status()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local bus    = busmod.new()
 		local conn   = bus:connect()
 		local reader = bus:connect()
@@ -64,7 +64,7 @@ end
 
 
 function T.lifecycle_status_retains_only_on_semantic_change()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local bus    = busmod.new()
 		local conn   = bus:connect()
 		local reader = bus:connect()
@@ -96,7 +96,7 @@ function T.lifecycle_status_retains_only_on_semantic_change()
 end
 
 function T.obs_helpers_publish_legacy_and_v1_topics()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local bus    = busmod.new()
 		local conn   = bus:connect()
 		local reader = bus:connect()
@@ -164,7 +164,7 @@ function T.obs_helpers_publish_legacy_and_v1_topics()
 end
 
 function T.scope_exit_unretains_tracked_topics()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus    = busmod.new()
 		local reader = bus:connect()
 
@@ -196,7 +196,7 @@ function T.scope_exit_unretains_tracked_topics()
 end
 
 function T.wait_service_ready_returns_on_explicit_ready()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus   = busmod.new()
 		local admin = bus:connect()
 
@@ -227,7 +227,7 @@ function T.wait_service_ready_returns_on_explicit_ready()
 end
 
 function T.wait_service_ready_accepts_running_without_ready_when_requested()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus   = busmod.new()
 		local admin = bus:connect()
 
@@ -258,7 +258,7 @@ function T.wait_service_ready_accepts_running_without_ready_when_requested()
 end
 
 function T.wait_service_ready_times_out_cleanly()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local bus = busmod.new()
 
 		local payload, err = service_base.wait_service_ready(bus:connect(), 'epsilon', {

@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/fabric/test_io.lua
 
 local fibers  = require 'fibers'
@@ -72,7 +73,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_reader_forwards_frames_and_returns_count()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local tx, rx = mailbox.new(8, { full = 'reject_newest' })
 
 		local result = io_mod.run_reader(scope, {
@@ -100,7 +101,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_reader_blocks_on_downstream_handoff()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local downstream_tx, downstream_rx = mailbox.new(0, { full = 'block' })
 		local done_tx, done_rx = mailbox.new(1, { full = 'reject_newest' })
 
@@ -138,7 +139,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_reader_read_error_fails_scope()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local tx = mailbox.new(4, { full = 'reject_newest' })
 
 		local st, _, primary = fibers.run_scope(function (scope)
@@ -161,7 +162,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_lane_writer_writes_frames_and_flushes_on_close()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local rpc_tx, rpc_rx = mailbox.new(8, { full = 'reject_newest' })
 		local written = {}
 		local flushes = 0
@@ -206,7 +207,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_lane_writer_can_flush_each_frame()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local rpc_tx, rpc_rx = mailbox.new(8, { full = 'reject_newest' })
 		local flushes = 0
 
@@ -242,7 +243,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_lane_writer_write_error_fails_scope()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local rpc_tx, rpc_rx = mailbox.new(8, { full = 'reject_newest' })
 		send_frame(rpc_tx, 'bad-frame', 'rpc_bad')
 		rpc_tx:close('rpc_done')
@@ -270,7 +271,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_reader_and_writer_components_fit_link_supervisor()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local frame_tx, frame_rx = mailbox.new(8, { full = 'reject_newest' })
 		local rpc_tx, rpc_rx = mailbox.new(8, { full = 'reject_newest' })
 		local written = {}
@@ -337,7 +338,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_lane_writer_rejects_ambiguous_nil_nil_write_result()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local rpc_tx, rpc_rx = mailbox.new(8, { full = 'reject_newest' })
 		send_frame(rpc_tx, 'ambiguous-frame', 'rpc_ambiguous')
 		rpc_tx:close('rpc_done')
@@ -365,7 +366,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_lane_writer_rejects_ambiguous_nil_nil_flush_result()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local st, _, primary = fibers.run_scope(function (scope)
 			return io_mod.run_lane_writer(scope, {
 				control_rx = closed_rx('control_done'),

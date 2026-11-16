@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/services/fabric/test_link.lua
 
 local fibers  = require 'fibers'
@@ -67,7 +68,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_session_control_establishes_from_hello_and_sends_ack()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local control_tx, control_rx = mailbox.new(8, { full = 'reject_newest' })
 		local out_tx, out_rx = mailbox.new(8, { full = 'reject_newest' })
 		local rpc_tx, _rpc_rx = mailbox.new(8, { full = 'reject_newest' })
@@ -123,7 +124,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_session_liveness_timeout_resets_to_hello()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local control_tx, control_rx = mailbox.new(8, { full = 'reject_newest' })
 		local out_tx, out_rx = mailbox.new(8, { full = 'reject_newest' })
 		local rpc_tx, session_event_rx = mailbox.new(8, { full = 'reject_newest' })
@@ -188,7 +189,7 @@ function tests.test_session_liveness_timeout_resets_to_hello()
 end
 
 function tests.test_session_ping_is_emitted_before_liveness_deadline()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local control_tx, control_rx = mailbox.new(8, { full = 'reject_newest' })
 		local out_tx, out_rx = mailbox.new(8, { full = 'reject_newest' })
 		local rpc_tx, session_event_rx = mailbox.new(8, { full = 'reject_newest' })
@@ -237,7 +238,7 @@ end
 
 
 function tests.test_session_control_processes_ready_control_before_timer_work()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local control_tx, control_rx = mailbox.new(8, { full = 'reject_newest' })
 		local out_tx, out_rx = mailbox.new(8, { full = 'reject_newest' })
 		local rpc_tx, _rpc_rx = mailbox.new(8, { full = 'reject_newest' })
@@ -296,7 +297,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_successful_components_complete_link()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local st, rep, result = run_link_in_child(root_scope, {
 			link_id = 'link-a',
 
@@ -345,7 +346,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_component_failure_fails_link_by_default_policy()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local st, rep, primary = run_link_in_child(root_scope, {
 			link_id = 'link-b',
 
@@ -382,7 +383,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_component_failure_is_data_when_policy_allows_it()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local seen_failed = false
 
 		local st, rep, result = run_link_in_child(root_scope, {
@@ -438,7 +439,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_component_cancellation_fails_link_by_default_policy()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local st, _, primary = run_link_in_child(root_scope, {
 			link_id = 'link-d',
 
@@ -467,7 +468,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_component_must_return_result_table()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local st, _, primary = run_link_in_child(root_scope, {
 			link_id = 'link-e',
 
@@ -492,7 +493,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_duplicate_component_names_are_rejected()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local st, _, primary = run_link_in_child(root_scope, {
 			link_id = 'link-f',
 
@@ -523,7 +524,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_link_result_exposes_snapshot_not_live_model()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local st, _, result = run_link_in_child(root_scope, {
 			link_id = 'link-g',
 
@@ -551,7 +552,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_complete_policy_action_is_rejected()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local st, _, primary = run_link_in_child(root_scope, {
 			link_id = 'link-complete-early',
 
@@ -601,7 +602,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_cancel_policy_state_does_not_regress_after_later_completion()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local st, _, result = run_link_in_child(root_scope, {
 			link_id = 'link-cancel-regression',
 
@@ -648,7 +649,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_completion_result_mutation_after_reporting_does_not_mutate_snapshot()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local returned = { role = 'reader', value = 1 }
 
 		local st, _, result = run_link_in_child(root_scope, {
@@ -681,7 +682,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_component_worker_receives_narrowed_link_capability()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local saw_caps = false
 
 		local st, _, result = run_link_in_child(root_scope, {
@@ -749,7 +750,7 @@ function tests.test_component_completion_with_wrong_link_id_is_ignored()
 			return old_start(spec)
 		end
 
-		fibers.run(function (root_scope)
+		run_virtual_fibers.run_auto(function (root_scope)
 			local st, _, result = run_link_in_child(root_scope, {
 				link_id = 'real-link-id',
 

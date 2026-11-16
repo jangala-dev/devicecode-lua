@@ -102,6 +102,7 @@ local GROUP_FIELDS = {
 			"sim",
 			"iccid",
 			"imsi",
+			"spn",
 			"gid1",
 			"sim_lock",
 			"sim_lock_retries",

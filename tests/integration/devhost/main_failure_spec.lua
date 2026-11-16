@@ -8,7 +8,7 @@ local busmod        = require 'bus'
 
 local safe = require 'coxpcall'
 
-local runfibers     = require 'tests.support.run_fibers'
+local runfibers     = require 'tests.support.run_virtual_fibers'
 local probe         = require 'tests.support.bus_probe'
 local fake_hal_mod  = require 'tests.support.fake_hal'
 local test_diag     = require 'tests.support.test_diag'
@@ -127,7 +127,7 @@ local function spawn_main(scope, bus, fake_hal, linger_box, services_csv, crash_
 end
 
 function T.devhost_main_fails_fast_when_child_service_errors()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus  = busmod.new()
 		local conn = bus:connect()
 
@@ -200,7 +200,7 @@ function T.devhost_service_failure_is_recorded_for_the_next_process()
 	local path = os.tmpname()
 	os.remove(path)
 
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus, fake_hal, linger_box = new_stack(scope)
 		local store = temp_crash_store(path)
 		store:begin_run()
@@ -227,7 +227,7 @@ function T.devhost_signal_is_not_recorded_as_a_service_failure()
 	local path = os.tmpname()
 	os.remove(path)
 
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus, fake_hal, linger_box = new_stack(scope)
 		local store = temp_crash_store(path)
 		store:begin_run()
@@ -264,7 +264,7 @@ local function stuck_loader(fake_hal, release)
 end
 
 local function run_main_with_stuck_service(path, services_csv, service_loader_for, body)
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus, fake_hal = new_stack(scope)
 		local store = temp_crash_store(path)
 		store:begin_run()
@@ -351,7 +351,7 @@ end
 function T.devhost_logs_from_the_v1_log_topic_reach_the_crash_record()
 	local path = os.tmpname()
 	os.remove(path)
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus, fake_hal, linger_box = new_stack(scope)
 		local store = temp_crash_store(path)
 		store:begin_run()

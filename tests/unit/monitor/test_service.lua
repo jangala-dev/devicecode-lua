@@ -2,7 +2,7 @@ local busmod     = require 'bus'
 local fibers     = require 'fibers'
 local sleep      = require 'fibers.sleep'
 
-local run_fibers = require 'tests.support.run_fibers'
+local run_fibers = require 'tests.support.run_virtual_fibers'
 local probe      = require 'tests.support.bus_probe'
 local monitor    = require 'services.monitor'
 
@@ -51,7 +51,7 @@ local function wait_summary_field(conn, pred, label)
 end
 
 function T.query_logs_respects_configured_boot_and_ring_buffers()
-	run_fibers.run(function (scope)
+	run_fibers.run_auto(function (scope)
 		local b = busmod.new()
 		local admin = b:connect({ origin_base = { service = 'monitor-test-admin' } })
 		admin:retain({ 'cfg', 'monitor' }, { data = { storage = { boot_records = 5, ring_records = 3, boot_seconds = 0 } }, rev = 1 })
@@ -86,7 +86,7 @@ function T.query_logs_respects_configured_boot_and_ring_buffers()
 end
 
 function T.query_logs_filters_by_level_service_since_and_text()
-	run_fibers.run(function (scope)
+	run_fibers.run_auto(function (scope)
 		local b = busmod.new()
 		local admin = b:connect({ origin_base = { service = 'monitor-test-admin' } })
 		local _, reader = start_monitor(scope, b, { env = 'test' })
@@ -114,7 +114,7 @@ function T.query_logs_filters_by_level_service_since_and_text()
 end
 
 function T.follow_logs_replays_then_streams_matching_records()
-	run_fibers.run(function (scope)
+	run_fibers.run_auto(function (scope)
 		local b = busmod.new()
 		local admin = b:connect({ origin_base = { service = 'monitor-test-admin' } })
 		local _, reader = start_monitor(scope, b, { env = 'test' })
@@ -146,7 +146,7 @@ function T.follow_logs_replays_then_streams_matching_records()
 end
 
 function T.set_profile_updates_retained_summary_and_raw_requires_restart()
-	run_fibers.run(function (scope)
+	run_fibers.run_auto(function (scope)
 		local b = busmod.new()
 		local _, reader = start_monitor(scope, b, { env = 'test' })
 

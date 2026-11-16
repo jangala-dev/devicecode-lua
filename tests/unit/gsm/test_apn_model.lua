@@ -43,6 +43,17 @@ function tests.test_normalise_list_rejects_duplicates()
 	ok(err and err:find('duplicate', 1, true))
 end
 
+function tests.test_normalise_list_preserves_credential_variants_in_order()
+	local list, err = model.normalise_list({
+		{ carrier='A', mcc='234', mnc='10', apn='internet', user='first', password='one' },
+		{ carrier='A', mcc='234', mnc='10', apn='internet', user='second', password='two' },
+	})
+	ok(list, err)
+	eq(#list, 2)
+	eq(list[1].user, 'first')
+	eq(list[2].user, 'second')
+end
+
 
 function tests.test_redact_list_removes_apn_secrets_but_preserves_presence_flags()
 	local redacted = model.redact_list({

@@ -6,6 +6,7 @@
 -- this model.
 
 local tablex = require 'shared.table'
+local active_uplink = require 'services.net.active_uplink'
 
 local M = {}
 local copy = tablex.deep_copy
@@ -39,6 +40,10 @@ end
 
 local function live_interface(snapshot, iface, ifname)
 	local live = observed_live(snapshot)
+	-- HAL keys live records by generated OpenWrt names and indexes them by
+	-- product interface; use that index first.
+	local by_sem = live and live.interfaces_by_semantic or nil
+	if is_table(by_sem) and type(iface) == 'string' and is_table(by_sem[iface]) then return by_sem[iface] end
 	local interfaces = live and live.interfaces or nil
 	if not is_table(interfaces) then return nil end
 	if type(iface) == 'string' and iface ~= '' and is_table(interfaces[iface]) then return interfaces[iface] end
@@ -231,6 +236,7 @@ function M.reduce(snapshot, opts)
 	else out.state = 'down' end
 	out.total = total
 	out.online = online
+	out.active_uplink = active_uplink.select(snapshot, out.uplinks)
 	return out
 end
 

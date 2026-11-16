@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 local fibers = require 'fibers'
 local busmod = require 'bus'
 
@@ -114,7 +115,7 @@ local function retain_artifact_store_available(bus)
 end
 
 function tests.test_net_and_update_wait_for_delayed_hal_capabilities_then_recover()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local bus = busmod.new()
 		retain_artifact_store_available(bus)
 

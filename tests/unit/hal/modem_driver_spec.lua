@@ -1,7 +1,7 @@
 local modem_driver = require 'services.hal.drivers.modem'
 local cache = require 'shared.cache'
 local pulse = require 'fibers.pulse'
-local runfibers = require 'tests.support.run_fibers'
+local runfibers = require 'tests.support.run_virtual_fibers'
 
 local tests = {}
 
@@ -21,7 +21,7 @@ function tests.test_signal_poller_only_runs_for_registered_connection_states()
 end
 
 function tests.test_signal_poll_emits_access_tech_and_measurements_together()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local emitted
 		local driver = setmetatable({
 			backend = {
@@ -65,7 +65,7 @@ function tests.test_signal_poll_emits_access_tech_and_measurements_together()
 end
 
 function tests.test_incomplete_startup_identity_retries_until_firmware_is_available()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local reads = 0
 		local driver = setmetatable({
 			backend = {
@@ -97,7 +97,7 @@ function tests.test_incomplete_startup_identity_retries_until_firmware_is_availa
 end
 
 function tests.test_full_info_snapshot_marks_present_and_absent_fields_as_observed()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local emitted
 		local identity_reads = 0
 		local port_reads = 0
@@ -178,7 +178,7 @@ function tests.test_full_info_snapshot_marks_present_and_absent_fields_as_observ
 end
 
 function tests.test_refresh_info_wakes_the_full_snapshot_emitter()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local driver = setmetatable({
 			state_pulse = pulse.new(),
 		}, modem_driver._test.Modem)
@@ -191,7 +191,7 @@ function tests.test_refresh_info_wakes_the_full_snapshot_emitter()
 end
 
 function tests.test_slow_network_read_keeps_its_original_observation_time()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local sleep = require 'fibers.sleep'
 		local emitted
 		local driver

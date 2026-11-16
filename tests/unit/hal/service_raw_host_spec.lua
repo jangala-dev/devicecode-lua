@@ -5,7 +5,7 @@ local channel     = require 'fibers.channel'
 local op          = require 'fibers.op'
 
 local probe       = require 'tests.support.bus_probe'
-local runfibers   = require 'tests.support.run_fibers'
+local runfibers   = require 'tests.support.run_virtual_fibers'
 local cap_sdk     = require 'services.hal.sdk.cap'
 
 local hal_types   = require 'services.hal.types.core'
@@ -268,7 +268,7 @@ local function add_rawprobe_config(overrides)
 end
 
 function T.hal_publishes_raw_host_source_meta_and_status_on_add()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
 		local rawprobe   = new_rawprobe_manager()
 
@@ -301,7 +301,7 @@ function T.hal_publishes_raw_host_source_meta_and_status_on_add()
 end
 
 function T.hal_publishes_raw_host_cap_meta_status_and_rpc_on_add()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
 		local rawprobe   = new_rawprobe_manager()
 
@@ -350,7 +350,7 @@ function T.hal_publishes_raw_host_cap_meta_status_and_rpc_on_add()
 end
 
 function T.raw_host_rpc_is_scoped_to_declared_source()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
 		local rawprobe   = new_rawprobe_manager()
 
@@ -385,7 +385,7 @@ function T.raw_host_rpc_is_scoped_to_declared_source()
 end
 
 function T.hal_marks_raw_host_source_and_capability_removed_and_unretains_meta()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
 		local rawprobe   = new_rawprobe_manager()
 
@@ -444,7 +444,7 @@ function T.hal_marks_raw_host_source_and_capability_removed_and_unretains_meta()
 end
 
 function T.capability_rpc_is_unbound_after_removal()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
 		local rawprobe   = new_rawprobe_manager()
 
@@ -493,7 +493,7 @@ function T.capability_rpc_is_unbound_after_removal()
 end
 
 function T.hal_keeps_legacy_public_capability_topics_for_compatibility()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
 		local rawprobe   = new_rawprobe_manager()
 

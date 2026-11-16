@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/support/test_scoped_work.lua
 --
 -- Standalone semantic tests for devicecode.support.scoped_work.
@@ -92,7 +93,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_body_ended_happens_before_ordinary_reaping()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local late_spawn_ok = false
 		local late_child_ran = false
 
@@ -139,7 +140,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_reporter_does_not_call_join_op()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local report_scope = child_scope(scope)
 		local report_tx, report_rx = mailbox.new(4, { full = 'reject_newest' })
 		local captured_child = capture_next_child(scope)
@@ -190,7 +191,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_non_lifetime_reaping_requires_delegation()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local reaper_scope = child_scope(scope)
 
 		local handle, err = scoped_work.start {
@@ -219,7 +220,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_stored_completion_survives_reporter_cancellation()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local report_scope = child_scope(scope)
 		local report_count = 0
 
@@ -265,7 +266,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_start_failure_leaves_no_live_child()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local lifetime_scope = child_scope(scope)
 		local report_scope   = child_scope(scope)
 
@@ -307,7 +308,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_worker_not_started_when_reporter_spawn_fails()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local lifetime_scope = child_scope(scope)
 		local worker_started = false
 		local reporter_spawn_attempted = false
@@ -365,7 +366,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_success_path_does_not_run_join_inline()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local release = cond.new()
 		local captured_child = capture_next_child(scope)
 
@@ -410,7 +411,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_normal_start_failure_does_not_join_inline_and_parent_reports_child()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local lifetime_scope = child_scope(scope)
 		local reaper_spawn_attempted = false
 		local worker_started = false
@@ -464,7 +465,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_setup_checked_start_failure_performs_eager_cleanup()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local lifetime_scope = child_scope(scope)
 		local fake_reaper_scope = {
 			status = function () return 'running', nil end,
@@ -502,7 +503,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_production_handle_does_not_expose_join_authority()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local handle = start_required {
 			lifetime_scope = scope,
 
@@ -535,7 +536,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_report_queue_overflow_fails_observer_not_child_work()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local report_scope = child_scope(scope)
 		local report_tx, _ = mailbox.new(0, { full = 'reject_newest' })
 
@@ -573,7 +574,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_completion_envelopes_are_copied_on_report_and_observe()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local report_tx, report_rx = mailbox.new(4, { full = 'reject_newest' })
 
 		local handle = start_required {
@@ -620,7 +621,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_worker_result_is_snapshotted_before_finalisers_mutate_it()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local returned = { value = 1 }
 
 		local handle = start_required {
@@ -654,7 +655,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_setup_hook_runs_before_worker_and_returns_internal_data()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local setup_seen_by_worker = false
 		local setup_child_status
 
@@ -707,7 +708,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_setup_failure_prevents_worker_start_and_is_structurally_reported()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local lifetime_scope = child_scope(scope)
 		local worker_started = false
 
@@ -747,7 +748,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_post_setup_start_failure_runs_cancel_owned_now()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local lifetime_scope = child_scope(scope)
 		local finalised
 		local fake_report_scope = {
@@ -795,7 +796,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_cancel_op_cancels_child_and_setup_owned_resources()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local cancel_tx, cancel_rx = mailbox.new(1, { full = 'reject_newest' })
 		local cancel_reason
 		local worker_started = false
@@ -844,7 +845,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_cancel_op_loses_to_body_done()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local cancel_tx, cancel_rx = mailbox.new(1, { full = 'reject_newest' })
 		local cancel_reason
 

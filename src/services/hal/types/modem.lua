@@ -110,6 +110,7 @@ ModemPortsInfo.__index = ModemPortsInfo
 ---@field sim string?
 ---@field iccid string?
 ---@field imsi string?
+---@field spn string?
 ---@field gid1 string?
 ---@field sim_lock string?
 ---@field sim_lock_retries table<string, integer>?
@@ -317,9 +318,10 @@ end
 ---@param sim_lock string?
 ---@param sim_lock_retries table<string, integer>?
 ---@param modem_state string?
+---@param spn string?
 ---@return ModemSimInfo?
 ---@return string error
-function new.ModemSimInfo(sim, iccid, imsi, gid1, sim_lock, sim_lock_retries, modem_state)
+function new.ModemSimInfo(sim, iccid, imsi, gid1, sim_lock, sim_lock_retries, modem_state, spn)
 	local ok, err = validate_optional_string(sim, 'sim')
 	if not ok then
 		return nil, err
@@ -329,6 +331,10 @@ function new.ModemSimInfo(sim, iccid, imsi, gid1, sim_lock, sim_lock_retries, mo
 		return nil, err
 	end
 	ok, err = validate_optional_string(imsi, 'imsi')
+	if not ok then
+		return nil, err
+	end
+	ok, err = validate_optional_string(spn, 'spn')
 	if not ok then
 		return nil, err
 	end
@@ -359,6 +365,7 @@ function new.ModemSimInfo(sim, iccid, imsi, gid1, sim_lock, sim_lock_retries, mo
 		sim = sim,
 		iccid = iccid,
 		imsi = imsi,
+		spn = spn,
 		gid1 = gid1,
 		sim_lock = sim_lock,
 		sim_lock_retries = sim_lock_retries,

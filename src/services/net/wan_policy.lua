@@ -25,16 +25,23 @@ local function flag_enabled(v)
 	return false
 end
 
-local function runtime_opts(snapshot)
+-- Speedtest settings may sit under wan.load_balancing or wan.runtime, spelt
+-- speedtests or speedtest. The first entry present decides both whether
+-- speedtests are enabled and their options, so the two never disagree (config
+-- validation also rejects more than one entry).
+local function speedtest_entry(snapshot)
 	local wan = snapshot and snapshot.wan or {}
 	local lb = type(wan.load_balancing) == 'table' and wan.load_balancing or {}
 	local rt = type(wan.runtime) == 'table' and wan.runtime or {}
-	local sp = type(lb.speedtests) == 'table' and lb.speedtests
-		or type(lb.speedtest) == 'table' and lb.speedtest
-		or type(rt.speedtests) == 'table' and rt.speedtests
-		or type(rt.speedtest) == 'table' and rt.speedtest
-		or {}
-	return sp
+	if lb.speedtests ~= nil then return lb.speedtests end
+	if lb.speedtest ~= nil then return lb.speedtest end
+	if rt.speedtests ~= nil then return rt.speedtests end
+	return rt.speedtest
+end
+
+local function runtime_opts(snapshot)
+	local sp = speedtest_entry(snapshot)
+	return type(sp) == 'table' and sp or {}
 end
 
 
@@ -69,13 +76,7 @@ function M.speedtest_retry_delay_s(snapshot, rec)
 end
 
 function M.speedtest_enabled(snapshot)
-	local wan = snapshot and snapshot.wan or {}
-	local lb = type(wan.load_balancing) == 'table' and wan.load_balancing or {}
-	local rt = type(wan.runtime) == 'table' and wan.runtime or {}
-	return flag_enabled(lb.speedtest)
-		or flag_enabled(lb.speedtests)
-		or flag_enabled(rt.speedtest)
-		or flag_enabled(rt.speedtests)
+	return flag_enabled(speedtest_entry(snapshot))
 end
 
 function M.live_weight_policy(snapshot)
@@ -154,15 +155,27 @@ function M.collect_uplinks(snapshot)
 	return out
 end
 
-local function status_by_interface(snapshot, iface)
+local function observed_record(rec)
+	if type(rec) ~= 'table' or rec.observed == false then return nil end
+	return rec
+end
+
+-- Backhaul records are keyed by member id, so a member's own record wins.
+-- Otherwise match on interface before falling back to an id alias: member ids
+-- and interface names are separate namespaces and may collide.
+local function status_for_uplink(snapshot, uplink_id, iface)
 	local bh = snapshot and snapshot.backhaul or nil
 	local uplinks = type(bh) == 'table' and bh.uplinks or nil
 	if type(uplinks) ~= 'table' then return nil end
-	for id, rec in pairs(uplinks) do
-		if type(rec) == 'table' and (rec.interface == iface or rec.id == iface or id == iface) then
-			if rec.observed == false then return nil end
-			return rec
-		end
+	if uplink_id ~= nil and type(uplinks[uplink_id]) == 'table' then return observed_record(uplinks[uplink_id]) end
+	local keys = sorted_keys(uplinks)
+	for _, id in ipairs(keys) do
+		local rec = uplinks[id]
+		if type(rec) == 'table' and rec.interface == iface then return observed_record(rec) end
+	end
+	for _, id in ipairs(keys) do
+		local rec = uplinks[id]
+		if type(rec) == 'table' and (rec.id == iface or id == iface) then return observed_record(rec) end
 	end
 	return nil
 end
@@ -174,7 +187,7 @@ local function status_online(st)
 end
 
 function M.uplink_observed_status(snapshot, uplink)
-	return status_by_interface(snapshot, uplink and uplink.request and uplink.request.interface)
+	return status_for_uplink(snapshot, uplink and uplink.uplink_id, uplink and uplink.request and uplink.request.interface)
 end
 
 function M.uplink_online(snapshot, uplink)
@@ -329,6 +342,127 @@ function M.speedtest_due(snapshot, uplink, opts)
 	end
 	if speedtest_success_fresh(snapshot, rec, now) then return true, 'missing_previous_key' end
 	return true, 'due'
+end
+
+-- Active scope ---------------------------------------------------------------
+--
+-- `speedtests.scope = "active"` tests only the uplink carrying traffic
+-- (backhaul.active_uplink) and never changes mwan3 weights.  It re-tests on
+-- interval_s and whenever traffic moves to a different uplink, unless that
+-- uplink already has a successful result younger than failover_retest_min_s
+-- (so a flapping link does not spend modem data on every flap).
+
+local DEFAULT_FAILOVER_RETEST_MIN_S = 300
+
+function M.speedtest_scope(snapshot)
+	local scope = runtime_opts(snapshot).scope
+	if scope == 'active' then return 'active' end
+	return 'all'
+end
+
+function M.failover_retest_min_s(snapshot)
+	local v = tonumber(runtime_opts(snapshot).failover_retest_min_s)
+	if v == nil or v < 0 then return DEFAULT_FAILOVER_RETEST_MIN_S end
+	return v
+end
+
+function M.active_uplink(snapshot)
+	local bh = snapshot and snapshot.backhaul or nil
+	local a = type(bh) == 'table' and bh.active_uplink or nil
+	return type(a) == 'table' and a or nil
+end
+
+function M.active_speedtest_due(snapshot, uplink, opts)
+	local due, reason = M.speedtest_due(snapshot, uplink, opts)
+	if due or (reason ~= 'fresh_same_path' and reason ~= 'fresh_weak_path') then return due, reason end
+	local runtime = snapshot and snapshot.wan_runtime or {}
+	local acked = type(runtime.active_speedtest) == 'table' and runtime.active_speedtest.uplink_id or nil
+	if acked == nil or acked == uplink.uplink_id then return due, reason end
+	local rec = runtime.speedtests and runtime.speedtests[uplink.uplink_id]
+	local _, completed = speedtest_last_success(rec)
+	local now = now_from_opts(opts)
+	if now ~= nil and completed ~= nil and now - completed < M.failover_retest_min_s(snapshot) then
+		-- Recent enough: keep the fresh result rather than re-test a flapping link.
+		return due, reason
+	end
+	return true, 'active_uplink_changed'
+end
+
+-- Live weights rewrite mwan3's policy chain across every member they are given,
+-- ignoring metric, so applying them under strict failover would load-balance
+-- across the failover tiers.  Active scope never applies them; scope all does
+-- unless `live_weights = false`.
+function M.live_weights_enabled(snapshot)
+	if M.speedtest_scope(snapshot) == 'active' then return false end
+	return runtime_opts(snapshot).live_weights ~= false
+end
+
+-- Whether the path this uplink measures currently carries traffic
+-- (backhaul.active_uplink). Members sharing the active interface measure the
+-- same path, so they count as in use too.
+function M.uplink_in_use(snapshot, uplink)
+	local active = M.active_uplink(snapshot)
+	if not active or active.status ~= 'uplink' or type(uplink) ~= 'table' then return false end
+	local iface = uplink.request and uplink.request.interface
+	if iface ~= nil and active.interface == iface then return true end
+	for _, id in ipairs(active.uplink_ids or {}) do
+		if id == uplink.uplink_id then return true end
+	end
+	return active.uplink_id == uplink.uplink_id
+end
+
+-- Several members may share one interface, which is one physical path. The
+-- lowest metric owns it (ties by id), matching active_uplink, and only the
+-- owner is speedtested so the path is not downloaded over twice.
+function M.interface_owner(snapshot, uplink)
+	local iface = uplink and uplink.request and uplink.request.interface
+	local best
+	for _, u in ipairs(M.collect_uplinks(snapshot)) do
+		if u.request.interface == iface then
+			local m, bm = tonumber(u.request.metric) or 1, best and (tonumber(best.request.metric) or 1)
+			if best == nil or m < bm or (m == bm and u.uplink_id < best.uplink_id) then best = u end
+		end
+	end
+	return best == nil or best.uplink_id == uplink.uplink_id
+end
+
+local function next_wake(snapshot, uplink_id, now)
+	local runtime = snapshot.wan_runtime or {}
+	local rec = runtime.speedtests and runtime.speedtests[uplink_id]
+	local wake
+	local function consider(at)
+		at = tonumber(at)
+		if at ~= nil and at > now and (wake == nil or at < wake) then wake = at end
+	end
+	local mbps, completed = speedtest_last_success(rec)
+	local ttl = speedtest_ttl(snapshot)
+	if mbps ~= nil and completed ~= nil and ttl and ttl > 0 then consider(completed + ttl) end
+	if type(rec) == 'table' then consider(rec.retry_after) end
+	return wake
+end
+
+-- When each uplink this scope tests may next become due: its cached success
+-- expiring, or a failure's retry_after passing, whichever comes first after
+-- `now`.  Observations are event-led and may never arrive on a stable link,
+-- so the service keeps a timer armed for each.  Active scope times only the
+-- uplink carrying traffic; scope all times every online uplink.
+function M.speedtest_wakes(snapshot, now)
+	local out = {}
+	if not M.speedtest_enabled(snapshot) then return out end
+	local only_id
+	if M.speedtest_scope(snapshot) == 'active' then
+		local active = M.active_uplink(snapshot)
+		only_id = active and active.status == 'uplink' and active.uplink_id or false
+	end
+	for _, uplink in ipairs(M.collect_uplinks(snapshot)) do
+		local id = uplink.uplink_id
+		local tested = only_id == nil or only_id == id
+		if tested and M.uplink_online(snapshot, uplink) and M.interface_owner(snapshot, uplink) then
+			local wake = next_wake(snapshot, id, now)
+			if wake then out[#out + 1] = { uplink_id = id, wake_at = wake } end
+		end
+	end
+	return out
 end
 
 local function member_fingerprint(m)

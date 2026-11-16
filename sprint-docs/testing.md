@@ -1,5 +1,63 @@
 # Testing
 
+## Virtual time for in-process tests
+
+Use `tests.support.run_virtual_fibers` for tests whose asynchronous work runs
+entirely on fibers and in-memory fakes. It installs the shared virtual clock,
+cancels and joins the test scope, and restores the clock even after failures.
+Production retry constants and the test's deadline assertions stay intact.
+The #409 migration covers 580 existing tests across 66 test modules.
+
+- `run(function(scope, clock) ... end)` leaves time under the test's control.
+  Use `clock:advance(seconds)` followed by `time_harness.flush_ticks(...)`, or
+  `time_harness.wait_op_within(...)`. Check both sides of important deadlines.
+- `run_auto(function(scope, clock) ... end, { timeout = 10 })` drives existing
+  fiber sleeps and timer choices without wall-clock waits. It allows 100 startup
+  turns, then advances one virtual millisecond with 20 scheduler turns per step.
+  The timeout bounds **virtual** body time; it defaults to 10 seconds.
+  Scope cleanup is noninterruptible: the driver continues until finite cleanup
+  finishes. Tests that deliberately hang in raw cleanup need a process watchdog,
+  just as with the real runner.
+  Its fixed default clocks are monotonic 100 and realtime 1700000000; zero is
+  reserved as an unobserved timestamp by some service caches. Clock options
+  `monotonic`, `realtime`, and `follow_realtime` can override these defaults.
+
+Use `tests.support.run_fibers` for real subprocesses, PTYs, sockets, cqueues I/O,
+file locks, and device tests: virtual fiber time cannot drive those operations.
+Fake HTTP controllers and fake command objects can use virtual time. Mixed suites
+keep real I/O tests on the real runner, including speedtest downloader cancellation
+and OpenWrt lock/descendant containment. The two HAL contract tests that deliberately
+leave a failed child scope also keep their original runner semantics.
+
+Issue [#409](https://github.com/jangala-dev/devicecode-lua/issues/409) covered the
+APN import/retry, GSM modes/PDP, fake speedtest, network interval/retry, alarm,
+radio, config debounce, service lifecycle, Fabric, Update, UI, and fake HTTP
+controller tests. In-memory devhost service seam, startup, failure and logging
+tests use the same harness. Existing explicit virtual-clock metrics and GSM
+connection tests keep their controlled clock advances. The test runner continues
+to measure duration with the OS monotonic clock, independently of fiber time.
+
+### Issue #409 validation (2026-11-12)
+
+Wall times measure the entire `make test` command with Python's OS monotonic
+clock, including the runner and Make overhead.
+
+| Checkout | Tests | Failures | Wall time |
+| --- | ---: | ---: | ---: |
+| Before migration (`a9b6cd5`) | 1,737 | 0 | 76.042 s |
+| After migration | 1,742 | 0 | 25.550 s |
+
+The five added tests cover the automatic driver, failure/timeout restoration,
+and cleanup that exceeds the body timeout. Five full-suite repeats with
+Lua random seeds `1`, `42`, `2026`, `8675309`, and `409` all passed, taking
+25.303, 24.746, 25.348, 24.998, and 23.833 seconds respectively.
+
+Earlier repetition exposed an intermittent `update manager available` timeout in
+`integration.devhost.mcu_update_full_path_spec`. The identical failure reproduced
+on untouched `a9b6cd5` with seed `2`; its underlying cause remains unresolved.
+`make check-indent` passes. `make lint` still reports existing warnings; comparison
+against the original versions of every changed Lua file found no new warnings.
+
 ## Shared support for physical box tests
 
 Reusable Lua helpers live in `tests/integration/onbox/support/`. Run inside the

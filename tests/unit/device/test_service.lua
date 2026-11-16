@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/device/test_service.lua
 
 local fibers = require 'fibers'
@@ -128,7 +129,7 @@ end
 
 
 function tests.test_start_opens_cfg_device_with_shared_config_watch_and_closes_it()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local conn = fake_conn()
 		local st, _rep, primary = fibers.run_scope(function (scope)
 			assert_true(scope:spawn(function ()
@@ -154,7 +155,7 @@ function tests.test_start_opens_cfg_device_with_shared_config_watch_and_closes_i
 end
 
 function tests.test_start_publishes_service_lifecycle_status()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local conn = fake_conn()
 		local seen = {}
 		local parent_retain = conn.retain
@@ -188,7 +189,7 @@ function tests.test_start_publishes_service_lifecycle_status()
 end
 
 function tests.test_apply_config_starts_generation_and_publishes_public_state()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local conn = fake_conn()
 		local state = service.build_state(scope, {
 			conn = conn,
@@ -210,7 +211,7 @@ function tests.test_apply_config_starts_generation_and_publishes_public_state()
 end
 
 function tests.test_same_effective_catalogue_does_not_restart_generation()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local state = service.build_state(scope, {
 			conn = fake_conn(),
 			enable_actions = false,
@@ -224,7 +225,7 @@ function tests.test_same_effective_catalogue_does_not_restart_generation()
 end
 
 function tests.test_material_catalogue_change_replaces_generation()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local state = service.build_state(scope, {
 			conn = fake_conn(),
 			enable_actions = false,
@@ -249,7 +250,7 @@ function tests.test_material_catalogue_change_replaces_generation()
 end
 
 function tests.test_publication_coalesces_repeated_materially_identical_observation()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local conn = fake_conn()
 		local state = service.build_state(scope, {
 			conn = conn,
@@ -284,7 +285,7 @@ function tests.test_publication_coalesces_repeated_materially_identical_observat
 end
 
 function tests.test_mcu_dirty_publication_emits_mcu_metrics()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local conn = fake_conn()
 		local state = service.build_state(scope, {
 			conn = conn,
@@ -362,7 +363,7 @@ function tests.test_mcu_dirty_publication_emits_mcu_metrics()
 end
 
 function tests.test_mcu_metrics_skip_empty_component_values()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local conn = fake_conn()
 		local state = service.build_state(scope, {
 			conn = conn,
@@ -381,7 +382,7 @@ function tests.test_mcu_metrics_skip_empty_component_values()
 end
 
 function tests.test_non_mcu_dirty_publication_does_not_emit_mcu_metrics()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local conn = fake_conn()
 		local state = service.build_state(scope, {
 			conn = conn,
@@ -412,7 +413,7 @@ end
 
 
 function tests.test_publication_is_selected_as_semantic_event_after_dirty_change()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local conn = fake_conn()
 		local state = service.build_state(scope, {
 			conn = conn,
@@ -441,7 +442,7 @@ local function count_keys(t)
 end
 
 function tests.test_unbind_failure_during_generation_replacement_is_surfaced_and_records_kept()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local conn = fake_conn()
 		local state = service.build_state(scope, {
 			conn = conn,
@@ -471,7 +472,7 @@ function tests.test_unbind_failure_during_generation_replacement_is_surfaced_and
 end
 
 function tests.test_publication_cleanup_is_checked_and_keeps_records_on_failure()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local conn = fake_conn()
 		local state = service.build_state(scope, {
 			conn = conn,
@@ -496,7 +497,7 @@ end
 
 
 function tests.test_cleanup_publication_ignores_summary_identity_when_never_published()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local state = service.build_state(scope, {
 			conn = {},
 			enable_actions = false,
@@ -511,7 +512,7 @@ end
 function tests.test_legacy_fabric_facts_reach_public_device_state_and_device_owned_metrics()
 	local legacy = require 'services.fabric.profiles.legacy_mcu_metrics_v1.processor'
 	local cjson = require 'cjson.safe'
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local conn = fake_conn()
 		local state = service.build_state(scope, {
 			conn = conn, enable_actions = false, enable_observers = false,

@@ -8,7 +8,7 @@ local fibers = require 'fibers'
 local sleep = require 'fibers.sleep'
 local cond = require 'fibers.cond'
 local cjson = require 'cjson.safe'
-local runfibers = require 'tests.support.run_fibers'
+local runfibers = require 'tests.support.run_virtual_fibers'
 local fake_store = require 'tests.support.fake_control_store'
 local bus_cleanup = require 'devicecode.support.bus_cleanup'
 local gsm_service = require 'services.gsm'
@@ -61,7 +61,7 @@ local function start(scope, opts)
 	local bus = busmod.new()
 	local store = fake_store.new({ id = 'gsm', values = opts.values })
 	store:start(bus:connect({ origin_base = { kind = 'test', service = 'fake-hal' } }), { id = 'gsm', scope = scope })
-	local h = { bus = bus, store = store, reads = 0 }
+	local h = { bus = bus, store = store, reads = 0, read_files = {} }
 	if opts.replies then
 		local conn = bus:connect({ origin_base = { kind = 'test', service = 'fake-fs' } })
 		local ep = assert(bus_cleanup.bind(conn, { 'cap', 'fs', 'credentials', 'rpc', 'read' }, { queue_len = 8 }))
@@ -70,6 +70,7 @@ local function start(scope, opts)
 				local req = fibers.perform(ep:recv_op())
 				if req == nil then return end
 				h.reads = h.reads + 1
+				h.read_files[#h.read_files + 1] = req.payload and req.payload.filename
 				local reply = opts.replies[math.min(h.reads, #opts.replies)]
 				if type(reply) == 'function' then reply = reply() end
 				req:reply(reply)
@@ -119,7 +120,7 @@ local function wait_for_count(h, want)
 end
 
 function tests.test_first_boot_imports_v09_apns_and_publishes_them()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local h = start(scope, { replies = {
 			{ ok = true, reason = user_cfg({ rec('one'), { apn = 'bad' }, rec('two') }) },
 		} })
@@ -127,12 +128,39 @@ function tests.test_first_boot_imports_v09_apns_and_publishes_them()
 		assert(state.records[1].apn == 'one')
 		local list = assert(stored(h))
 		assert(#list == 2 and list[2].apn == 'two')
-		assert(h.reads == 1)
+		assert(h.reads == 2)
+		assert(h.read_files[1] == 'remote.cfg' and h.read_files[2] == 'user.cfg')
+	end, { timeout = TIMEOUT })
+end
+
+function tests.test_first_boot_user_apns_replace_remote_apns()
+	runfibers.run_auto(function(scope)
+		local h = start(scope, { replies = {
+			{ ok = true, reason = user_cfg({ rec('remote') }) },
+			{ ok = true, reason = user_cfg({ rec('user') }) },
+		} })
+		wait_until(function() return stored(h) ~= nil end, 'the imported APNs to be saved')
+		local list = assert(stored(h))
+		assert(#list == 1 and list[1].apn == 'user')
+		assert(h.read_files[1] == 'remote.cfg' and h.read_files[2] == 'user.cfg')
+	end, { timeout = TIMEOUT })
+end
+
+function tests.test_malformed_remote_still_imports_user_apns()
+	runfibers.run_auto(function(scope)
+		local h = start(scope, { replies = {
+			{ ok = true, reason = '{' },
+			{ ok = true, reason = user_cfg({ rec('user') }) },
+		} })
+		wait_for_count(h, 1)
+		local list = assert(stored(h))
+		assert(#list == 1 and list[1].apn == 'user')
+		assert(h.reads == 2)
 	end, { timeout = TIMEOUT })
 end
 
 function tests.test_existing_key_is_left_alone()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local body = cjson.encode({ records = { rec('entered-later') } })
 		local h = start(scope, { values = { [KEY] = body }, replies = {
 			{ ok = true, reason = user_cfg({ rec('old') }) },
@@ -148,19 +176,19 @@ function tests.test_existing_key_is_left_alone()
 end
 
 function tests.test_read_failure_is_retried_until_it_works()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local h = start(scope, { replies = {
 			{ ok = false, reason = 'read busy' },
 			{ ok = true, reason = user_cfg({ rec('one') }) },
 		} })
 		wait_for_count(h, 1)
-		assert(h.reads == 2)
+		assert(h.reads == 3)
 		assert(stored(h)[1].apn == 'one')
 	end, { timeout = TIMEOUT })
 end
 
 function tests.test_import_off_reads_nothing_and_leaves_saves_free()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local h = start(scope, { import = false, replies = { { ok = true, reason = user_cfg({ rec('old') }) } } })
 		wait_for_list(h, 0)
 		local reply, err = add_apn(h, 'typed')
@@ -172,7 +200,7 @@ end
 
 -- With no filesystem answer, GSM starts normally once the import gives up.
 function tests.test_import_gives_up_so_gsm_still_starts()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local h = start(scope, { give_up_s = 0.3 })
 		wait_for_list(h, 0)
 		local reply, err = add_apn(h, 'typed')
@@ -183,7 +211,7 @@ end
 
 -- Config updates arriving during startup don't cost the import its retries.
 function tests.test_config_updates_cannot_starve_the_import()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local h = start(scope, { give_up_s = 3, replies = {
 			{ ok = false, reason = 'read busy' },
 			{ ok = true, reason = user_cfg({ rec('one') }) },
@@ -201,15 +229,18 @@ function tests.test_config_updates_cannot_starve_the_import()
 end
 
 function tests.test_missing_and_malformed_files_write_nothing()
-	for _, reply in ipairs({
-		{ ok = false, reason = 'failed to open file /data/configs/user.cfg: No such file or directory' },
-		{ ok = true, reason = 'not json' },
+	for _, case in ipairs({
+		{
+			reply = { ok = false, reason = 'failed to open file /data/configs/user.cfg: No such file or directory' },
+			reads = 2,
+		},
+		{ reply = { ok = true, reason = 'not json' }, reads = 2 },
 	}) do
-		runfibers.run(function(scope)
-			local h = start(scope, { replies = { reply } })
+		runfibers.run_auto(function(scope)
+			local h = start(scope, { replies = { case.reply } })
 			wait_until(function() return h.reads >= 1 end, 'the read')
 			fibers.perform(sleep.sleep_op(0.2))
-			assert(h.reads == 1, 'a final result must not be retried')
+			assert(h.reads == case.reads, 'a final result must not be retried')
 			assert(count_calls(h.store, 'put') == 0)
 		end, { timeout = TIMEOUT })
 	end
@@ -288,7 +319,7 @@ end
 
 -- APN requests can't reach GSM until the import has finished, so they can't overlap it.
 function tests.test_apn_requests_are_not_served_during_the_import()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local h = start_gated(scope)
 		wait_until(function() return h.reading end, 'the read')
 		local during = list_apns(h)
@@ -304,7 +335,7 @@ end
 
 -- This is how the local UI works: it reads the whole list, then saves the whole list back.
 function tests.test_ui_read_then_save_after_the_import_keeps_it()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local h = start_gated(scope)
 		wait_until(function() return h.reading end, 'the read')
 		h.read_gate:signal()
@@ -324,7 +355,7 @@ end
 -- The import's save lands but its reply never comes, and the import gives up. GSM then
 -- loads what the store holds, so it can't later save a list without the imported record.
 function tests.test_save_whose_reply_is_lost_is_still_used()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local h = start_gated(scope, { give_up_s = 0.2 })
 		h.put_gates[1] = cond.new()
 		wait_until(function() return h.reading end, 'the read')
@@ -342,7 +373,7 @@ function tests.test_save_whose_reply_is_lost_is_still_used()
 end
 
 function tests.test_failed_import_save_is_retried()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local h = start_gated(scope)
 		h.fail_put = 1
 		wait_until(function() return h.reading end, 'the read')
@@ -356,7 +387,7 @@ end
 
 -- The store isn't answering yet when GSM starts, as can happen early in boot.
 function tests.test_import_waits_for_the_store_to_answer()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local h = start_gated(scope, { give_up_s = 5 })
 		h.fail_get_until = 2
 		wait_until(function() return h.reading end, 'the read')
@@ -369,7 +400,7 @@ end
 
 -- A list emptied in the current UI still has its key, so it stays empty.
 function tests.test_emptied_list_is_left_empty()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local h = start(scope, { values = { [KEY] = cjson.encode({ records = {} }) }, replies = {
 			{ ok = true, reason = user_cfg({ rec('old') }) },
 		} })

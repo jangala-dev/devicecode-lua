@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/device/test_phase2.lua
 
 local fibers = require 'fibers'
@@ -68,7 +69,7 @@ end
 function tests.test_default_fabric_client_disables_bus_timeout_but_passes_transfer_budget()
 	local seen_topic, seen_payload, seen_opts
 
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local conn = {
 			call_op = function (_, topic, payload, opts)
 				seen_topic = topic
@@ -104,7 +105,7 @@ function tests.test_default_catalogue_includes_host_and_mcu_components()
 end
 
 function tests.test_public_metadata_config_change_does_not_restart_generation_but_updates_model()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local state = service.build_state(scope, {
 			conn = nil,
 			enable_actions = false,
@@ -125,7 +126,7 @@ function tests.test_public_metadata_config_change_does_not_restart_generation_bu
 end
 
 function tests.test_next_event_prioritises_config_before_ready_action_request()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local config_tx, config_rx = mailbox.new(2, { full = 'reject_newest' })
 		local action_tx, action_rx = mailbox.new(2, { full = 'reject_newest' })
 		local state = service.build_state(scope, {
@@ -160,7 +161,7 @@ end
 
 function tests.test_fabric_stage_source_owner_transfer_does_not_terminate_source_in_action_scope()
 	local terminate_count = 0
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local source = { id = 'src' }
 		local r = req({ source = source })
 		local client = {
@@ -191,7 +192,7 @@ end
 
 function tests.test_fabric_stage_requires_client_to_take_source_ownership()
 	local terminate_count = 0
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local source = { id = 'src-no-proof' }
 		local r = req({ source = source })
 		local client = {
@@ -223,7 +224,7 @@ end
 
 function tests.test_fabric_stage_failed_admission_terminates_untransferred_source()
 	local terminate_count = 0
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local source = { id = 'src' }
 		local r = req({ source = source })
 		local client = {
@@ -252,7 +253,7 @@ function tests.test_fabric_stage_failed_admission_terminates_untransferred_sourc
 end
 
 function tests.test_repeated_observation_does_not_change_model_version()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local cat = assert(config.to_catalogue(sample_config('A')))
 		local m = model_mod.new()
 		m:apply_catalogue(1, cat)
@@ -297,7 +298,7 @@ local function fake_bound_conn()
 end
 
 function tests.test_generation_replacement_unbinds_old_endpoints_before_rebinding()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local conn = fake_bound_conn()
 		local state = service.build_state(scope, {
 			conn = conn,
@@ -325,7 +326,7 @@ function tests.test_generation_replacement_unbinds_old_endpoints_before_rebindin
 end
 
 function tests.test_action_timeout_cancels_action_scope_and_finalises_request()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local r = req()
 		local conn = {
 			call_op = function ()
@@ -355,7 +356,7 @@ function tests.test_action_timeout_cancels_action_scope_and_finalises_request()
 end
 
 function tests.test_remote_action_failure_is_public_result_not_worker_failure()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local r = req()
 		local conn = {
 			call_op = function ()
@@ -382,7 +383,7 @@ end
 
 
 function tests.test_action_worker_requires_call_op_and_does_not_use_call_fallback()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local r = req()
 		local called = false
 		local conn = {
@@ -411,7 +412,7 @@ function tests.test_action_worker_requires_call_op_and_does_not_use_call_fallbac
 end
 
 function tests.test_failed_generation_start_leaves_no_active_generation_and_rolls_back_endpoints()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local conn = fake_bound_conn()
 		local bind_count = 0
 		local parent_bind = conn.bind
@@ -439,7 +440,7 @@ end
 
 
 function tests.test_generation_replacement_cancels_old_generation_without_generation_shell_completion()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local state = service.build_state(scope, {
 			conn = nil,
 			enable_actions = false,
@@ -471,7 +472,7 @@ end
 function tests.test_service_finaliser_cancels_generation_before_closing_reporting_queues()
 	local order = {}
 
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local st, _rep, primary = fibers.run_scope(function (scope)
 			local state = service.build_state(scope, {
 				conn = nil,
@@ -513,7 +514,7 @@ end
 function tests.test_observer_finaliser_owns_opened_handles_before_source_down_emit_can_fail()
 	local terminate_count = 0
 
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local tx = mailbox.new(0, { full = 'reject_newest' })
 		local conn = { opened = 0 }
 
@@ -554,7 +555,7 @@ function tests.test_observer_finaliser_owns_opened_handles_before_source_down_em
 end
 
 function tests.test_observer_done_records_outcome_and_forgets_live_handle()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local state = service.build_state(scope, {
 			conn = nil,
 			enable_actions = false,
@@ -583,7 +584,7 @@ function tests.test_observer_done_records_outcome_and_forgets_live_handle()
 end
 
 function tests.test_generation_cancellation_cascades_to_in_flight_action_and_finalises_request()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local request_done = cond.new()
 		local call_entered = cond.new()
 		local r = req()
@@ -636,7 +637,7 @@ end
 
 
 function tests.test_fabric_stage_open_source_may_be_an_explicit_op()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local source = { id = 'src-op' }
 		local r = req({})
 		local client = {
@@ -672,7 +673,7 @@ end
 function tests.test_fabric_stage_timeout_cancels_child_stage_and_terminates_unhanded_source()
 	local terminate_count = 0
 
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local source = { id = 'slow-source' }
 		local r = req({ source = source })
 		local client = {
@@ -710,7 +711,7 @@ function tests.test_fabric_stage_timeout_cancels_child_stage_and_terminates_unha
 end
 
 function tests.test_completion_queue_admission_failure_fails_observing_scope()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local st, _rep, primary = fibers.run_scope(function (scope)
 			local r = req()
 			local conn = {
@@ -753,7 +754,7 @@ end
 function tests.test_generation_cancellation_cascades_into_fabric_stage_child_scope()
 	local terminate_count = 0
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local source = { id = 'gen-cancel-source' }
 		local entered_stage = cond.new()
 		local request_done = cond.new()
@@ -908,7 +909,7 @@ local function fake_live_conn()
 end
 
 function tests.test_config_replacement_with_live_observer_terminates_raw_watch()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local conn = fake_live_conn()
 		local state = service.build_state(scope, {
 			conn = conn,
@@ -933,8 +934,7 @@ function tests.test_config_replacement_with_live_observer_terminates_raw_watch()
 		assert_true(conn.unwatched >= 1)
 
 		-- The replacement generation also owns a live observer.  End the test by
-		-- cancelling it explicitly; otherwise fibers.run() will correctly wait for
-		-- that still-live child scope during structural join.
+		-- cancelling it explicitly before leaving the test body.
 		assert_true(service.cancel_active_generation(state, 'test_done'))
 	end)
 end
@@ -942,7 +942,7 @@ end
 
 function tests.test_config_replacement_with_live_fabric_stage_endpoint_cancels_action_and_terminates_source()
 	local terminate_count = 0
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local conn = fake_live_conn()
 		local entered_stage = cond.new()
 		local request_done = cond.new()
@@ -1014,7 +1014,7 @@ function tests.test_config_replacement_with_live_fabric_stage_endpoint_cancels_a
 end
 
 function tests.test_action_start_cancelled_before_worker_body_resolves_request_without_calling_hal()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local called = false
 		local r = req()
 		local conn = {
@@ -1051,7 +1051,7 @@ end
 
 
 function tests.test_fabric_stage_public_reply_is_sanitised_of_ownership_internals()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local source = { id = 'sanitize-source' }
 		local r = req({ source = source })
 		local client = {
@@ -1096,7 +1096,7 @@ function tests.test_catalogue_entries_carry_component_modules()
 end
 
 function tests.test_mcu_fault_availability_is_stored_and_projected()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local cat = assert(config.to_catalogue({
 			schema = config.SCHEMA,
 			components = {
@@ -1126,7 +1126,7 @@ function tests.test_mcu_fault_availability_is_stored_and_projected()
 end
 
 function tests.test_host_missing_software_degrades_rather_than_disappears()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local cat = assert(config.to_catalogue({
 			schema = config.SCHEMA,
 			components = {
@@ -1169,7 +1169,7 @@ end
 
 
 function tests.test_stale_action_completion_is_archived_and_clears_pending_without_mutating_model()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local state = service.build_state(scope, {
 			conn = nil,
 			enable_actions = false,
@@ -1213,7 +1213,7 @@ function tests.test_stale_action_completion_is_archived_and_clears_pending_witho
 end
 
 function tests.test_stale_observer_completion_is_kept_on_generation_history()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local state = service.build_state(scope, {
 			conn = nil,
 			enable_actions = false,
@@ -1247,7 +1247,7 @@ function tests.test_stale_observer_completion_is_kept_on_generation_history()
 end
 
 function tests.test_generation_cancel_marks_pending_actions_until_completion_arrives()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local state = service.build_state(scope, {
 			conn = nil,
 			enable_actions = false,

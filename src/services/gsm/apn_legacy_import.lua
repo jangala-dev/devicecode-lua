@@ -1,9 +1,9 @@
 -- services/gsm/apn_legacy_import.lua
 --
 -- One-time import of custom APNs saved by the v0.9 local UI. v0.9 keeps them under
--- default.apns in /data/configs/user.cfg, which survives the update to later firmware
--- but which nothing else reads. The file is never changed, so going back to v0.9 still
--- finds it.
+-- default.apns in /data/configs/remote.cfg and /data/configs/user.cfg, which survive
+-- the update to later firmware but which nothing else reads. The files are never
+-- changed, so going back to v0.9 still finds them.
 --
 -- The store's key decides whether the import has happened: once it exists, whether from
 -- this import or from a save in the current UI, the import never writes again. The caller
@@ -21,6 +21,7 @@ local perform = fibers.perform
 local M = {}
 
 M.FILENAME = 'user.cfg'
+M.FILENAMES = { 'remote.cfg', 'user.cfg' }
 
 -- v0.9 connected a custom APN using only its apn, user, password and authtype, and its
 -- UI took free text everywhere else. MVNO fields had no effect there, so they mustn't
@@ -36,28 +37,45 @@ local function normalise_v09_record(rec)
 			out[k] = v
 		end
 	end
+	-- Older saved records did not always have the UI-only carrier label. It never
+	-- affected connection, so use the APN as the stable compatibility label.
+	if (out.carrier == nil or tostring(out.carrier):match('^%s*$')) and out.apn ~= nil then
+		out.carrier = out.apn
+	end
 	return apn_model.normalise_record(out)
+end
+
+local function record_key(record)
+	local keys, values = {}, {}
+	for key in pairs(record) do keys[#keys + 1] = key end
+	table.sort(keys)
+	for _, key in ipairs(keys) do
+		values[#values + 1] = key
+		values[#values + 1] = record[key]
+	end
+	return table.concat(values, '\0')
 end
 
 ---@param body any
 ---@return table? records
 ---@return integer|string skipped_or_err count of records dropped, or 'malformed'
+---@return boolean? has_apns distinguishes an explicit empty list from an absent subsection
 function M.parse(body)
 	if type(body) ~= 'string' then return nil, 'malformed' end
 	local doc = cjson.decode(body)
 	if type(doc) ~= 'table' then return nil, 'malformed' end
 	local section = doc.default
-	if section == nil then return {}, 0 end
+	if section == nil then return {}, 0, false end
 	if type(section) ~= 'table' then return nil, 'malformed' end
 	local list = section.apns
-	if list == nil then return {}, 0 end
+	if list == nil then return {}, 0, false end
 	if type(list) ~= 'table' then return nil, 'malformed' end
 
 	-- normalise_list rejects a whole list for one bad record, so go one at a time.
 	local records, seen, skipped = {}, {}, 0
 	for _, rec in ipairs(list) do
 		local item = normalise_v09_record(rec)
-		local key = item and table.concat({ item.carrier, item.mcc, item.mnc, item.apn }, '\0')
+		local key = item and record_key(item)
 		if item and not seen[key] then
 			seen[key] = true
 			records[#records + 1] = item
@@ -65,7 +83,7 @@ function M.parse(body)
 			skipped = skipped + 1
 		end
 	end
-	return records, skipped
+	return records, skipped, true
 end
 
 local function is_missing_file(reason)
@@ -79,24 +97,44 @@ end
 --   no_source   no file, or no usable records in it; nothing written
 --   malformed   the file can't be parsed; nothing written
 ---@param store table
----@param read_op fun(): Op resolves to a filesystem reply and an error
+---@param read_op fun(filename: string): Op resolves to a filesystem reply and an error
+---@param filenames? string[] sources in precedence order
 ---@return Op
-function M.run_op(store, read_op)
+function M.run_op(store, read_op, filenames)
 	return fibers.run_scope_op(function()
 		local exists, xerr = perform(store:exists_op())
 		if exists == nil then return nil, xerr or 'control_store_get_failed' end
 		if exists then return { status = 'exists' }, nil end
 
-		local reply, rerr = perform(read_op())
-		if reply == nil then return nil, tostring(rerr or 'user_cfg_read_failed') end
-		if reply.ok ~= true then
-			if is_missing_file(reply.reason) then return { status = 'no_source', skipped = 0 }, nil end
-			return nil, tostring(reply.reason or 'user_cfg_read_failed')
+		local records, skipped = {}, 0
+		local malformed, usable_source = false, false
+		for _, filename in ipairs(filenames or { M.FILENAME }) do
+			local reply, rerr = perform(read_op(filename))
+			if reply == nil then return nil, tostring(rerr or 'legacy_cfg_read_failed') end
+			if reply.ok ~= true then
+				if not is_missing_file(reply.reason) then
+					return nil, tostring(reply.reason or 'legacy_cfg_read_failed')
+				end
+			else
+				local parsed, parse_result, has_apns = M.parse(reply.reason)
+				if not parsed then
+					-- Legacy config discards an invalid source and continues with later
+					-- files. Never return file contents (which can include credentials).
+					malformed = true
+				else
+					usable_source = true
+					if has_apns then
+						-- Configuration subsections replace earlier ones wholesale. In
+						-- particular, an explicit user [] clears the remote APN list.
+						records, skipped = parsed, parse_result
+					end
+				end
+			end
 		end
-
-		local records, skipped = M.parse(reply.reason)
-		if not records then return { status = 'malformed' }, nil end
-		if #records == 0 then return { status = 'no_source', skipped = skipped }, nil end
+		if #records == 0 then
+			if malformed and not usable_source then return { status = 'malformed' }, nil end
+			return { status = 'no_source', skipped = skipped }, nil
+		end
 
 		local saved, serr = perform(store:save_op(records))
 		if not saved then return nil, serr or 'control_store_put_failed' end

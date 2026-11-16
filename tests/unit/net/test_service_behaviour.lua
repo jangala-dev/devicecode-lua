@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/net/test_service_behaviour.lua
 
 local fibers = require 'fibers'
@@ -134,7 +135,7 @@ local function start_service(scope, conn, params)
 end
 
 function tests.test_initial_config_starts_apply_and_publishes_running_state()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local b = busmod.new()
 		local conn = b:connect()
 		local reader = b:connect()
@@ -184,7 +185,7 @@ end
 
 
 function tests.test_backhaul_publishes_configured_gsm_members_even_when_unrealised()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local b = busmod.new()
 		local conn = b:connect()
 		local reader = b:connect()
@@ -246,7 +247,7 @@ function tests.test_backhaul_publishes_configured_gsm_members_even_when_unrealis
 end
 
 function tests.test_gsm_reconnect_restarts_member_interface()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local b = busmod.new()
 		local conn = b:connect()
 		local reader = b:connect()
@@ -308,6 +309,7 @@ function tests.test_gsm_reconnect_restarts_member_interface()
 		eq(restarts[1].interface, 'modem_primary')
 
 		-- A role with no WAN member: nothing to restart.
+		uplink('secondary', true, 'wwan1')
 		uplink('secondary', false, 'wwan1')
 		uplink('secondary', true, 'wwan1')
 		wait_restarts(2, 0.1)
@@ -326,8 +328,122 @@ function tests.test_gsm_reconnect_restarts_member_interface()
 	end)
 end
 
+-- net starts with the uplink disconnected, then the modem connects. Returns
+-- the restarts seen after the first connect, and after a drop and reconnect.
+local function first_connect_restarts(boot_window_s, start_marker)
+	local restarts = {}
+	local after_first
+	run_virtual_fibers.run_auto(function (scope)
+		local b = busmod.new()
+		local conn = b:connect()
+		local reader = b:connect()
+		local calls = {}
+
+		local hal = success_hal(calls)
+		hal.restart_interface_op = function (_, req)
+			restarts[#restarts + 1] = req
+			return op.always({ ok = true, backend = 'test', interface = req.interface })
+		end
+
+		local c = cfg()
+		c.wan = {
+			members = {
+				modem_primary = { interface = 'modem_primary', source = { kind = 'gsm-uplink', id = 'primary' } },
+			},
+		}
+
+		local function uplink(connected, ifname)
+			conn:retain(topics.gsm_uplink('primary'), {
+				connected = connected, available = connected, linux = { ifname = ifname },
+			})
+		end
+		local function wait_restarts(n, timeout)
+			local deadline = fibers.now() + timeout
+			while #restarts < n and fibers.now() < deadline do fibers.perform(sleep.sleep_op(0.01)) end
+		end
+
+		uplink(false, nil)
+		retain_network_config_status(conn, 'available')
+		local child = start_service(scope, conn, {
+			conn = conn,
+			config = c,
+			rev = 35,
+			hal = hal,
+			observe = false,
+			boot_window_s = boot_window_s,
+			start_marker = start_marker,
+		})
+
+		local view = reader:retained_view(topics.summary())
+		probe.wait_versioned_until('net running summary before the first modem connect',
+			function () return view:version() end,
+			function (seen) return view:changed_op(seen) end,
+			function ()
+				local msg = view:get(topics.summary())
+				return msg and msg.payload and msg.payload.state == 'running' and msg.payload or nil
+			end,
+			{ timeout = 0.5 })
+		view:close()
+
+		uplink(true, 'wwan0')
+		wait_restarts(1, 0.2)
+		after_first = #restarts
+
+		uplink(false, 'wwan0')
+		uplink(true, 'wwan0')
+		wait_restarts(after_first + 1, 0.5)
+
+		child:cancel('test complete')
+		fibers.perform(child:join_op())
+	end)
+	return after_first, restarts
+end
+
+-- A path for net's start marker that does not exist yet.
+local function fresh_marker()
+	local path = os.tmpname()
+	os.remove(path)
+	return path
+end
+
+function tests.test_gsm_first_connect_after_boot_does_not_restart_member_interface()
+	-- net's first start since boot: the first connect gives the interface its
+	-- first lease, so there is no old address to replace and no restart.
+	local marker = fresh_marker()
+	local after_first, restarts = first_connect_restarts(math.huge, marker)
+	eq(after_first, 0, 'no restart on the first connect after boot')
+	-- A later drop and reconnect is a real reconnect: restart once.
+	eq(#restarts, 1, 'one restart expected after a reconnect')
+	eq(restarts[1].interface, 'modem_primary')
+	ok(io.open(marker, 'r'), 'start recorded for later starts')
+	os.remove(marker)
+end
+
+function tests.test_gsm_first_connect_after_an_early_net_restart_restarts_member_interface()
+	-- net restarts soon after boot, after the modem had connected and dropped:
+	-- the interface may still hold the lease from before.
+	local marker = fresh_marker()
+	first_connect_restarts(math.huge, marker)
+	local after_first, restarts = first_connect_restarts(math.huge, marker)
+	eq(after_first, 1, 'restart on the first connect after an early net restart')
+	eq(#restarts, 2, 'and again after a reconnect')
+	os.remove(marker)
+end
+
+function tests.test_gsm_first_connect_after_a_late_net_start_restarts_member_interface()
+	local marker = fresh_marker()
+	local after_first = first_connect_restarts(0, marker)
+	eq(after_first, 1, 'restart on the first connect when net starts long after boot')
+	eq(io.open(marker, 'r'), nil, 'no marker written outside the boot window')
+end
+
+function tests.test_gsm_first_connect_restarts_when_the_start_cannot_be_recorded()
+	local after_first = first_connect_restarts(math.huge, '/nonexistent-dir/devicecode-net-started')
+	eq(after_first, 1, 'restart is the safe default')
+end
+
 function tests.test_gsm_reconnect_restart_retries_until_success_while_connected()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local b = busmod.new()
 		local conn = b:connect()
 		local reader = b:connect()
@@ -406,7 +522,7 @@ function tests.test_gsm_reconnect_restart_retries_until_success_while_connected(
 end
 
 function tests.test_gsm_restart_retry_dropped_when_config_removes_member()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local b = busmod.new()
 		local conn = b:connect()
 		local writer = b:connect()
@@ -468,7 +584,7 @@ function tests.test_gsm_restart_retry_dropped_when_config_removes_member()
 end
 
 function tests.test_counter_metrics_publish_generic_topics_with_member_namespaces()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local b = busmod.new()
 		local conn = b:connect()
 		local sub_conn = b:connect()
@@ -564,7 +680,7 @@ function tests.test_counter_metrics_publish_generic_topics_with_member_namespace
 end
 
 function tests.test_config_waits_for_network_config_capability()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local b = busmod.new()
 		local conn = b:connect()
 		local reader = b:connect()
@@ -603,7 +719,7 @@ function tests.test_config_waits_for_network_config_capability()
 end
 
 function tests.test_network_config_available_false_does_not_start_apply()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local b = busmod.new()
 		local conn = b:connect()
 		local reader = b:connect()
@@ -648,7 +764,7 @@ function tests.test_network_config_available_false_does_not_start_apply()
 end
 
 function tests.test_network_state_running_available_false_does_not_start_observer()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local b = busmod.new()
 		local conn = b:connect()
 		local reader = b:connect()
@@ -690,7 +806,7 @@ function tests.test_network_state_running_available_false_does_not_start_observe
 end
 
 function tests.test_network_config_available_starts_pending_apply()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local b = busmod.new()
 		local conn = b:connect()
 		local reader = b:connect()
@@ -743,7 +859,7 @@ function tests.test_network_config_available_starts_pending_apply()
 end
 
 function tests.test_newer_pending_config_wins_when_capability_arrives()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local b = busmod.new()
 		local conn = b:connect()
 		local writer = b:connect()
@@ -806,7 +922,7 @@ function tests.test_newer_pending_config_wins_when_capability_arrives()
 end
 
 function tests.test_no_route_apply_returns_to_pending_not_degraded()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local b = busmod.new()
 		local conn = b:connect()
 		local reader = b:connect()
@@ -860,7 +976,7 @@ function tests.test_no_route_apply_returns_to_pending_not_degraded()
 end
 
 function tests.test_network_config_backend_failure_still_degrades()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local b = busmod.new()
 		local conn = b:connect()
 		local reader = b:connect()
@@ -905,7 +1021,7 @@ function tests.test_network_config_backend_failure_still_degrades()
 end
 
 function tests.test_observed_state_updates_model_and_drift()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local mailbox = require 'fibers.mailbox'
 		local b = busmod.new()
 		local conn = b:connect()
@@ -970,7 +1086,7 @@ end
 
 
 function tests.test_wan_speedtests_wait_for_multiwan_observation()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local mailbox = require 'fibers.mailbox'
 		local b = busmod.new()
 		local conn = b:connect()
@@ -1040,7 +1156,7 @@ end
 
 
 function tests.test_wan_members_trigger_speedtests_and_live_weights()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local mailbox = require 'fibers.mailbox'
 		local b = busmod.new()
 		local conn = b:connect()
@@ -1138,5 +1254,411 @@ function tests.test_wan_members_trigger_speedtests_and_live_weights()
 	end)
 end
 
+
+local function active_scope_cfg(speedtest_opts, members)
+	local c = cfg()
+	local sp = { enabled = true, scope = 'active' }
+	for k, v in pairs(speedtest_opts or {}) do sp[k] = v end
+	c.wan = {
+		load_balancing = { policy = 'balanced', speedtests = sp },
+		members = members or {
+			wan_a = { interface = 'wan_a', mwan_metric = 1, weight = 1 },
+			wan_b = { interface = 'wan_b', mwan_metric = 2, weight = 1 },
+		},
+	}
+	local dhcp = { ipv4 = { mode = 'dhcp' } }
+	c.interfaces.wan_a = { kind = 'ethernet', role = 'wan', segment = 'wan',
+		endpoint = { ifname = 'eth1' }, addressing = dhcp }
+	c.interfaces.wan_b = { kind = 'cellular', role = 'wan', segment = 'wan',
+		endpoint = { ifname = 'wwan1' }, addressing = dhcp }
+	c.segments.wan = { kind = 'wan', firewall = { zone = 'wan' } }
+	return c
+end
+
+local function start_active_scope_service(scope, speedtest_opts, service_params)
+	local mailbox = require 'fibers.mailbox'
+	local b = busmod.new()
+	local conn = b:connect()
+	local h = { speedtests = {}, weights = {}, reader = b:connect(), fail_next = false, rev = 22,
+		addresses = { wan_a = '203.0.113.10', wan_b = '10.1.2.3' },
+		-- Like the OpenWrt HAL, results may name the generated interface.
+		hal_names = {} }
+	local obs_tx, obs_rx = mailbox.new(8, { full = 'drop_oldest' })
+	local hal = success_hal({})
+	hal.speedtest_op = function (_, req)
+		h.speedtests[#h.speedtests + 1] = { interface = req.interface, at = fibers.now() }
+		if h.fail_next then
+			h.fail_next = false
+			return op.always({ ok = false, err = 'test_failure', interface = req.interface })
+		end
+		return op.always({ ok = true, interface = h.hal_names[req.interface] or req.interface, device = req.device,
+			peak_mbps = 10, data_mib = 1, duration_s = 0.1 })
+	end
+	hal.apply_live_weights_op = function (_, req)
+		h.weights[#h.weights + 1] = req
+		return op.always({ ok = true, changed = true, applied = true })
+	end
+	hal.open_observed_subscription = function () return obs_rx end
+	hal.start_observation_op = function () return op.always({ ok = true, backend = 'test', watching = true }) end
+	retain_network_config_status(conn, 'available')
+	retain_network_state_status_payload(conn, { schema = 'devicecode.cap.status/1', state = 'running', available = true })
+	local params = { conn = conn, config = active_scope_cfg(speedtest_opts), rev = h.rev, hal = hal }
+	for k, v in pairs(service_params or {}) do params[k] = v end
+	h.child = start_service(scope, conn, params)
+	function h.reconfigure(opts, members)
+		h.rev = h.rev + 1
+		conn:retain(topics.config(), { rev = h.rev, data = active_scope_cfg(opts, members) })
+	end
+	function h.observe(a_online, b_online)
+		obs_tx:send({ payload = {
+			schema = 'devicecode.net.observation/1',
+			kind = 'snapshot_done', source = 'test', subject = 'network',
+			observed = {
+				multiwan = { interfaces_by_semantic = {
+					wan_a = { interface = 'wan_a', state = a_online and 'online' or 'offline', online = a_online, usable = a_online },
+					wan_b = { interface = 'wan_b', state = b_online and 'online' or 'offline', online = b_online, usable = b_online },
+				} },
+				live = { interfaces = {
+					wan_a = { ipv4 = { { address = h.addresses.wan_a } } },
+					wan_b = { ipv4 = { { address = h.addresses.wan_b } } },
+				} },
+			},
+		} })
+	end
+	function h.tested(n, timeout)
+		return probe.wait_until(function () return #h.speedtests >= n end, { timeout = timeout or 0.5 })
+	end
+	function h.stop()
+		h.child:cancel('test complete')
+		fibers.perform(h.child:join_op())
+	end
+	return h
+end
+
+function tests.test_active_scope_speedtests_follow_failover_without_weights()
+	run_virtual_fibers.run_auto(function (scope)
+		local h = start_active_scope_service(scope, { interval_s = 1 })
+		local reader = h.reader
+		local sub_opts = { queue_len = 8, full = 'drop_oldest' }
+		local metric_sub = reader:subscribe({ 'obs', 'v1', 'net', 'metric', 'speedtest' }, sub_opts)
+		local changed_sub = reader:subscribe({ 'obs', 'v1', 'net', 'event', 'active_uplink_changed' }, sub_opts)
+		local backhaul_view = reader:retained_view(topics.domain('backhaul'))
+		local function wait_active(id)
+			return probe.wait_versioned_until('net active uplink ' .. id,
+				function () return backhaul_view:version() end,
+				function (seen) return backhaul_view:changed_op(seen) end,
+				function ()
+					local msg = backhaul_view:get(topics.domain('backhaul'))
+					local a = msg and msg.payload and msg.payload.active_uplink
+					return a and a.uplink_id == id and a or nil
+				end,
+				{ timeout = 1.0 })
+		end
+
+		h.observe(true, true)
+		local active = wait_active('wan_a')
+		eq(active.status, 'uplink')
+		ok(h.tested(1), 'active uplink should be tested')
+		eq(h.speedtests[1].interface, 'wan_a')
+		local which, msg = fibers.perform(op.named_choice({ metric = metric_sub:recv_op(), timeout = sleep.sleep_op(0.5) }))
+		ok(which == 'metric' and msg and msg.payload, 'speedtest telemetry expected')
+		eq(msg.payload.namespace[2], 'wan_a')
+		eq(msg.payload.value, 10)
+
+		-- WAN fails over to the modem: the modem is now tested.
+		h.observe(false, true)
+		wait_active('wan_b')
+		ok(h.tested(2), 'failover should re-test')
+		eq(h.speedtests[2].interface, 'wan_b')
+		local seen_change = false
+		for _ = 1, 3 do
+			local cwhich, cmsg = fibers.perform(op.named_choice({ ev = changed_sub:recv_op(), timeout = sleep.sleep_op(0.3) }))
+			if cwhich ~= 'ev' then break end
+			if cmsg.payload and cmsg.payload.uplink_id == 'wan_b' and cmsg.payload.previous_uplink_id == 'wan_a' then
+				seen_change = true
+			end
+		end
+		ok(seen_change, 'active_uplink_changed event from wan_a to wan_b expected')
+
+		-- interval_s re-tests the uplink still carrying traffic, with no new observation.
+		ok(h.tested(3, 2.5), 'interval should re-test')
+		eq(h.speedtests[3].interface, 'wan_b')
+		for i = 2, #h.speedtests do
+			if h.speedtests[i].interface == 'wan_a' then fail('standby WAN must not be tested after failover') end
+		end
+		eq(#h.weights, 0, 'active scope must never apply live weights')
+
+		metric_sub:unsubscribe()
+		changed_sub:unsubscribe()
+		backhaul_view:close()
+		h.stop()
+	end)
+end
+
+function tests.test_active_scope_interval_timer_follows_the_latest_result()
+	run_virtual_fibers.run_auto(function (scope)
+		-- Re-test on every change of active uplink, so a failback re-test lands
+		-- while the first interval timer is still pending.
+		local h = start_active_scope_service(scope, { interval_s = 1, failover_retest_min_s = 0 })
+		h.observe(true, true)
+		ok(h.tested(1), 'active WAN tested')
+		sleep.sleep(0.3)
+		h.observe(false, true)
+		ok(h.tested(2), 'failover re-test')
+		sleep.sleep(0.3)
+		h.observe(true, true)
+		ok(h.tested(3), 'failback re-test')
+		eq(h.speedtests[3].interface, 'wan_a')
+		-- The interval runs from the failback result, not the first one.
+		ok(h.tested(4, 2.0), 'interval re-test after the latest result')
+		eq(h.speedtests[4].interface, 'wan_a')
+		local gap = h.speedtests[4].at - h.speedtests[3].at
+		ok(gap >= 0.9, 'interval measured from the latest result, got ' .. tostring(gap))
+		eq(#h.weights, 0)
+		h.stop()
+	end)
+end
+
+
+function tests.test_switching_to_active_scope_with_a_fresh_result_still_retests_on_interval()
+	run_virtual_fibers.run_auto(function (scope)
+		local h = start_active_scope_service(scope, { scope = 'all', interval_s = 1 })
+		h.observe(true, true)
+		ok(h.tested(2), 'scope all tests both uplinks')
+		h.reconfigure({ interval_s = 1 })
+		h.observe(true, true)
+		ok(h.tested(3, 2.5), 'the cached result must still expire into an interval re-test')
+		eq(h.speedtests[3].interface, 'wan_a')
+		h.stop()
+	end)
+end
+
+function tests.test_raising_interval_rearms_the_timer_for_the_cached_result()
+	run_virtual_fibers.run_auto(function (scope)
+		local h = start_active_scope_service(scope, { interval_s = 1 })
+		h.observe(true, true)
+		ok(h.tested(1), 'active WAN tested')
+		sleep.sleep(0.3)
+		h.reconfigure({ interval_s = 2 })
+		h.observe(true, true)
+		sleep.sleep(1.2)
+		eq(#h.speedtests, 1, 'the old one-second timer must not re-test a result that is still fresh')
+		ok(h.tested(2, 1.5), 'the timer must be re-armed for the new interval')
+		eq(h.speedtests[2].interface, 'wan_a')
+		h.stop()
+	end)
+end
+
+function tests.test_failure_retry_is_not_held_back_by_a_later_interval_timer()
+	run_virtual_fibers.run_auto(function (scope)
+		local h = start_active_scope_service(scope, { interval_s = 3, retry_after_s = 1 })
+		h.observe(true, true)
+		ok(h.tested(1), 'active WAN tested')
+		-- A new address re-tests the path; that test fails.
+		h.fail_next = true
+		h.addresses.wan_a = '198.51.100.7'
+		h.observe(true, true)
+		ok(h.tested(2), 'path change re-test')
+		ok(h.tested(3, 2.0), 'failure retry must not wait for the interval timer')
+		local gap = h.speedtests[3].at - h.speedtests[2].at
+		ok(gap < 1.8, 'retry should follow retry_after_s, waited ' .. tostring(gap))
+		h.stop()
+	end)
+end
+
+function tests.test_apply_that_moves_the_active_uplink_reports_the_change()
+	run_virtual_fibers.run_auto(function (scope)
+		local h = start_active_scope_service(scope, { interval_s = 60 })
+		local sub = h.reader:subscribe({ 'obs', 'v1', 'net', 'event', 'active_uplink_changed' },
+			{ queue_len = 8, full = 'drop_oldest' })
+		h.observe(true, true)
+		ok(h.tested(1), 'active WAN tested')
+		h.reconfigure({ interval_s = 60 }, {
+			wan_a = { interface = 'wan_a', mwan_metric = 1, weight = 1, enabled = false },
+			wan_b = { interface = 'wan_b', mwan_metric = 2, weight = 1 },
+		})
+		local seen = false
+		for _ = 1, 6 do
+			local which, msg = fibers.perform(op.named_choice({ ev = sub:recv_op(), timeout = sleep.sleep_op(0.4) }))
+			if which ~= 'ev' then break end
+			if msg.payload and msg.payload.uplink_id == 'wan_b' then seen = true; break end
+		end
+		ok(seen, 'disabling the active member must report the move to wan_b')
+		sub:unsubscribe()
+		h.stop()
+	end)
+end
+
+
+function tests.test_failure_retry_is_not_lost_behind_an_earlier_interval_timer()
+	run_virtual_fibers.run_auto(function (scope)
+		local h = start_active_scope_service(scope, { interval_s = 1, retry_after_s = 2 })
+		h.observe(true, true)
+		ok(h.tested(1), 'active WAN tested')
+		sleep.sleep(0.3)
+		h.fail_next = true
+		h.addresses.wan_a = '198.51.100.7'
+		h.observe(true, true)
+		ok(h.tested(2), 'path change re-test fails')
+		-- The interval timer fires first and finds the retry not yet due; the
+		-- retry must still run once retry_after_s has passed.
+		ok(h.tested(3, 3.5), 'failure retry must survive an earlier interval wake-up')
+		local gap = h.speedtests[3].at - h.speedtests[2].at
+		ok(gap >= 1.5, 'retry must still honour retry_after_s, ran after ' .. tostring(gap))
+		h.stop()
+	end)
+end
+
+
+function tests.test_every_backhaul_mode_retests_each_backhaul_on_its_interval_without_weights()
+	run_virtual_fibers.run_auto(function (scope)
+		local h = start_active_scope_service(scope, { scope = 'all', live_weights = false, interval_s = 1 })
+		local function times(iface)
+			local out = {}
+			for _, t in ipairs(h.speedtests) do if t.interface == iface then out[#out + 1] = t.at end end
+			return out
+		end
+		h.observe(true, false)
+		ok(h.tested(1), 'the active backhaul is tested')
+		eq(h.speedtests[1].interface, 'wan_a')
+		-- The standby comes online half a second later, so its result expires on
+		-- its own schedule rather than alongside the active backhaul's.
+		sleep.sleep(0.5)
+		h.observe(true, true)
+		ok(h.tested(2), 'the standby backhaul is tested')
+		eq(h.speedtests[2].interface, 'wan_b')
+		-- No further observations: each backhaul's own timer must bring it back.
+		ok(probe.wait_until(function () return #times('wan_b') >= 2 end, { timeout = 2.5 }), 'standby re-tested')
+		local b = times('wan_b')
+		ok(b[2] - b[1] < 1.4, 'standby re-tested on its own interval, took ' .. tostring(b[2] - b[1]))
+		ok(#times('wan_a') >= 2, 'active re-tested')
+		eq(#h.weights, 0, 'weights are never applied')
+		h.stop()
+	end)
+end
+
+function tests.test_active_uplink_and_speedtest_in_use_telemetry()
+	run_virtual_fibers.run_auto(function (scope)
+		local h = start_active_scope_service(scope, { scope = 'all', live_weights = false, interval_s = 60 })
+		local sub_opts = { queue_len = 16, full = 'drop_oldest' }
+		local active_sub = h.reader:subscribe({ 'obs', 'v1', 'net', 'metric', 'active_uplink' }, sub_opts)
+		local in_use_sub = h.reader:subscribe({ 'obs', 'v1', 'net', 'metric', 'speedtest_in_use' }, sub_opts)
+		local function next_payload(sub)
+			local which, msg = fibers.perform(op.named_choice({ ev = sub:recv_op(), timeout = sleep.sleep_op(0.5) }))
+			return which == 'ev' and msg and msg.payload or nil
+		end
+
+		h.observe(true, true)
+		local active = ok(next_payload(active_sub), 'active_uplink metric expected')
+		eq(active.value, 'wan_a')
+		eq(active.namespace[1], 'net')
+		eq(active.namespace[2], 'active_uplink')
+		ok(h.tested(2), 'both backhauls tested')
+		local tags = {}
+		for _ = 1, 2 do
+			local p = ok(next_payload(in_use_sub), 'speedtest_in_use metric expected')
+			eq(p.namespace[1], 'net')
+			eq(p.namespace[3], 'speedtest_in_use')
+			tags[p.namespace[2]] = p.value
+		end
+		eq(tags.wan_a, true, 'the active backhaul was tested in use')
+		eq(tags.wan_b, false, 'the standby backhaul was tested on standby')
+
+		-- The value is also re-sent with each speedtest; skip those repeats.
+		local function next_change(from)
+			for _ = 1, 10 do
+				local p = next_payload(active_sub)
+				if not p then return nil end
+				if p.value ~= from then return p end
+			end
+		end
+		h.observe(false, true)
+		local moved = ok(next_change('wan_a'), 'active_uplink metric on failover')
+		eq(moved.value, 'wan_b')
+		h.observe(false, false)
+		local none = ok(next_change('wan_b'), 'active_uplink metric when nothing is online')
+		eq(none.value, 'last_resort')
+
+		active_sub:unsubscribe()
+		in_use_sub:unsubscribe()
+		h.stop()
+	end)
+end
+
+
+function tests.test_speedtest_and_active_uplink_telemetry_share_product_interface_names()
+	run_virtual_fibers.run_auto(function (scope)
+		local h = start_active_scope_service(scope, { scope = 'all', live_weights = false, interval_s = 60 })
+		h.hal_names.wan_b = 'genb1234'
+		local sub_opts = { queue_len = 16, full = 'drop_oldest' }
+		local speed_sub = h.reader:subscribe({ 'obs', 'v1', 'net', 'metric', 'speedtest' }, sub_opts)
+		local active_sub = h.reader:subscribe({ 'obs', 'v1', 'net', 'metric', 'active_uplink' }, sub_opts)
+		local function drain(sub)
+			local out = {}
+			while true do
+				local which, msg = fibers.perform(op.named_choice({ ev = sub:recv_op(), timeout = sleep.sleep_op(0.3) }))
+				if which ~= 'ev' then return out end
+				out[#out + 1] = msg.payload
+			end
+		end
+		h.observe(false, true)
+		ok(h.tested(1), 'the modem is tested')
+		local names = {}
+		for _, p in ipairs(drain(speed_sub)) do names[p.namespace[2]] = true end
+		ok(names.wan_b, 'speedtest namespace uses the product interface')
+		eq(names.genb1234, nil, 'not the generated OpenWrt name')
+		local actives = drain(active_sub)
+		ok(#actives >= 1 and actives[#actives].value == 'wan_b', 'active_uplink names the same interface')
+		speed_sub:unsubscribe()
+		active_sub:unsubscribe()
+		h.stop()
+	end)
+end
+
+function tests.test_active_uplink_telemetry_is_refreshed_with_each_speedtest()
+	run_virtual_fibers.run_auto(function (scope)
+		-- The metrics service drops samples that arrive before it is configured,
+		-- so a value sent only on change could be lost until the next failover.
+		local h = start_active_scope_service(scope, { scope = 'all', live_weights = false, interval_s = 60 })
+		local active_sub = h.reader:subscribe({ 'obs', 'v1', 'net', 'metric', 'active_uplink' },
+			{ queue_len = 16, full = 'drop_oldest' })
+		h.observe(true, true)
+		ok(h.tested(2), 'both backhauls tested')
+		local values = {}
+		while true do
+			local which, msg = fibers.perform(op.named_choice({ ev = active_sub:recv_op(), timeout = sleep.sleep_op(0.3) }))
+			if which ~= 'ev' then break end
+			values[#values + 1] = msg.payload.value
+		end
+		ok(#values >= 3, 'sent on change and again with each speedtest, got ' .. #values)
+		for _, v in ipairs(values) do eq(v, 'wan_a') end
+		active_sub:unsubscribe()
+		h.stop()
+	end)
+end
+
+
+function tests.test_active_uplink_telemetry_is_refreshed_without_speedtests()
+	run_virtual_fibers.run_auto(function (scope)
+		-- Every backhaul offline: no speedtest runs, so the value must still be
+		-- re-sent on its own in case metrics dropped the first one at startup.
+		local h = start_active_scope_service(scope, { scope = 'all', live_weights = false, interval_s = 60 },
+			{ active_uplink_refresh_s = 0.2 })
+		local active_sub = h.reader:subscribe({ 'obs', 'v1', 'net', 'metric', 'active_uplink' },
+			{ queue_len = 16, full = 'drop_oldest' })
+		h.observe(false, false)
+		local values = {}
+		local deadline = fibers.now() + 1.0
+		while fibers.now() < deadline do
+			local which, msg = fibers.perform(op.named_choice({ ev = active_sub:recv_op(), timeout = sleep.sleep_op(0.3) }))
+			if which == 'ev' then values[#values + 1] = msg.payload.value end
+		end
+		eq(#h.speedtests, 0, 'nothing is online to test')
+		ok(#values >= 3, 'refreshed without speedtests, got ' .. #values)
+		for _, v in ipairs(values) do eq(v, 'last_resort') end
+		active_sub:unsubscribe()
+		h.stop()
+	end)
+end
 
 return tests

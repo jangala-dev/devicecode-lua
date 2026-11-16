@@ -6,7 +6,7 @@ local busmod         = require 'bus'
 
 local safe = require 'coxpcall'
 
-local runfibers      = require 'tests.support.run_fibers'
+local runfibers      = require 'tests.support.run_virtual_fibers'
 local probe          = require 'tests.support.bus_probe'
 local fake_hal_mod   = require 'tests.support.fake_hal'
 
@@ -27,7 +27,7 @@ local function config_timings()
 end
 
 function T.config_loads_from_hal_and_publishes_retained()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus  = busmod.new()
 		local conn = bus:connect()
 
@@ -69,7 +69,7 @@ function T.config_loads_from_hal_and_publishes_retained()
 end
 
 function T.config_accepts_set_and_persists_debounced()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus  = busmod.new()
 		local conn = bus:connect()
 
