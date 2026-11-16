@@ -4,6 +4,7 @@ local sleep = require 'fibers.sleep'
 local exec = require 'fibers.io.exec'
 local safe = require 'coxpcall'
 local runfibers = require 'tests.support.run_fibers'
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 local speedtest = require 'services.hal.backends.network.providers.openwrt.speedtest'
 local limits = require 'shared.speedtest'
 local T = {}
@@ -39,7 +40,7 @@ local function fixture(options, fn)
 		}
 	end
 	local ok, err = safe.pcall(function()
-		runfibers.run(function() fn(state) end, { timeout = 10 })
+		run_virtual_fibers.run_auto(function() fn(state) end, { timeout = 15 })
 	end)
 	exec.command = original
 	assert(ok, err)

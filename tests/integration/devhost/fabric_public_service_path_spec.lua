@@ -21,7 +21,7 @@ local fibers   = require 'fibers'
 local mailbox  = require 'fibers.mailbox'
 
 local probe    = require 'tests.support.bus_probe'
-local runfibers = require 'tests.support.run_fibers'
+local runfibers = require 'tests.support.run_virtual_fibers'
 
 local fabric   = require 'services.fabric'
 local protocol = require 'services.fabric.protocol'
@@ -341,7 +341,7 @@ local function connect_line_transports(a, b)
 end
 
 function T.fabric_start_bridges_local_and_remote_retained_state_over_composed_link()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus = busmod.new()
 		local conn = bus:connect()
 		local transport = new_line_transport()
@@ -393,7 +393,7 @@ function T.fabric_start_bridges_local_and_remote_retained_state_over_composed_li
 end
 
 function T.fabric_start_pair_bridges_publish_retained_and_rpc_over_composed_links()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus_a = busmod.new()
 		local bus_b = busmod.new()
 		local conn_a = bus_a:connect()
@@ -506,7 +506,7 @@ function T.fabric_start_pair_bridges_publish_retained_and_rpc_over_composed_link
 end
 
 function T.fabric_start_config_replacement_restarts_generation_and_closes_old_transport()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus = busmod.new()
 		local conn = bus:connect()
 		local transport_a = new_line_transport()
@@ -545,7 +545,7 @@ function T.fabric_start_config_replacement_restarts_generation_and_closes_old_tr
 end
 
 function T.fabric_exposes_public_transfer_manager_capability()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus = busmod.new()
 		local conn = bus:connect()
 		local transport = new_line_transport()
@@ -583,7 +583,7 @@ end
 
 
 function T.fabric_pair_sends_blob_to_registered_remote_transfer_target()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus_a = busmod.new()
 		local bus_b = busmod.new()
 		local conn_a = bus_a:connect()

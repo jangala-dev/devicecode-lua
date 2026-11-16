@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 local fibers = require 'fibers'
 local sleep  = require 'fibers.sleep'
 local cond   = require 'fibers.cond'
@@ -20,7 +21,7 @@ local function start_service(root_scope, params)
 	assert_true(ok, err); fibers.perform(sleep.sleep_op(0.02)); return child, caller, bus
 end
 function tests.test_manager_create_job_is_scoped_and_updates_status_model()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local child, caller = start_service(root_scope, { config={ schema='devicecode.update/1', components={ { component='cm5' } } } })
 		local reply, err = caller:call(topics.update_manager_rpc('create-job'), { job_id='j1', component='cm5', artifact_ref='artifact-1' }, { timeout=0.5 })
 		assert_not_nil(reply, err); assert_eq(reply.ok, true); assert_eq(reply.job.job_id, 'j1')
@@ -31,7 +32,7 @@ function tests.test_manager_create_job_is_scoped_and_updates_status_model()
 	end)
 end
 function tests.test_single_job_policy_replaces_previous_created_job()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local child, caller = start_service(root_scope, { config={ schema='devicecode.update/1', components={ { component='cm5' } } } })
 		assert(caller:call(topics.update_manager_rpc('create-job'), { job_id='j1', component='cm5', artifact_ref='artifact-j1' }, { timeout=0.5 }))
 		assert(caller:call(topics.update_manager_rpc('create-job'), { job_id='j2', component='cm5', artifact_ref='artifact-j2' }, { timeout=0.5 }))
@@ -49,7 +50,7 @@ end
 
 
 function tests.test_commit_job_persists_awaiting_return_before_reconcile()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local save_log = {}
 		local backend = { jobs = {} }
 		function backend:load_all_op() return op.always({ jobs = self.jobs, order = {} }, nil) end
@@ -101,7 +102,7 @@ function tests.test_commit_job_persists_awaiting_return_before_reconcile()
 end
 
 function tests.test_restart_adoption_keeps_awaiting_commit_committable()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local initial_jobs = { jobs = { j1 = { job_id='j1', component='cm5', state='awaiting_commit', created_seq=1, updated_seq=1 } } }
 		local child, caller = start_service(root_scope, {
 			config={ schema='devicecode.update/1', components={ { component='cm5' } } },
@@ -124,7 +125,7 @@ function tests.test_restart_adoption_keeps_awaiting_commit_committable()
 end
 
 function tests.test_restart_adoption_starts_reconcile_for_awaiting_return()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local ran_reconcile = false
 		local initial_jobs = { jobs = { j1 = { job_id='j1', component='cm5', state='awaiting_return', created_seq=1, updated_seq=1 } } }
 		local child, caller = start_service(root_scope, {
@@ -145,7 +146,7 @@ end
 
 
 function tests.test_slow_job_runtime_load_keeps_public_service_responsive()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local load_gate = cond.new()
 		local backend = { loaded = false, jobs = {} }
 		function backend:load_all_op()
@@ -230,7 +231,7 @@ end
 
 
 function tests.test_control_store_dependency_waits_until_available()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local bus = busmod.new()
 		retain_fake_artifact_store_status(bus, 'available')
 		local child, caller = start_service(root_scope, {
@@ -280,7 +281,7 @@ function tests.test_control_store_dependency_waits_until_available()
 end
 
 function tests.test_control_store_no_route_returns_to_waiting_not_failed()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local bus = busmod.new()
 		retain_fake_artifact_store_status(bus, 'available')
 		local status_conn = bus:connect()
@@ -313,7 +314,7 @@ function tests.test_control_store_no_route_returns_to_waiting_not_failed()
 end
 
 function tests.test_default_job_store_uses_control_store_and_reloads_after_restart()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local bus = busmod.new()
 		retain_fake_artifact_store_status(bus, 'available')
 		local control_scope = assert(root_scope:child())
@@ -359,7 +360,7 @@ end
 
 
 function tests.test_control_store_backend_failure_still_fails_update()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local bus = busmod.new()
 		retain_fake_artifact_store_status(bus, 'available')
 		local control_scope = assert(root_scope:child())
@@ -392,7 +393,7 @@ function tests.test_control_store_backend_failure_still_fails_update()
 end
 
 function tests.test_job_store_dependency_loss_cancels_and_reloads_runtime()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local bus = busmod.new()
 		retain_fake_artifact_store_status(bus, 'available')
 		local control_scope = assert(root_scope:child())
@@ -468,7 +469,7 @@ end
 
 
 function tests.test_artifact_store_dependency_gates_generation_after_job_store_ready()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local bus = busmod.new()
 		local control_scope = assert(root_scope:child())
 		bind_fake_control_store(control_scope, bus, {})

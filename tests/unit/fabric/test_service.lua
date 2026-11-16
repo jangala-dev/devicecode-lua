@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/fabric/test_service.lua
 
 local fibers = require 'fibers'
@@ -67,7 +68,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_successful_links_complete_service()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local st, rep, result = run_service {
 			service_id = 'fabric-test',
 
@@ -111,7 +112,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_link_failure_fails_service_by_default_policy()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local st, rep, primary = run_service {
 			service_id = 'fabric-test',
 
@@ -158,7 +159,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_link_failure_is_data_when_policy_allows_it()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local seen_failed = false
 
 		local st, rep, result = run_service {
@@ -218,7 +219,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_link_cancellation_fails_service_by_default_policy()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local st, _, primary = run_service {
 			service_id = 'fabric-test',
 
@@ -255,7 +256,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_duplicate_link_ids_are_rejected()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local st, _, primary = run_service {
 			service_id = 'fabric-test',
 
@@ -286,7 +287,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_service_result_exposes_snapshot_not_live_model()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local st, _, result = run_service {
 			service_id = 'fabric-test',
 
@@ -312,7 +313,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_complete_policy_before_all_links_fails_service()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local st, _, primary = run_service {
 			service_id = 'fabric-test',
 
@@ -365,7 +366,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_cancel_policy_state_does_not_regress_after_later_completion()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local st, _, result = run_service {
 			service_id = 'fabric-cancel-regression',
 
@@ -412,7 +413,7 @@ end
 -------------------------------------------------------------------------------
 
 function tests.test_link_runner_receives_narrowed_service_capability()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local saw_caps = false
 
 		local st, _, result = run_service {
@@ -468,7 +469,7 @@ local function minimal_compiled_config(link_id)
 end
 
 function tests.test_start_shell_loads_retained_config_and_starts_generation()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local bus = busmod.new()
 		local conn = bus:connect()
 		local seen = false
@@ -499,7 +500,7 @@ function tests.test_start_shell_loads_retained_config_and_starts_generation()
 end
 
 function tests.test_start_shell_replaces_generation_on_config_change_after_old_generation_stops()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local bus = busmod.new()
 		local conn = bus:connect()
 		local mailbox = require 'fibers.mailbox'

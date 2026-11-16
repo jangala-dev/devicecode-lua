@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/fabric/test_session.lua
 --
 -- Focused tests for fabric.session as the sole promoter of raw wire frames into
@@ -104,7 +105,7 @@ local function admit_wire_error(tx, err)
 end
 
 function tests.test_session_establishes_and_emits_lifecycle_to_both_lanes()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local h = start_session(scope, {
 			identity_claim = { id = 'cm5' },
 		})
@@ -134,7 +135,7 @@ function tests.test_session_establishes_and_emits_lifecycle_to_both_lanes()
 end
 
 function tests.test_non_session_frames_are_dropped_until_session_is_established()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local h = start_session(scope)
 		recv_with_timeout(h.control_rx, 'initial hello')
 
@@ -160,7 +161,7 @@ function tests.test_non_session_frames_are_dropped_until_session_is_established(
 end
 
 function tests.test_transfer_frames_are_tagged_for_transfer_lane_only()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local h = start_session(scope)
 		recv_with_timeout(h.control_rx, 'initial hello')
 		admit_frame(h.frame_tx, assert(protocol.hello_ack('mcu-sid', 'mcu')))
@@ -183,7 +184,7 @@ function tests.test_transfer_frames_are_tagged_for_transfer_lane_only()
 end
 
 function tests.test_new_peer_sid_drops_old_generation_and_starts_next_generation()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local h = start_session(scope)
 		recv_with_timeout(h.control_rx, 'initial hello')
 
@@ -216,7 +217,7 @@ end
 
 
 function tests.test_wire_errors_below_limit_are_counted_without_dropping_session()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local h = start_session(scope, { bad_frame_limit = 3, bad_frame_window_s = 10 })
 		recv_with_timeout(h.control_rx, 'initial hello')
 		admit_frame(h.frame_tx, assert(protocol.hello_ack('mcu-sid', 'mcu')))
@@ -240,7 +241,7 @@ function tests.test_wire_errors_below_limit_are_counted_without_dropping_session
 end
 
 function tests.test_bad_frame_limit_drops_current_peer_session()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local h = start_session(scope, { bad_frame_limit = 2, bad_frame_window_s = 10 })
 		recv_with_timeout(h.control_rx, 'initial hello')
 		admit_frame(h.frame_tx, assert(protocol.hello_ack('mcu-sid', 'mcu')))
@@ -269,7 +270,7 @@ function tests.test_bad_frame_limit_drops_current_peer_session()
 end
 
 function tests.test_outbound_gate_accepts_only_current_session_context()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local control_tx, control_rx = mailbox.new(4, { full = 'reject_newest' })
 		local rpc_tx, rpc_rx = mailbox.new(4, { full = 'reject_newest' })
 		local bulk_tx, bulk_rx = mailbox.new(4, { full = 'reject_newest' })

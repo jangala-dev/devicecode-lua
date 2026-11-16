@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/fabric/test_bridge.lua
 --
 -- Contract tests for the callback-free Fabric RPC bridge and local bus adapter.
@@ -151,7 +152,7 @@ local function close_bridge(h)
 end
 
 function tests.test_local_publish_is_mapped_and_sent_through_session_gate()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local h = start_bridge(scope)
 		assert_true(h.session_tx:send(peer_session_event()))
 		local state = recv_with_timeout(h.state_rx, 'initial state')
@@ -168,7 +169,7 @@ function tests.test_local_publish_is_mapped_and_sent_through_session_gate()
 end
 
 function tests.test_remote_retained_publish_emits_bus_command_and_updates_import_count()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local h = start_bridge(scope)
 		assert_true(h.session_tx:send(peer_session_event()))
 		assert_true(h.session_tx:send(rpc_event(assert(protocol.pub({ 'state', 'self', 'software' }, { image_id = 'i1' }, true)))))
@@ -183,7 +184,7 @@ function tests.test_remote_retained_publish_emits_bus_command_and_updates_import
 end
 
 function tests.test_remote_event_publish_maps_to_telemetry_cap_event_topic()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local h = start_bridge(scope)
 		assert_true(h.session_tx:send(peer_session_event()))
 		assert_true(h.session_tx:send(rpc_event(assert(protocol.pub(
@@ -209,7 +210,7 @@ function tests.test_remote_event_publish_maps_to_telemetry_cap_event_topic()
 end
 
 function tests.test_peer_session_change_clears_imported_retained_state_by_bus_command()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local h = start_bridge(scope)
 		assert_true(h.session_tx:send(peer_session_event(1, 'sid-1')))
 		assert_true(h.session_tx:send(rpc_event(assert(protocol.pub({ 'state', 'self', 'updater' }, { state = 'ready' }, true)), 1, 'sid-1')))
@@ -223,7 +224,7 @@ function tests.test_peer_session_change_clears_imported_retained_state_by_bus_co
 end
 
 function tests.test_peer_session_drop_clears_imported_retained_state_by_bus_command()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local h = start_bridge(scope)
 		assert_true(h.session_tx:send(peer_session_event(1, 'sid-1')))
 		assert_true(h.session_tx:send(rpc_event(assert(protocol.pub({ 'state', 'self', 'software' }, { image_id = 'i1' }, true)), 1, 'sid-1')))
@@ -238,7 +239,7 @@ function tests.test_peer_session_drop_clears_imported_retained_state_by_bus_comm
 end
 
 function tests.test_stale_peer_drop_does_not_clear_current_imported_state()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local h = start_bridge(scope)
 		assert_true(h.session_tx:send(peer_session_event(1, 'sid-1')))
 		assert_true(h.session_tx:send(rpc_event(assert(protocol.pub({ 'state', 'self', 'software' }, { image_id = 'i1' }, true)), 1, 'sid-1')))
@@ -255,7 +256,7 @@ function tests.test_stale_peer_drop_does_not_clear_current_imported_state()
 end
 
 function tests.test_inbound_call_is_routed_to_bus_command_and_reply_frame_is_sent()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local h = start_bridge(scope)
 		assert_true(h.session_tx:send(peer_session_event()))
 		assert_true(h.session_tx:send(rpc_event(assert(protocol.call('call-1', { 'cap', 'test-remote', 'main', 'rpc', 'echo' }, { n = 1 })))))
@@ -275,7 +276,7 @@ function tests.test_inbound_call_is_routed_to_bus_command_and_reply_frame_is_sen
 end
 
 function tests.test_outbound_call_sends_call_frame_and_routes_remote_reply_to_request()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local h = start_bridge(scope)
 		assert_true(h.session_tx:send(peer_session_event()))
 		local req = fake_request()
@@ -296,7 +297,7 @@ function tests.test_outbound_call_sends_call_frame_and_routes_remote_reply_to_re
 end
 
 function tests.test_bus_adapter_remote_commands_use_local_bus_methods()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local command_tx, command_rx = mailbox.new(8, { full = 'reject_newest' })
 		local calls = {}
 		local conn = {}

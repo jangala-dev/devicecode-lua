@@ -6,7 +6,7 @@
 local busmod = require 'bus'
 local fibers = require 'fibers'
 
-local runfibers = require 'tests.support.run_fibers'
+local runfibers = require 'tests.support.run_virtual_fibers'
 local probe     = require 'tests.support.bus_probe'
 
 local device_service = require 'services.device.service'
@@ -114,7 +114,7 @@ local function transfer_client_for(conn)
 end
 
 function T.device_observes_raw_member_truth_and_publishes_canonical_component_state()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local h = start_device(scope)
 		local conn = h.caller
 
@@ -163,7 +163,7 @@ function T.device_observes_raw_member_truth_and_publishes_canonical_component_st
 end
 
 function T.device_stage_update_calls_public_transfer_manager_capability()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus = busmod.new()
 		local caller = bus:connect()
 		local source_terminated = 0

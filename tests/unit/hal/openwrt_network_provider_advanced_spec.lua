@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/hal/openwrt_network_provider_advanced_spec.lua
 
 local fibers = require 'fibers'
@@ -438,7 +439,7 @@ local function restart_with_mwan3_states(states, opts)
 			logs[#logs + 1] = { level = level, what = payload.what, outcome = payload.outcome }
 		end
 	end
-	fibers.run(function()
+	run_virtual_fibers.run_auto(function()
 		local provider = ok(provider_loader.new({
 			provider = 'openwrt',
 			allow_fake_uci = true,
@@ -696,7 +697,7 @@ end
 
 function tests.test_terminate_stops_a_superseded_repair()
 	local finished, cancelled = 0, 0
-	fibers.run(function()
+	run_virtual_fibers.run_auto(function()
 		local sleep = require 'fibers.sleep'
 		local provider = ok(provider_loader.new({
 			provider = 'openwrt', allow_fake_uci = true, mwan3_guard_interval_s = 0.01, mwan3_guard_checks = 6,

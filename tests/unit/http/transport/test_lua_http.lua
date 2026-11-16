@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 local fibers = require 'fibers'
 local sleep  = require 'fibers.sleep'
 local runtime = require 'fibers.runtime'
@@ -98,7 +99,7 @@ function M.test_listener_admits_context_and_accept_op_returns_it()
 	local listener = listener_with()
 	local ctx = lua_http._new_context_for_test(listener, listener:_raw_server_for_test(), fake_stream())
 
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		assert(listener:_admit_context(ctx))
 		local got, err = fibers.perform(listener:accept_op())
 		eq(got, ctx)
@@ -124,7 +125,7 @@ end
 function M.test_listener_terminate_wakes_accept_waiter()
 	local listener = listener_with()
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local got, err
 		assert(scope:spawn(function ()
 			got, err = fibers.perform(listener:accept_op())
@@ -142,7 +143,7 @@ function M.test_http_context_stream_ops_run_on_command_loop()
 	local stream = fake_stream()
 	local ctx = lua_http._new_context_for_test(listener, listener:_raw_server_for_test(), stream)
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local ok_write, err
 		assert(scope:spawn(function ()
 			ok_write, err = fibers.perform(ctx:write_chunk_op('abc', true))
@@ -166,7 +167,7 @@ function M.test_http_context_read_helpers_preserve_http_semantics()
 	local stream = fake_stream()
 	local ctx = lua_http._new_context_for_test(listener, listener:_raw_server_for_test(), stream)
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local body
 		assert(scope:spawn(function ()
 			body = fibers.perform(ctx:read_body_as_string_op())
@@ -187,7 +188,7 @@ function M.test_http_context_stream_ops_pass_intra_stream_timeout()
 	local stream = fake_stream()
 	local ctx = lua_http._new_context_for_test(listener, listener:_raw_server_for_test(), stream)
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		assert(scope:spawn(function () fibers.perform(ctx:read_chunk_op()) end))
 		yield_many(3)
 		ok(ctx:_drain_one_for_test())
@@ -206,7 +207,7 @@ function M.test_losing_stream_command_is_abandoned_and_not_run()
 	local ran = false
 	local aborted = false
 
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local which = fibers.perform(fibers.named_choice {
 			winner = fibers.always('now'),
 			cmd = ctx:run_stream_op('loser', function () ran = true; return true end, {
@@ -231,7 +232,7 @@ function M.test_losing_active_stream_command_terminates_context()
 	local active = false
 	local release = false
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local waiter = assert(scope:child())
 		assert(waiter:spawn(function ()
 			fibers.perform(ctx:run_stream_op('active_loser', function ()
@@ -268,7 +269,7 @@ function M.test_losing_active_write_command_terminates_context()
 	}
 	local ctx = lua_http._new_context_for_test(listener, listener:_raw_server_for_test(), stream)
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local waiter = assert(scope:child())
 		assert(waiter:spawn(function ()
 			fibers.perform(ctx:write_chunk_op('payload', false))
@@ -288,7 +289,7 @@ function M.test_context_terminate_wakes_pending_stream_command()
 	local listener = listener_with()
 	local ctx = lua_http._new_context_for_test(listener, listener:_raw_server_for_test(), fake_stream())
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local result, err
 		assert(scope:spawn(function ()
 			result, err = fibers.perform(ctx:run_stream_op('pending', function () return 'late' end))
@@ -327,7 +328,7 @@ function M.test_listener_terminate_does_not_terminate_accepted_context_after_tra
 	}
 	local ctx = lua_http._new_context_for_test(listener, server, fake_stream())
 
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		assert(listener:_admit_context(ctx))
 		local got = fibers.perform(listener:accept_op())
 		eq(got, ctx)
@@ -353,7 +354,7 @@ function M.test_listener_listen_op_runs_via_driver()
 	local drv = assert(driver_mod.new { controller = ctl })
 	local listener = listener_with { server = server, driver = drv }
 
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		assert(drv:start(scope))
 		local ok_listen = fibers.perform(listener:listen_op())
 		eq(ok_listen, true)
@@ -367,7 +368,7 @@ end
 function M.test_listener_start_can_target_started_parent_scope_from_child_scope()
 	local listener = listener_with()
 
-	fibers.run(function (parent)
+	run_virtual_fibers.run_auto(function (parent)
 		local child = assert(parent:child())
 		local started, start_err
 

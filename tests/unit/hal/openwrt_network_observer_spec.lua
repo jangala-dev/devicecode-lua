@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/hal/openwrt_network_observer_spec.lua
 
 local fibers = require 'fibers'
@@ -12,7 +13,7 @@ local function ok(v, msg) if not v then fail(msg) end return v end
 local function eq(a, b, msg) if a ~= b then fail((msg or 'assertion failed') .. ': expected ' .. tostring(b) .. ', got ' .. tostring(a)) end end
 
 function tests.test_observer_coalesces_wakeups_then_snapshots()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local emitted = {}
 		local snapshots = {}
 		local obs = ok(observer_mod.new({
@@ -52,7 +53,7 @@ end
 
 
 function tests.test_observer_ignores_transient_mwan3_phases()
-	fibers.run(function (scope)
+	run_virtual_fibers.run_auto(function (scope)
 		local emitted = {}
 		local snapshots = {}
 		local logs = {}

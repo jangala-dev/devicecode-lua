@@ -3,7 +3,7 @@
 local fibers = require 'fibers'
 local op = require 'fibers.op'
 local mailbox = require 'fibers.mailbox'
-local runfibers = require 'tests.support.run_fibers'
+local runfibers = require 'tests.support.run_virtual_fibers'
 
 local wan_runtime = require 'services.net.wan_runtime'
 local wan_manager = require 'services.net.wan_manager'
@@ -16,7 +16,7 @@ local function ok(v, msg) if not v then error(msg or 'assertion failed', 2) end 
 local function eq(a, b, msg) if a ~= b then error((msg or 'assertion failed') .. ': expected ' .. tostring(b) .. ', got ' .. tostring(a), 2) end end
 
 function tests.test_speedtest_service_timeout_aborts_hal_bus_op_without_hidden_bus_timeout()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local done_tx, done_rx = mailbox.new(8, { full = 'reject_newest' })
 		local seen_opts
 		local aborted = false
@@ -49,7 +49,7 @@ end
 
 
 function tests.test_speedtest_allows_setup_time_beyond_payload_window()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local done_tx, done_rx = mailbox.new(8, { full = 'reject_newest' })
 		local hal = {
 			speedtest_op = function()
@@ -70,7 +70,7 @@ end
 
 
 function tests.test_reconcile_applies_live_weights_when_speedtests_are_fresh()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local done_tx, done_rx = mailbox.new(8, { full = 'reject_newest' })
 		local applied
 		local hal = {
@@ -149,7 +149,7 @@ end
 -- Strict failover relies on this: with speed tests off, live weights never
 -- replace mwan3's metric-ordered policy chain, even with usable results.
 function tests.test_reconcile_applies_no_live_weights_when_speedtests_are_disabled()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local sleep = require 'fibers.sleep'
 		local done_tx, done_rx = mailbox.new(8, { full = 'reject_newest' })
 		local wan_key = 'v1|wan|wan||host-multiwan||ipv4|203.0.113.10|'
@@ -227,7 +227,7 @@ function tests.test_reconcile_applies_no_live_weights_when_speedtests_are_disabl
 end
 
 function tests.test_live_weights_service_timeout_aborts_hal_bus_op_without_hidden_bus_timeout()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local done_tx, done_rx = mailbox.new(8, { full = 'reject_newest' })
 		local seen_opts
 		local aborted = false
@@ -258,7 +258,7 @@ function tests.test_live_weights_service_timeout_aborts_hal_bus_op_without_hidde
 end
 
 function tests.test_interface_restart_reports_identity_and_passes_no_bus_timeout()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local sleep = require 'fibers.sleep'
 		local done_tx, done_rx = mailbox.new(8, { full = 'reject_newest' })
 		local seen_req, seen_opts
@@ -290,7 +290,7 @@ function tests.test_interface_restart_reports_identity_and_passes_no_bus_timeout
 end
 
 local function check_running_speedtest_observations(missing_observation)
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local done_tx = mailbox.new(8, { full = 'reject_newest' })
 		local model = model_mod.new('net-test')
 		model:update(function(s)
@@ -346,7 +346,7 @@ function tests.test_missing_observation_preserves_running_speedtest()
 end
 
 function tests.test_due_speedtests_launch_one_at_a_time()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local done_tx = mailbox.new(8, { full = 'reject_newest' })
 		local model = model_mod.new('net-test')
 		local ids = { 'wan', 'sim_a', 'sim_b' }
@@ -389,7 +389,7 @@ function tests.test_due_speedtests_launch_one_at_a_time()
 end
 
 function tests.test_offline_uplink_releases_slot_for_due_uplink_in_same_reconcile()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local done_tx = mailbox.new(8, { full = 'reject_newest' })
 		local model = model_mod.new('net-test')
 		model:update(function(s)
@@ -502,7 +502,7 @@ local function finish(state, uplink_id, active, mbps)
 end
 
 function tests.test_active_scope_tests_only_the_active_uplink_and_never_changes_weights()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local clock, extra = { t = 100 }, {}
 		local model = active_scope_model()
 		local state = active_scope_state(scope, model, clock, extra)
@@ -532,7 +532,7 @@ function tests.test_active_scope_tests_only_the_active_uplink_and_never_changes_
 end
 
 function tests.test_active_scope_leaves_existing_weights_untouched()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local clock, extra = { t = 100 }, {}
 		local model = active_scope_model()
 		local previous = { { id = 'wan', interface = 'wan', metric = 1, weight = 1 } }
@@ -553,7 +553,7 @@ function tests.test_active_scope_leaves_existing_weights_untouched()
 end
 
 function tests.test_active_scope_retests_after_failover_and_failback()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local clock, extra = { t = 100 }, {}
 		local model = active_scope_model()
 		local state = active_scope_state(scope, model, clock, extra)
@@ -592,7 +592,7 @@ function tests.test_active_scope_retests_after_failover_and_failback()
 end
 
 function tests.test_active_scope_same_uplink_is_not_retested_before_interval()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local clock, extra = { t = 100 }, {}
 		local model = active_scope_model()
 		local state = active_scope_state(scope, model, clock, extra)
@@ -610,7 +610,7 @@ function tests.test_active_scope_same_uplink_is_not_retested_before_interval()
 end
 
 function tests.test_active_scope_flapping_within_damping_window_does_not_retest()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local clock, extra = { t = 100 }, {}
 		local model = active_scope_model({ failover_retest_min_s = 300 })
 		local state = active_scope_state(scope, model, clock, extra)
@@ -640,7 +640,7 @@ function tests.test_active_scope_flapping_within_damping_window_does_not_retest(
 end
 
 function tests.test_active_scope_cancels_test_on_uplink_that_stopped_carrying_traffic()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local clock, extra = { t = 100 }, {}
 		local model = active_scope_model()
 		model:update(function(s)
@@ -662,7 +662,7 @@ end
 
 function tests.test_active_scope_runs_nothing_without_an_active_uplink()
 	for _, lr in ipairs({ 'default', 'unreachable' }) do
-		runfibers.run(function(scope)
+		runfibers.run_auto(function(scope)
 			local clock, extra = { t = 100 }, {}
 			local model = active_scope_model({ last_resort = lr })
 			set_online(model, {})
@@ -695,7 +695,7 @@ function tests.test_apply_keeps_active_scope_acknowledgement_for_current_members
 end
 
 function tests.test_active_scope_tests_the_active_member_when_ids_and_interfaces_collide()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local clock, extra = { t = 100 }, {}
 		local model = model_mod.new('net-test')
 		model:update(function(s)
@@ -739,7 +739,7 @@ local function launched(state)
 end
 
 function tests.test_every_backhaul_is_tested_active_first_without_weight_changes()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local clock, extra = { t = 100 }, {}
 		local model = every_backhaul_model()
 		model:update(function(s)
@@ -781,7 +781,7 @@ function tests.test_every_backhaul_is_tested_active_first_without_weight_changes
 end
 
 function tests.test_every_backhaul_mode_retests_the_new_active_backhaul_after_failover()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local clock, extra = { t = 100 }, {}
 		local model = every_backhaul_model()
 		local state = active_scope_state(scope, model, clock, extra)
@@ -807,7 +807,7 @@ function tests.test_every_backhaul_mode_retests_the_new_active_backhaul_after_fa
 end
 
 function tests.test_every_backhaul_mode_skips_offline_standby()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local clock, extra = { t = 100 }, {}
 		local model = every_backhaul_model()
 		set_online(model, { wan = true })
@@ -833,7 +833,7 @@ local function add_member(model, id, iface, metric, online)
 end
 
 function tests.test_every_backhaul_mode_shares_test_time_fairly_when_tests_overrun_the_interval()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local clock, extra = { t = 100 }, {}
 		local model = every_backhaul_model()
 		add_member(model, 'modem_secondary', 'modem_secondary', 3, true)
@@ -854,7 +854,7 @@ function tests.test_every_backhaul_mode_shares_test_time_fairly_when_tests_overr
 end
 
 function tests.test_every_backhaul_mode_tests_a_shared_interface_once()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local clock, extra = { t = 100 }, {}
 		local model = every_backhaul_model()
 		-- A second member on the wired interface, at a higher metric.

@@ -2,7 +2,7 @@ local busmod       = require 'bus'
 local fibers       = require 'fibers'
 local sleep        = require 'fibers.sleep'
 local op           = require 'fibers.op'
-local runfibers    = require 'tests.support.run_fibers'
+local runfibers    = require 'tests.support.run_virtual_fibers'
 local fake_hal_mod = require 'tests.support.fake_hal'
 local cap_sdk      = require 'services.hal.sdk.cap'
 
@@ -19,7 +19,7 @@ local function topic_eq(a, b)
 end
 
 function T.legacy_cap_listener_retains_sync_wrappers()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local bus = busmod.new()
 		fake_hal_mod.new({
 			caps = { read_state = true },
@@ -50,7 +50,7 @@ function T.legacy_cap_listener_retains_sync_wrappers()
 end
 
 function T.curated_cap_listener_is_op_only_and_composes()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local bus = busmod.new()
 		fake_hal_mod.new({
 			caps = { read_state = true },
@@ -84,7 +84,7 @@ function T.curated_cap_listener_is_op_only_and_composes()
 end
 
 function T.curated_cap_listener_fails_loudly_without_mailbox_backing()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local fake_sub = {
 			unsubscribe = function() end,
 		}
@@ -105,7 +105,7 @@ function T.curated_cap_listener_fails_loudly_without_mailbox_backing()
 end
 
 function T.curated_cap_listener_reports_closed_subscription()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local bus = busmod.new()
 		local conn = bus:connect()
 		local listener = cap_sdk.new_curated_cap_listener(conn, 'fs', 'config')
@@ -119,7 +119,7 @@ function T.curated_cap_listener_reports_closed_subscription()
 end
 
 function T.curated_cap_listener_ignores_removed_status()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local bus = busmod.new()
 		local admin = bus:connect()
 		local listener = cap_sdk.new_curated_cap_listener(bus:connect(), 'fs', 'config')
@@ -144,7 +144,7 @@ function T.curated_cap_listener_ignores_removed_status()
 end
 
 function T.curated_cap_listener_ignores_malformed_status_payload()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local bus = busmod.new()
 		local admin = bus:connect()
 		local listener = cap_sdk.new_curated_cap_listener(bus:connect(), 'fs', 'config')
@@ -169,7 +169,7 @@ function T.curated_cap_listener_ignores_malformed_status_payload()
 end
 
 function T.curated_ref_routes_meta_status_state_event_and_control_topics()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local seen = {}
 
 		local conn = {
@@ -202,7 +202,7 @@ function T.curated_ref_routes_meta_status_state_event_and_control_topics()
 end
 
 function T.raw_host_ref_routes_topics()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local seen = {}
 
 		local conn = {
@@ -234,7 +234,7 @@ function T.raw_host_ref_routes_topics()
 end
 
 function T.raw_member_ref_routes_topics()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local seen = {}
 
 		local conn = {
@@ -266,7 +266,7 @@ function T.raw_member_ref_routes_topics()
 end
 
 function T.raw_host_listener_requires_structured_status_not_legacy_added()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local bus = busmod.new()
 		local admin = bus:connect()
 		local listener = cap_sdk.new_raw_host_cap_listener(bus:connect(), 'uart_main', 'uart', 'main')
@@ -284,7 +284,7 @@ function T.raw_host_listener_requires_structured_status_not_legacy_added()
 end
 
 function T.raw_host_listener_ignores_removed_status()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local bus = busmod.new()
 		local admin = bus:connect()
 		local listener = cap_sdk.new_raw_host_cap_listener(bus:connect(), 'uart_main', 'uart', 'main')
@@ -305,7 +305,7 @@ function T.raw_host_listener_ignores_removed_status()
 end
 
 function T.raw_host_listener_accepts_structured_status()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local bus = busmod.new()
 		local admin = bus:connect()
 		local listener = cap_sdk.new_raw_host_cap_listener(bus:connect(), 'uart_main', 'uart', 'main')

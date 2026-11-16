@@ -3,7 +3,7 @@ local sleep = require 'fibers.sleep'
 local pulse = require 'fibers.pulse'
 local channel = require 'fibers.channel'
 local safe = require 'coxpcall'
-local runfibers = require 'tests.support.run_fibers'
+local runfibers = require 'tests.support.run_virtual_fibers'
 local at = require 'services.hal.backends.modem.at'
 local linux_mm = require 'services.hal.backends.modem.providers.linux_mm.impl'
 local quectel = require 'services.hal.backends.modem.models.quectel'
@@ -31,7 +31,7 @@ local function with_at(responder, body, timeout)
 		return responder(command, #commands)
 	end
 	local ok, err = safe.pcall(function()
-		runfibers.run(function() body(backend(), commands) end, { timeout = timeout or 2 })
+		runfibers.run_auto(function() body(backend(), commands) end, { timeout = timeout or 2 })
 	end)
 	at.send_op = saved
 	assert(ok, err)
@@ -429,7 +429,7 @@ function tests.test_pdp_driver_dispatches_set_and_restart_and_advertises_capabil
 end
 
 function tests.test_pdp_driver_emits_existing_groups_without_fetching_pdp()
-	runfibers.run(function()
+	runfibers.run_auto(function()
 		local fetched, emitted, count = {}, {}, 0
 		local m = modem({})
 		m.log = { debug = function() end }
@@ -457,7 +457,7 @@ function tests.test_pdp_driver_emits_existing_groups_without_fetching_pdp()
 end
 
 function tests.test_pdp_driver_updates_guard_before_publishing_state()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local events = channel.new(2)
 		local done = channel.new(1)
 		events:put({ to = 'registered', from = 'enabled' })

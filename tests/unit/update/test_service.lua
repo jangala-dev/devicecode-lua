@@ -1,3 +1,4 @@
+local run_virtual_fibers = require 'tests.support.run_virtual_fibers'
 -- tests/unit/update/test_service.lua
 
 local fibers = require 'fibers'
@@ -30,7 +31,7 @@ function tests.test_public_update_module_exports_start_and_run()
 end
 
 function tests.test_service_run_completes_with_injected_generation_runner()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local st, rep, result = run_service_once {
 			publish = false,
 			service_id = 'update',
@@ -53,7 +54,7 @@ function tests.test_service_run_completes_with_injected_generation_runner()
 end
 
 function tests.test_manager_status_request_replies_immediately()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local bus = busmod.new()
 		local svc_conn = bus:connect()
 		local caller = bus:connect()
@@ -83,7 +84,7 @@ function tests.test_manager_status_request_replies_immediately()
 end
 
 function tests.test_config_change_replaces_generation()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local bus = busmod.new()
 		local svc_conn = bus:connect()
 		local cfg_conn = bus:connect()
@@ -131,7 +132,7 @@ end
 
 
 function tests.test_service_shell_owns_status_and_routes_generation_commands_to_private_queue()
-	fibers.run(function (root_scope)
+	run_virtual_fibers.run_auto(function (root_scope)
 		local bus = busmod.new()
 		local svc_conn = bus:connect()
 		local caller = bus:connect()
@@ -179,7 +180,7 @@ function tests.test_service_shell_owns_status_and_routes_generation_commands_to_
 end
 
 function tests.test_publisher_failure_is_supervised_component_failure()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local bus = busmod.new({
 			authoriser = function (ctx)
 				if ctx.action == 'retain' then return false, 'retain_denied' end
@@ -214,7 +215,7 @@ function tests.test_service_uses_shared_config_watch_helper()
 end
 
 function tests.test_service_start_path_allows_injected_config_watch_for_harnesses()
-	fibers.run(function ()
+	run_virtual_fibers.run_auto(function ()
 		local rx = {
 			recv_op = function () return sleep.sleep_op(10) end,
 		}

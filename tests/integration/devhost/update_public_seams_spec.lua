@@ -7,7 +7,7 @@
 local busmod = require 'bus'
 local fibers = require 'fibers'
 
-local runfibers = require 'tests.support.run_fibers'
+local runfibers = require 'tests.support.run_virtual_fibers'
 local probe     = require 'tests.support.bus_probe'
 
 local service = require 'services.update.service'
@@ -120,7 +120,7 @@ local function body_from_chunks(chunks)
 end
 
 function T.update_public_manager_retains_capabilities_and_compact_component_state()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local h = start_update(scope)
 		local conn = h.caller
 
@@ -162,7 +162,7 @@ function T.update_public_manager_retains_capabilities_and_compact_component_stat
 end
 
 function T.update_artifact_ingest_uses_public_cap_and_compact_job_state()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local h = start_update(scope)
 		local conn = h.caller
 		local sink = new_sink({ artifact_id = 'artifact-ingest-1', ref = 'artifact-ingest-1' })
@@ -202,7 +202,7 @@ function T.update_artifact_ingest_uses_public_cap_and_compact_job_state()
 end
 
 function T.ui_upload_drives_update_public_ingest_and_manager_caps()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local bus = busmod.new()
 		local h = start_update(scope, { bus = bus })
 		local conn = h.caller

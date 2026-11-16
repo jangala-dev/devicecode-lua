@@ -4,7 +4,8 @@ local fibers     = require 'fibers'
 local op         = require 'fibers.op'
 local channel    = require 'fibers.channel'
 
-local runfibers  = require 'tests.support.run_fibers'
+local runfibers  = require 'tests.support.run_virtual_fibers'
+local run_real_fibers = require 'tests.support.run_fibers'
 local cap_sdk    = require 'services.hal.sdk.cap'
 local core_types = require 'services.hal.types.core'
 local cap_types  = require 'services.hal.types.capabilities'
@@ -308,7 +309,7 @@ local function with_real_hal(scope, patches, body, hal_opts)
 end
 
 function T.non_legacy_managers_must_expose_op_methods()
-	runfibers.run(function(scope)
+	run_real_fibers.run(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
 		local legacy_mgr = new_capability_manager{
 			name = 'legacy_mgr',
@@ -359,7 +360,7 @@ function T.non_legacy_managers_must_expose_op_methods()
 end
 
 function T.op_manager_methods_work_through_real_hal()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
 		local op_mgr = new_capability_manager{
 			name = 'op_mgr',
@@ -404,7 +405,7 @@ end
 
 
 function T.strict_manager_shutdown_uses_shutdown_op()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
 		local op_mgr = new_capability_manager{
 			name = 'shutdown_mgr',
@@ -447,7 +448,7 @@ function T.strict_manager_shutdown_uses_shutdown_op()
 end
 
 function T.legacy_manager_shutdown_uses_stop_compatibility()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
 		local legacy_mgr = new_capability_manager{
 			name = 'legacy_shutdown_mgr',
@@ -490,7 +491,7 @@ function T.legacy_manager_shutdown_uses_stop_compatibility()
 end
 
 function T.op_manager_start_timeout_does_not_block_later_config()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
 		local hanging = new_hanging_start_manager()
 		local good = new_capability_manager{
@@ -537,7 +538,7 @@ function T.op_manager_start_timeout_does_not_block_later_config()
 end
 
 function T.op_manager_apply_timeout_does_not_block_later_config()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
 		local hanging_apply = new_hanging_apply_manager()
 		local good = new_capability_manager{
@@ -587,7 +588,7 @@ end
 
 
 function T.op_manager_apply_timeout_reports_pending_not_failed()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
 		local hanging_apply = new_hanging_apply_manager()
 
@@ -649,7 +650,7 @@ end
 
 
 function T.manager_lifecycle_pump_drains_device_events_during_config_apply()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
 		local patches = {
 			['services.hal.managers.filesystem'] = fs_manager,
@@ -727,7 +728,7 @@ function T.hal_config_application_uses_generation_worker_completion_events()
 end
 
 function T.unsupported_control_verb_returns_no_route()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
 		local mgr = new_capability_manager{
 			name = 'verb_mgr',
@@ -764,7 +765,7 @@ function T.unsupported_control_verb_returns_no_route()
 end
 
 function T.capability_no_reply_is_completed_by_hal_control_timeout()
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
 		local mgr = new_capability_manager{
 			name = 'timeout_mgr',
@@ -818,7 +819,7 @@ function T.capability_no_reply_is_completed_by_hal_control_timeout()
 end
 
 function T.strict_manager_contract_requires_terminate_and_fault_op()
-	runfibers.run(function(scope)
+	run_real_fibers.run(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
 		local strict_mgr = {
 			api_mode = 'op_only',
@@ -884,7 +885,7 @@ function T.network_manager_control_loops_start_after_driver_configured()
 end
 
 local function check_late_reply(mode)
-	runfibers.run(function(scope)
+	runfibers.run_auto(function(scope)
 		local entered, release = channel.new(1), channel.new()
 		local mgr = new_capability_manager{
 			name = 'late_reply_mgr',
