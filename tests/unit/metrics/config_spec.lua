@@ -166,12 +166,12 @@ function T.bigbox_v1_cm2_config_sends_power_board_uptime_and_boot_id()
 	end
 end
 
--- Every BigBox target sends the system service's `temp` (CPU temperature) and
+-- Every BigBox target and Get Box V2 send the system service's `temp` (CPU temperature) and
 -- `board_revision`. Both are emitted by services/system.lua; without a pipeline
 -- the metrics service drops them (bigbox-ss lost temp, v0.11 lost board_revision).
 function T.bigbox_configs_send_temp_and_board_revision()
 	local cjson = require 'cjson.safe'
-	for _, target in ipairs({ 'bigbox-v1-cm', 'bigbox-v1-cm-2', 'bigbox-ss' }) do
+	for _, target in ipairs({ 'bigbox-v1-cm', 'bigbox-v1-cm-2', 'bigbox-ss', 'getbox-v2' }) do
 		local path = 'src/configs/' .. target .. '.json'
 		local f = io.open(path, 'rb') or io.open('../' .. path, 'rb')
 		assert(f, 'unable to read ' .. path)

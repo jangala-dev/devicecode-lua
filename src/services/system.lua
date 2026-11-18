@@ -774,6 +774,7 @@ function SystemService.start(conn, opts)
 end
 
 SystemService._test = {
+	validate_config = validate_config,
 	publish_platform_identity_metrics = publish_platform_identity_metrics,
 	read_platform_identity = read_platform_identity,
 	publish_sysinfo_metrics = publish_sysinfo_metrics,

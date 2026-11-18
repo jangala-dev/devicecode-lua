@@ -7,7 +7,8 @@ local M = {}
 
 local ALLOWED = {
 	'enabled', 'upstreams', 'search', 'zones', 'records', 'forwarders',
-	'cache', 'security', 'domain', 'host_files', 'service_discovery', 'metadata', 'extensions',
+	'cache', 'security', 'domain', 'host_files', 'service_discovery', 'loopback_segment',
+	'metadata', 'extensions',
 }
 
 -- Build a service record with a valid DNS-SD type, matching TCP/UDP protocol,
@@ -83,6 +84,14 @@ function M.normalise(v)
 	if not ok then return nil, ferr end
 	local discovery, derr = schema.map(t.service_discovery, { 'net', 'dns', 'service_discovery' }, normalise_discovery)
 	if not discovery then return nil, derr end
+	-- The segment whose dnsmasq instance also answers on loopback (the router's
+	-- own resolver). The provider defaults to the int segment when there is one.
+	local loopback_segment
+	if t.loopback_segment ~= nil then
+		local lerr
+		loopback_segment, lerr = schema.id(t.loopback_segment, { 'net', 'dns', 'loopback_segment' })
+		if not loopback_segment then return nil, lerr end
+	end
 	local out = {
 		enabled = t.enabled ~= false,
 		upstreams = schema.copy(t.upstreams or {}),
@@ -95,6 +104,7 @@ function M.normalise(v)
 		domain = t.domain,
 		host_files = schema.copy(t.host_files or {}),
 		service_discovery = discovery,
+		loopback_segment = loopback_segment,
 	}
 	return schema.with_optional_extensions(out, t, { 'net', 'dns' })
 end

@@ -1114,7 +1114,7 @@ end
 function tests.test_bigbox_configs_fall_back_to_the_normal_route()
 	local cjson = require 'cjson.safe'
 	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
-	for _, target in ipairs({ 'bigbox-ss', 'bigbox-v1-cm', 'bigbox-v1-cm-2' }) do
+	for _, target in ipairs({ 'bigbox-ss', 'bigbox-v1-cm', 'bigbox-v1-cm-2', 'getbox-v2' }) do
 		local doc = ok(cjson.decode(ok(read_project_file('src/configs/' .. target .. '.json'))))
 		local net_intent = ok(net_config.normalise(doc.net, { rev = 1 }))
 		local ctx = ok(names.allocate(net_intent))
@@ -1175,13 +1175,13 @@ function tests.test_bigbox_configs_render_strict_wan_modem_failover()
 	end
 end
 
--- Every BigBox uses v0.9's health check: a ping every 5 s, and a 1 s probe once an uplink
+-- Every BigBox (and Get Box V2) uses v0.9's health check: a ping every 5 s, and a 1 s probe once an uplink
 -- starts failing. It saves SIM data, and rides out short drops on single-uplink boxes.
 function tests.test_bigbox_targets_render_v09_uplink_health_timing()
 	local cjson = require 'cjson.safe'
 	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
 	local want = { interval = 5, down = 3, up = 3, timeout = 2, failure_interval = 1, recovery_interval = 1 }
-	for _, target in ipairs({ 'bigbox-ss', 'bigbox-v1-cm', 'bigbox-v1-cm-2' }) do
+	for _, target in ipairs({ 'bigbox-ss', 'bigbox-v1-cm', 'bigbox-v1-cm-2', 'getbox-v2' }) do
 		local doc = ok(cjson.decode(ok(read_project_file('src/configs/' .. target .. '.json'))))
 		local net_intent = ok(net_config.normalise(doc.net, { rev = 1 }))
 		local ctx = ok(names.allocate(net_intent))
@@ -1377,6 +1377,76 @@ function tests.test_live_snapshot_carries_netifd_addresses_to_backhaul_under_pro
 	stdlib.setenv('PATH', old_path)
 	os.execute('rm -rf ' .. dir)
 	if not ok_run then error(err, 0) end
+end
+
+-- Explicit (non-trunk) interfaces: a bridge with no wired members, such as a
+-- Wi-Fi-only segment, must not render an empty UCI list for ports.
+local function explicit_lan_intent()
+	return ok(net_config.normalise({
+		schema = net_config.SCHEMA,
+		version = 1,
+		segments = {
+			adm = { kind = 'system', addressing = { ipv4 = { mode = 'static', cidr = '172.28.8.1/24' } },
+				dhcp = { enabled = true }, dns = { local_server = true }, firewall = { zone = 'lan' } },
+			jan = { kind = 'user', addressing = { ipv4 = { mode = 'static', cidr = '172.28.32.1/24' } },
+				dhcp = { enabled = true }, dns = { local_server = true, domain = 'guest.home' }, firewall = { zone = 'lan_rst' } },
+		},
+		interfaces = {
+			adm = { kind = 'bridge', role = 'lan', segment = 'adm', members = { 'lan1', 'lan2' } },
+			jan = { kind = 'bridge', role = 'lan', segment = 'jan' },
+		},
+		dns = { enabled = true, domain = 'box.home' },
+		firewall = { zones = { lan = {}, lan_rst = {} } },
+	}, { rev = 1 }))
+end
+
+local function plan_network_changes(intent_doc)
+	local changes
+	fibers.run(function()
+		local provider = ok(provider_loader.new({ provider = 'openwrt', allow_fake_uci = true }, {}))
+		local plan = fibers.perform(provider:plan_op({ intent = intent_doc }))
+		eq(plan.ok, true, 'plan should succeed: ' .. tostring(plan.err))
+		changes = plan.plan.raw_changes
+		provider:terminate('test complete')
+	end)
+	return changes
+end
+
+function tests.test_explicit_bridge_without_members_renders_no_empty_ports_list()
+	local changes = plan_network_changes(explicit_lan_intent())
+	local adm_ports = find_change(changes.network, { section = 'dev_bridge_adm', option = 'ports' })
+	ok(adm_ports, 'member bridge should render ports')
+	eq(table.concat(adm_ports.value, ','), 'lan1,lan2')
+	ok(find_change(changes.network, { section = 'dev_bridge_jan', option = 'type', value = 'bridge' }),
+		'memberless bridge should still be a bridge device')
+	ok(find_change(changes.network, { section = 'dev_bridge_jan', option = 'bridge_empty', value = '1' }),
+		'memberless bridge must come up empty')
+	eq(find_change(changes.network, { section = 'dev_bridge_jan', option = 'ports' }), nil,
+		'memberless bridge must not render an empty ports list')
+end
+
+-- Without the BigBox int segment, no dnsmasq instance answers on loopback
+-- unless the config names one with dns.loopback_segment.
+function tests.test_dns_loopback_segment_owns_loopback_without_int_segment()
+	local function instance_for(changes, seg_id)
+		local dhcp_sec = find_change(changes.dhcp, { section = 'dhcp_' .. seg_id, option = 'instance' })
+		return ok(dhcp_sec, seg_id .. ' should be bound to a dnsmasq instance').value
+	end
+	local function excludes_lo(changes, instance)
+		local ch = find_change(changes.dhcp, { section = instance, option = 'notinterface' })
+		return ch ~= nil and ch.value[1] == 'lo'
+	end
+
+	local changes = plan_network_changes(explicit_lan_intent())
+	eq(excludes_lo(changes, instance_for(changes, 'adm')), true, 'default: no int, so adm excludes lo')
+	eq(excludes_lo(changes, instance_for(changes, 'jan')), true, 'default: no int, so jan excludes lo')
+
+	local intent_doc = explicit_lan_intent()
+	intent_doc.dns.loopback_segment = 'adm'
+	changes = plan_network_changes(intent_doc)
+	ok(instance_for(changes, 'adm') ~= instance_for(changes, 'jan'), 'distinct DNS policies need distinct instances')
+	eq(excludes_lo(changes, instance_for(changes, 'adm')), false, 'adm instance should own loopback')
+	eq(excludes_lo(changes, instance_for(changes, 'jan')), true, 'jan instance should still exclude lo')
 end
 
 return tests

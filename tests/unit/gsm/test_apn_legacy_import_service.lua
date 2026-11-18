@@ -420,6 +420,7 @@ function tests.test_only_bigbox_ss_turns_the_import_on()
 	end
 	assert(flag('bigbox-ss') == true)
 	assert(flag('bigbox-v1-cm') == nil and flag('bigbox-v1-cm-2') == nil)
+	assert(flag('getbox-v2') == nil)
 end
 
 return tests
