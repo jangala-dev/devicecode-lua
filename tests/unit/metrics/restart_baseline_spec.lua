@@ -62,7 +62,7 @@ end
 
 -- The failure seen in the field, through the rx_bytes pipeline each target ships.
 function T.shipped_pipelines_report_only_real_traffic_across_restarts()
-	for _, target in ipairs({ 'bigbox-ss', 'bigbox-v1-cm', 'bigbox-v1-cm-2' }) do
+	for _, target in ipairs({ 'bigbox-ss', 'bigbox-v1-cm', 'bigbox-v1-cm-2', 'getbox-v2' }) do
 		local f = assert(io.open('../src/configs/' .. target .. '.json'))
 		local cfg = assert(cjson.decode(f:read('*a')))
 		f:close()

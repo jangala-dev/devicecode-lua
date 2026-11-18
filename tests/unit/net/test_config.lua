@@ -635,7 +635,7 @@ end
 
 function tests.test_bigbox_configs_speedtest_every_backhaul_without_weights()
 	local cjson = require 'cjson.safe'
-	for _, name in ipairs({ 'bigbox-ss', 'bigbox-v1-cm', 'bigbox-v1-cm-2' }) do
+	for _, name in ipairs({ 'bigbox-ss', 'bigbox-v1-cm', 'bigbox-v1-cm-2', 'getbox-v2' }) do
 		local doc = ok(cjson.decode(ok(read_project_file('src/configs/' .. name .. '.json'))))
 		local intent, err = config.normalise(doc.net, { generation = 1 })
 		ok(intent, name .. ': ' .. tostring(err))
@@ -648,6 +648,24 @@ function tests.test_bigbox_configs_speedtest_every_backhaul_without_weights()
 		ok(pipes.active_uplink, name .. ' active_uplink pipeline')
 		ok(pipes.speedtest_in_use, name .. ' speedtest_in_use pipeline')
 	end
+end
+
+function tests.test_dns_loopback_segment_is_kept_and_must_name_a_segment()
+	local cfg = sample_cfg()
+	cfg.dns = { loopback_segment = 'lan' }
+	local intent, err = config.normalise(cfg, { rev = 1 })
+	ok(intent, tostring(err))
+	eq(intent.dns.loopback_segment, 'lan')
+
+	cfg = sample_cfg()
+	cfg.dns = { loopback_segment = 'missing' }
+	intent, err = config.normalise(cfg, { rev = 1 })
+	eq(intent, nil, 'unknown loopback segment must be rejected')
+	ok(err and err:find('loopback_segment', 1, true) and err:find('unknown segment', 1, true), 'got ' .. tostring(err))
+
+	cfg = sample_cfg()
+	cfg.dns = { loopback_segment = '' }
+	eq(config.normalise(cfg, { rev = 1 }), nil, 'empty loopback segment must be rejected')
 end
 
 return tests

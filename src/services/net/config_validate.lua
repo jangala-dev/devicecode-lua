@@ -54,6 +54,9 @@ local function segment_zone_name(id, seg)
 end
 
 local function validate_segments(intent)
+	local ok, e = check_ref(intent.segments, intent.dns and intent.dns.loopback_segment,
+		{ 'net', 'dns', 'loopback_segment' }, 'segment')
+	if not ok then return nil, e end
 	local host_sources = intent.dns and intent.dns.host_files and intent.dns.host_files.sources or {}
 	for id, seg in pairs(intent.segments or {}) do
 		for i, source in ipairs((seg.dns and seg.dns.host_files) or {}) do

@@ -975,7 +975,11 @@ local function build_network_changes(intent, provider_config, name_ctx)
 			add_section(changes, known, 'network', devsec, 'device')
 			set_option(changes, 'network', devsec, 'name', devname)
 			set_option(changes, 'network', devsec, 'type', 'bridge')
-			set_option(changes, 'network', devsec, 'ports', iface.members or {})
+			-- A bridge with no wired members (e.g. Wi-Fi only) gets no ports
+			-- option: never hand UCI an empty list.
+			if type(iface.members) == 'table' and #iface.members > 0 then
+				set_option(changes, 'network', devsec, 'ports', iface.members)
+			end
 			set_option(changes, 'network', devsec, 'bridge_empty', '1')
 		else
 			local ep = is_plain_table(iface.endpoint) and iface.endpoint or {}
