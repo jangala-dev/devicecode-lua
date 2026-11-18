@@ -1335,7 +1335,11 @@
         "default": {
           "enabled": true,
           "signal_freq": 10,
-          "pdp_type": "IP"
+          "pdp_type": "IP",
+          "cellular_modes": {
+            "preferred": "4g",
+            "allowed": ["3g", "4g"]
+          }
         },
         "known": [
           {
@@ -1343,7 +1347,11 @@
             "id_field": "device",
             "device": "/sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb3/3-1",
             "autoconnect": true,
-            "metrics_interval": 60
+            "metrics_interval": 60,
+            "cellular_modes": {
+              "preferred": "5g",
+              "allowed": ["3g", "4g", "5g"]
+            }
           },
           {
             "name": "secondary",

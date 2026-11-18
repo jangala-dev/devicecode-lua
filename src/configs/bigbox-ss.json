@@ -673,7 +673,11 @@
         "default": {
           "enabled": true,
           "signal_freq": 10,
-          "pdp_type": "IP"
+          "pdp_type": "IP",
+          "cellular_modes": {
+            "preferred": "4g",
+            "allowed": ["3g", "4g"]
+          }
         },
         "known": [
           {
