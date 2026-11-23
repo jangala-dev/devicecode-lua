@@ -195,11 +195,36 @@ As HTTP publications can fail due to lack of backhaul, boot-time metrics are ver
 - On queue full: New metrics are **dropped silently** with error log
 - No retry mechanism for queue-full conditions (older metrics are preserved)
 
-**Network Failure Retry**:
-- When HTTP send fails (network unavailable), the fiber implements exponential backoff
-- Sleep duration doubles on each failure: 1s → 2s → 4s → 8s → ... → max 60s
-- Retries indefinitely until successful or service shutdown
-- Queue-full and network-failure are handled separately: only network failures trigger retry
+**HTTP Response and Retry Policy**:
+
+| Outcome | Action |
+| --- | --- |
+| Any 2xx | Complete successfully |
+| Network failure or request timeout | Retry indefinitely until success or service shutdown |
+| HTTP 408, 429 or any 5xx | Retry indefinitely until success or service shutdown |
+| HTTP 400 | Allow three retries (four attempts total), then drop and log |
+| Other responses, including invalid statuses | Drop and log |
+
+Each payload has its own `{ outcome, success, retry, max_retries }` state in
+`services.metrics.http_retry`. The retry count and backoff reset when the outcome
+category changes; all 5xx responses share one category. The 400 limit therefore
+applies to consecutive 400 responses. Alternating outcomes can retry indefinitely.
+The 400 allowance is temporary, until cloud backends consistently report outages
+as 503 (issue #389).
+
+Retry delays double from 1s to 2s, 4s, 8s, and so on, capped at 60s. A valid
+`Retry-After` header, expressed as seconds or an HTTP date, can extend this delay
+beyond 60s. Invalid values fall back to backoff. HTTP dates use the device's UTC
+wall clock; the wait itself uses the monotonic fiber clock and is cancellable.
+Every attempt sends the complete original payload from a fresh body source.
+
+One-shot sends, used for crash reports, make exactly one attempt and leave retry
+pacing to their caller. An optional `on_result` callback is invoked once when a
+payload succeeds or is dropped, with `true` for success and `false` for failure.
+Cancellation does not invoke the callback.
+
+Queue-full drops are unchanged. A long outage can still fill the queue and drop
+new payloads, and retrying a request whose response was lost can duplicate metrics.
 
 ### Bus
 
