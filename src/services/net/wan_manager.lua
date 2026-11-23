@@ -529,6 +529,7 @@ function M.handle_speedtest_done(state, ev)
 		-- may report its generated OpenWrt name, kept separately.
 		rec.interface = rec.interface or (work_result.request and work_result.request.interface) or result.interface
 		rec.hal_interface = result.interface
+		rec.local_ip = result.local_ip
 		rec.device = result.device or (work_result.request and work_result.request.device) or rec.device
 		rec.metric = rec.metric or (work_result.request and work_result.request.metric) or 1
 		rec.completed_at = completed_at

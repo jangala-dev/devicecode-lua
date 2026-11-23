@@ -97,7 +97,7 @@ end
 ---@param args OnboxArgs
 ---@return nil
 function M.check_tools(args)
-	for _, name in ipairs({ 'ssh', 'ssh-keygen', 'tar', 'setsid',
+	for _, name in ipairs({ 'ssh', 'ssh-keygen', 'tar', 'diff', 'mktemp', 'setsid',
 		(args.ask_pass or args.password_file) and 'sshpass' or nil }) do
 		assert(process.execute('command -v ' .. name .. ' >/dev/null') == 0, 'Missing local command: ' .. name)
 	end
@@ -277,6 +277,7 @@ end
 ---@class OnboxRunHooks
 ---@field diagnostics (fun(): nil)?
 ---@field rollback (fun(): nil)? Test-specific policy; called only after failure.
+---@field restore (fun(failed: boolean): nil)? Restore after success, failure or interruption.
 ---@field success_message string?
 
 ---@param body fun(): nil
@@ -324,11 +325,13 @@ function Session:run(body, hooks)
 				io.stderr:write('FAIL: ', tostring(err), '\n')
 				local diagnosed, diag_err = pcall(hooks.diagnostics or function() self.logs:diagnostics('failure') end)
 				if not diagnosed then io.stderr:write('Diagnostics failed: ', tostring(diag_err), '\n') end
-				if hooks.rollback then
-					local restored, restore_err = pcall(hooks.rollback)
-					if not restored then
-						io.stderr:write('ROLLBACK FAILED: ', tostring(restore_err), '. Backup: ', self.remote, '\n')
-					end
+			end
+			local restore = hooks.restore or (not ok and hooks.rollback)
+			if restore then
+				local restored, restore_err = pcall(restore, not ok)
+				if not restored then
+					ok = false
+					io.stderr:write('RESTORE FAILED: ', tostring(restore_err), '. Artifacts: ', self.artifacts, '\n')
 				end
 			end
 			for i = #self.cleanups, 1, -1 do

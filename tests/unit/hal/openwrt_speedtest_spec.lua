@@ -22,7 +22,7 @@ local function fixture(options, fn)
 			output = options.output or "Running 'curl test'\nSETUP,200,1.2\nRESULT,206,1048576,0.02,0.12\n"
 			output = output:gsub('(SETUP,%d+,[%d%.]+)\n', '%1,' .. tostring(options.setup_exit_code or 0) .. '\n')
 			output = output:gsub('(RESULT,%d+,[%d%.]+,[%d%.]+,[%d%.]+)\n',
-				'%1,' .. tostring(options.curl_exit_code or options.exit_code or 0) .. '\n')
+				'%1,' .. tostring(options.curl_exit_code or options.exit_code or 0) .. ',192.0.2.1\n')
 		end
 		return {
 			stdout_stream = function()
@@ -58,6 +58,7 @@ function T.test_payload_average_excludes_setup_and_lua_scheduling_delay()
 		assert(math.abs(r.duration_s - 0.1) < 0.00001)
 		assert(math.abs(r.mbps - 83.88608) < 0.00001)
 		assert(r.peak_mbps == r.mbps and r.estimator == 'payload_average')
+		assert(r.local_ip == '192.0.2.1')
 		assert(s.shutdowns == 2)
 	end)
 end

@@ -7,6 +7,7 @@ local run_fibers = require 'tests.support.run_virtual_fibers'
 local probe      = require 'tests.support.bus_probe'
 local monitor    = require 'services.monitor'
 local request    = require 'services.ui.http.request'
+local file       = require 'fibers.io.file'
 
 local T = {}
 
@@ -60,6 +61,39 @@ local function publish_log(conn, service, level, what, summary)
 		what = what,
 		summary = summary or what,
 	})
+end
+
+function T.monitor_emits_opted_in_producer_timestamp()
+	run_fibers.run_auto(function (scope)
+		local original, lines = file.fdopen, {}
+		scope:finally(function() file.fdopen = original end)
+		file.fdopen = function(fd, ...)
+			if fd ~= 1 then return original(fd, ...) end
+			return {
+				setvbuf = function() end,
+				write_op = function(_, line)
+					lines[#lines + 1] = line
+					return fibers.always(true)
+				end,
+			}
+		end
+		local b = busmod.new()
+		local monitor_conn = b:connect({ origin_base = { service = 'monitor' } })
+		local app = b:connect({ origin_base = { service = 'net' } })
+		assert(scope:spawn(function() monitor.start(monitor_conn, { env = 'test' }) end))
+		probe.wait_retained_payload(app, { 'cap', 'monitor', 'main' }, { timeout = 0.5 })
+		app:publish(log_topic('net'), {
+			service = 'net', level = 'info', what = 'mwan_member_online',
+			summary = 'test membership online', include_event_time = true, ts = 12.345678,
+		})
+		probe.wait_until(function()
+			for _, line in ipairs(lines) do
+				if line:find('test membership online', 1, true) then
+					return line:find('(event_mono=12.345678)', 1, true)
+				end
+			end
+		end, { timeout = 0.8, interval = 0.01 })
+	end)
 end
 
 function T.monitor_public_capability_feeds_ui_initial_logs()

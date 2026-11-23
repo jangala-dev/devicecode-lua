@@ -73,7 +73,8 @@ function M.run_op(req, opts)
 			'--next', '--globoff', '--silent', '--show-error', '--fail', '--ipv4', '--http1.1',
 			'--range', '0-' .. tostring(limits.MAX_BYTES - 1), '--max-filesize', tostring(limits.MAX_BYTES),
 			'--max-time', tostring(duration), '--output', '/dev/null',
-			'--write-out', 'RESULT,%{http_code},%{size_download},%{time_starttransfer},%{time_total},%{exitcode}\\n',
+			'--write-out',
+			'RESULT,%{http_code},%{size_download},%{time_starttransfer},%{time_total},%{exitcode},%{local_ip}\\n',
 			'--url', url,
 		}
 		local run_cmd = opts.run_cmd or req.run_cmd
@@ -102,8 +103,8 @@ function M.run_op(req, opts)
 		-- mwan3 2.12+ prints its banner to stderr, so SETUP can start stdout.
 		out = '\n' .. out
 		local setup_code, setup_s, setup_exit = out:match('\nSETUP,(%d+),([%d%.]+),(%d+)\n')
-		local http_code, bytes, first_s, total_s, exit_code =
-			out:match('\nRESULT,(%d+),([%d%.]+),([%d%.]+),([%d%.]+),(%d+)\n')
+		local http_code, bytes, first_s, total_s, exit_code, local_ip =
+			out:match('\nRESULT,(%d+),([%d%.]+),([%d%.]+),([%d%.]+),(%d+),([^\n]*)\n')
 		setup_code, setup_s, setup_exit = tonumber(setup_code), tonumber(setup_s), tonumber(setup_exit)
 		exit_code = tonumber(exit_code)
 		http_code, bytes, first_s, total_s = tonumber(http_code), tonumber(bytes), tonumber(first_s), tonumber(total_s)
@@ -126,6 +127,7 @@ function M.run_op(req, opts)
 		local elapsed = total_s - first_s
 		local result = {
 			backend = 'openwrt', interface = iface, device = dev, bytes = bytes,
+			local_ip = local_ip ~= '' and local_ip or nil,
 			data_mib = bytes / (1024 * 1024), duration_s = elapsed, setup_s = setup_s,
 			total_duration_s = time.monotonic() - started_at,
 			stop_reason = exit_code == 28 and 'duration' or bytes == limits.MAX_BYTES and 'byte_budget' or 'eof',

@@ -693,6 +693,17 @@ local function modem_label(self)
 	return role
 end
 
+local function log_modem_lifecycle(modem, what)
+	local suffix = tostring(modem.id):sub(-4)
+	local port = tostring(modem.device or ''):match('[^/]+$') or 'unknown'
+	modem.svc:info(what, {
+		summary = ('imei_suffix=%s device=%s'):format(suffix, port),
+		imei_suffix = suffix,
+		device = port,
+		modem = modem.name,
+	})
+end
+
 local function normalised_sim_string(v)
 	if v == nil then return nil end
 	local n = normalize_sim_presence(v)
@@ -2101,6 +2112,7 @@ function GsmModem:_autoconnect_loop()
 					self.svc:obs_log(level, {
 						what = what,
 						summary = string.format('%s modem state -> %s', modem_label(self), tostring(current_state)),
+						include_event_time = true,
 						modem = self.name,
 						modem_id = self.id,
 						modem_suffix = id_suffix(self.id),
@@ -2618,7 +2630,9 @@ function GsmService.start(conn, opts)
 		log_modem_detected(modem, {})
 
 		local ok, err = modem:start(parent_scope)
-		if not ok then
+		if ok then
+			log_modem_lifecycle(modem, 'modem_added')
+		else
 			svc:obs_log('error', { what = 'modem_start_failed', modem = tostring(id), err = err })
 		end
 
@@ -2632,6 +2646,7 @@ function GsmService.start(conn, opts)
 		end
 		modem:stop('modem removed', true, true)
 		modems[id] = nil
+		log_modem_lifecycle(modem, 'modem_removed')
 		log_gsm_summary(svc, modems, 'modem_removed')
 	end
 

@@ -3,6 +3,7 @@ local devicecode = require 'onbox.support.devicecode'
 local modem_support = require 'onbox.support.modem'
 local process = require 'onbox.support.process'
 local util = require 'onbox.support.util'
+local ui_logs = require 'onbox.support.ui_logs'
 local tablex = require 'shared.table'
 local modes = require 'services.hal.types.modem_modes'
 local quote = process.quote
@@ -40,67 +41,103 @@ local function contains(supported, pair)
 	return false
 end
 
-function M.choose_pairs(current, supported, requested)
-	assert(not modes.includes(current, '2g'), 'Original modes allow 2G; disable 2G before running this on-box test')
-	assert(contains(supported, current), 'Original mmcli modes are not advertised; cannot verify restoration')
-	local valid = requested
-	if valid then
-		assert(not modes.includes(valid, '2g'), '2G is disabled in this on-box test: it can brownout the modem')
-		assert(contains(supported, valid), 'Requested pair is not supported by the selected modem')
-		assert(not modes.equal(valid, current), 'Requested pair already matches current modes; choose a different pair')
-	else
-		local candidates = {}
-		for _, candidate in ipairs(supported) do
-			if not modes.includes(candidate, '2g') and not modes.equal(candidate, current) then
-				candidates[#candidates + 1] = candidate
-			end
-		end
-		local function rank(candidate)
-			if modes.includes(candidate, '4g') then
-				if #candidate.allowed == 1 then return 1 end
-				if candidate.preferred == '4g' then return 2 end
-				return 3
-			end
-			return 4
-		end
-		table.sort(candidates, function(a, b)
-			if rank(a) ~= rank(b) then return rank(a) < rank(b) end
-			return modes.key(a) < modes.key(b)
-		end)
-		valid = candidates[1]
-		assert(valid, 'No alternative supported pair without 2G; select a different modem with --imei')
+local function safe_pair(pair)
+	return pair.preferred ~= '2g' and not modes.includes(pair, '2g')
+end
+
+local function mode_rank(pair)
+	if not modes.includes(pair, '4g') then return 4 end
+	if #pair.allowed == 1 then return 1 end
+	return pair.preferred == '4g' and 2 or 3
+end
+
+function M.choose_pair(current, supported, configured, requested)
+	if requested then
+		assert(safe_pair(requested), 'The test cannot request 2G: it can brownout the modem')
+		assert(contains(supported, requested), 'Requested pair is not supported by the selected modem')
+		assert(not modes.equal(requested, current), 'Requested pair already matches current modem modes')
+		assert(not modes.equal(requested, configured), 'Requested pair already matches the box configuration')
+		return requested
 	end
-	local all = { '3g', '4g', '5g' }
+	local best
+	for _, candidate in ipairs(supported) do
+		if safe_pair(candidate) and not modes.equal(candidate, current) and not modes.equal(candidate, configured) then
+			if not best or mode_rank(candidate) < mode_rank(best)
+				or (mode_rank(candidate) == mode_rank(best) and modes.key(candidate) < modes.key(best)) then
+				best = candidate
+			end
+		end
+	end
+	return assert(best, 'No different supported pair without 2G; select a different modem with --imei')
+end
+
+function M.choose_unsupported(supported)
+	local allowed_generations = { '3g', '4g', '5g' }
 	for mask = 1, 7 do
 		local allowed = {}
-		for index, generation in ipairs(all) do
+		for index, generation in ipairs(allowed_generations) do
 			if math.floor(mask / 2 ^ (index - 1)) % 2 == 1 then allowed[#allowed + 1] = generation end
 		end
-		local preferences = { 'none' }
-		for _, generation in ipairs(allowed) do preferences[#preferences + 1] = generation end
-		for _, preferred in ipairs(preferences) do
-			local candidate = normalize(preferred, allowed)
-			if not contains(supported, candidate) then return valid, candidate end
+		local pair = normalize('none', allowed)
+		if not contains(supported, pair) then return pair end
+		for _, preferred in ipairs(allowed) do
+			pair = normalize(preferred, allowed)
+			if not contains(supported, pair) then return pair end
 		end
 	end
-	-- Even a modem advertising every compliant pair cannot prefer an excluded generation.
-	return valid, normalize('3g', { '4g' })
+	-- An advertised preferred generation must be in its allowed set.
+	return normalize('3g', { '4g' })
+end
+
+-- GSM inherits each missing mode field from the default. An explicit
+-- allowed list replaces the default list as a whole.
+local function merge_mode_request(default, override)
+	if override == nil then return tablex.deep_copy(default) end
+	local result = tablex.deep_copy(override)
+	if type(result) == 'table' and type(default) == 'table' then
+		if result.preferred == nil then result.preferred = default.preferred end
+		if result.allowed == nil then result.allowed = tablex.deep_copy(default.allowed) end
+	end
+	return result
+end
+
+local function configured_pair(request)
+	if type(request) == 'table' then
+		return modes.normalize(request.preferred, request.allowed)
+	end
+end
+
+local function check_config(config, label)
+	local modems = assert(config.gsm and config.gsm.data and config.gsm.data.modems, 'Missing GSM modem config')
+	local function check(request, name)
+		local pair = configured_pair(request)
+		assert(not pair or safe_pair(pair),
+			label .. ' explicitly configures 2G for ' .. name .. '; remove it before restarting Devicecode')
+	end
+	local default = (modems.default or {}).cellular_modes
+	check(default, 'modems.default')
+	for index, entry in ipairs(modems.known or {}) do
+		check(merge_mode_request(default, entry.cellular_modes), 'modems.known[' .. index .. ']')
+	end
 end
 
 function M.effective_config(config, info)
 	local modems = assert(config.gsm and config.gsm.data and config.gsm.data.modems, 'Missing GSM modem config')
 	local result = tablex.deep_copy(modems.default or {})
 	for _, entry in ipairs(modems.known or {}) do
-		if (entry.id_field == 'device' and entry.device == info.device)
+		if (entry.id_field == 'device' and info.device and info.device ~= '' and entry.device == info.device)
 			or (entry.id_field ~= 'device' and entry.imei == info.imei) then
-			for key, value in pairs(entry) do result[key] = tablex.deep_copy(value) end
+			for key, value in pairs(entry) do
+				if key == 'cellular_modes' then result[key] = merge_mode_request(result[key], value)
+				else result[key] = tablex.deep_copy(value) end
+			end
 			break
 		end
 	end
 	return result
 end
 
-function M.phase_config(original, targets, field, revision)
+function M.phase_config(original, targets, requested, revision)
 	local config = tablex.deep_copy(original)
 	config.gsm.rev = (config.gsm.rev or 0) + revision
 	local entries = {}
@@ -109,7 +146,7 @@ function M.phase_config(original, targets, field, revision)
 		local entry = M.effective_config(original, target.info)
 		entry.id_field, entry.imei, entry.device = 'imei', imei, nil
 		entry.name = target.name
-		entry.cellular_modes = tablex.deep_copy(target[field])
+		entry.cellular_modes = tablex.deep_copy(assert(requested[imei]))
 		entries[#entries + 1] = entry
 	end
 	-- IMEI entries precede physical-path entries so the test setting wins deterministically.
@@ -118,17 +155,18 @@ function M.phase_config(original, targets, field, revision)
 	return config
 end
 
-function M.find_record(reply, target, expected, what)
-	for _, record in ipairs(reply.records or {}) do
-		local payload = record.payload or {}
-		local pair = payload.requested
-		if record.service == 'gsm' and record.what == what and payload.modem == target.name
-			and (what ~= 'cellular_modes_unsupported' or record.level == 'warn')
-			and type(pair) == 'table' then
-			local canonical = modes.normalize(pair.preferred, pair.allowed)
-			if canonical and modes.equal(canonical, expected) then return record end
-		end
+function M.matches_record(record, target, requested, event)
+	if record.service ~= 'gsm' or record.what ~= event
+		or (event == 'cellular_modes_unsupported' and record.level ~= 'warn') then
+		return false
 	end
+	local payload = record.payload
+	if type(payload) ~= 'table' or payload.modem ~= target.name or type(payload.requested) ~= 'table' then
+		return false
+	end
+	local pair = payload.requested
+	local canonical = modes.normalize(pair.preferred, pair.allowed)
+	return canonical ~= nil and modes.equal(canonical, requested)
 end
 
 function M.parse_args(argv, repo, here)
@@ -138,7 +176,7 @@ function M.parse_args(argv, repo, here)
 	assert((args.preferred == nil) == (args.allowed == nil), 'Use --preferred and --allowed together')
 	if args.preferred then
 		args.requested = normalize(args.preferred, generations(args.allowed))
-		assert(not modes.includes(args.requested, '2g'),
+		assert(safe_pair(args.requested),
 			'2G is disabled in this on-box test: it can brownout the modem')
 		assert(args.preferred == 'none' or modes.includes(args.requested, args.preferred),
 			'The valid test pair must include the preferred generation in allowed')
@@ -153,7 +191,7 @@ end
 
 function M.from_session(box)
 	return setmetatable({ box = box, runtime = devicecode.new(box), modems = modem_support.new(box),
-		targets = {}, summary = {}, now = process.now, pause = process.pause }, Runner)
+		targets = {}, summary = {}, now = process.now, pause = process.pause, follow_logs = ui_logs.follow }, Runner)
 end
 
 function M.new(args)
@@ -163,25 +201,13 @@ end
 function Runner:read_modes(imei)
 	local info = assert(self.modems:inventory()[imei], 'Modem missing: ' .. imei)
 	local result = self.box.ssh:run('mmcli -m ' .. quote(info.id) .. ' -J', { timeout = 20 })
-	local generic = assert(util.decode(result.stdout).modem.generic)
+	local data = util.decode(result.stdout)
+	local generic = assert(data.modem.generic)
 	assert(tostring(generic['equipment-identifier']) == imei, 'Modem ID changed while querying ' .. imei)
 	local supported, raw = {}, generic['supported-modes']
 	if type(raw) == 'string' then raw = { raw } end
 	for _, text in ipairs(raw or {}) do supported[#supported + 1] = M.parse_pair(text) end
-	return M.parse_pair(generic['current-modes']), supported, util.decode(result.stdout)
-end
-
-function Runner:service_pids()
-	local name = assert(self.box.args.service:match('([^/]+)$'))
-	local result = self.box.ssh:run('ubus call service list ' .. quote(util.encode({ name = name })),
-		{ timeout = 15, check = false })
-	if result.code ~= 0 then return {} end
-	local service = util.decode(result.stdout)[name] or {}
-	local pids = {}
-	for _, instance in pairs(service.instances or {}) do
-		if instance.running and instance.pid then pids[tostring(instance.pid)] = true end
-	end
-	return pids
+	return M.parse_pair(generic['current-modes']), supported, data, info
 end
 
 function Runner:prepare()
@@ -190,10 +216,12 @@ function Runner:prepare()
 		'cellular-mode-dependencies')
 	self.original = self.runtime.persistent_existed
 		and util.decode(util.read(self.box.artifacts .. '/original-persistent.json')) or self.runtime.original
+	check_config(self.runtime.original, 'Bootstrap config')
+	if self.runtime.persistent_existed then check_config(self.original, 'Persistent config') end
 	local ui = assert(self.original.ui and self.original.ui.data, 'Local UI config is required')
 	assert(ui.enabled ~= false and (ui.http or {}).enabled ~= false, 'Local UI HTTP must be enabled')
 	self.ui_url = self.box.args.ui_url or 'http://127.0.0.1:' .. tostring((ui.http or {}).port or 80)
-	self.original_pids = self:service_pids()
+	self.original_pids = self.runtime:service_pids()
 	local names = {}
 	local inventory = self.modems:inventory()
 	for _, imei in ipairs(util.keys(inventory)) do
@@ -202,14 +230,19 @@ function Runner:prepare()
 		if (not self.box.args.imei or self.box.args.imei == imei) and cfg.enabled ~= false then
 			assert(info.state ~= 'failed' and info.state ~= 'locked', 'Modem is not usable: ' .. imei)
 			local current, supported, raw = self:read_modes(imei)
-			local valid, invalid = M.choose_pairs(current, supported, self.box.args.requested)
+			local configured = configured_pair(cfg.cellular_modes)
+			local requested = M.choose_pair(current, supported, configured, self.box.args.requested)
 			local name = cfg.name or imei
 			assert(not names[name], 'Selected modems share a GSM name; select one with --imei')
 			names[name] = true
-			self.targets[imei] = { info = info, name = name, original = current, valid = valid, invalid = invalid }
+			local restore_skip
+			if not safe_pair(current) then restore_skip = 'original modes allow 2G'
+			elseif not contains(supported, current) then restore_skip = 'original modes were not advertised' end
+			self.targets[imei] = { info = info, name = name, original = current, configured = configured,
+				requested = requested, unsupported = M.choose_unsupported(supported), restore_skip = restore_skip }
 			util.write(self.box.artifacts .. '/original-' .. imei .. '-mmcli.json', util.encode(raw))
-			print(('Target %s …%s: %s -> %s; unsupported %s'):format(
-				name, imei:sub(-4), modes.key(current), modes.key(valid), modes.key(invalid)))
+			print(('Target %s …%s: %s -> %s (configured: %s)'):format(name, imei:sub(-4),
+				modes.key(current), modes.key(requested), configured and modes.key(configured) or 'unset'))
 		end
 	end
 	assert(next(self.targets), 'No enabled modem matched the test selection')
@@ -230,14 +263,14 @@ function Runner:wait_for(label, body)
 	error(label .. ': ' .. last_error, 0)
 end
 
-function Runner:wait_modes(field, label)
+function Runner:wait_modes(label, expected)
 	return self:wait_for(label .. ' mmcli modes', function()
 		local results = {}
 		for _, imei in ipairs(util.keys(self.targets)) do
 			local actual, _, raw = self:read_modes(imei)
-			local target = self.targets[imei]
+			local pair = assert(expected[imei])
 			util.write(self.box.artifacts .. '/' .. label .. '-' .. imei .. '-mmcli.json', util.encode(raw))
-			assert(modes.equal(actual, target[field]), imei .. ': expected ' .. modes.key(target[field])
+			assert(modes.equal(actual, pair), imei .. ': expected ' .. modes.key(pair)
 				.. ', got ' .. modes.key(actual))
 			results[imei] = actual
 		end
@@ -245,57 +278,51 @@ function Runner:wait_modes(field, label)
 	end)
 end
 
-function Runner:wait_logs(field, what, label)
-	-- Boot capture freezes when full; later application/warning records can only
-	-- be in the recent ring. Keep matches as either bounded buffer advances.
-	local records = {}
-	return self:wait_for(label .. ' local UI logs', function()
-		local errors = {}
-		for _, source in ipairs({
-			{ path = '/api/logs', suffix = '-ui-logs.json' },
-			{ path = '/api/logs?boot=true', suffix = '-ui-boot-logs.json' },
-		}) do
-			local ok, err = pcall(function()
-				local result = self.box.ssh:run('curl -fsS --max-time 10 --url '
-					.. quote(self.ui_url .. source.path), { timeout = 15, check = false })
-				util.write(self.box.artifacts .. '/' .. label .. source.suffix, result.stdout)
-				assert(result.code == 0, result.stderr)
-				local reply = util.decode(result.stdout)
-				assert(reply.ok == true, 'Local UI monitor query failed')
-				for imei, target in pairs(self.targets) do
-					records[imei] = records[imei] or M.find_record(reply, target, target[field], what)
+function Runner:wait_logs(label, requested, event)
+	local records, remaining = {}, 0
+	for _ in pairs(requested) do remaining = remaining + 1 end
+	if remaining == 0 then return records end
+	return self.follow_logs(self.box, self.ui_url, label, self.now() + self.box.args.timeout,
+		function(record)
+			local changed = false
+			for imei, pair in pairs(requested) do
+				if not records[imei] and M.matches_record(record, self.targets[imei], pair, event) then
+					records[imei] = record
+					remaining = remaining - 1
+					changed = true
 				end
-			end)
-			if not ok then errors[#errors + 1] = source.path .. ': ' .. tostring(err) end
-		end
-		for _, imei in ipairs(util.keys(self.targets)) do
-			assert(records[imei], 'Missing ' .. what .. ' warning/application record for ' .. imei
-				.. (#errors > 0 and '; ' .. table.concat(errors, '; ') or ''))
-		end
-		return records
-	end)
+			end
+			return changed
+		end,
+		function() if remaining == 0 then return records end end,
+		label .. ' local UI log ' .. event)
 end
 
-function Runner:phase(label, field, revision, unchanged)
-	local config = M.phase_config(self.original, self.targets, field, revision)
+function Runner:phase(phase)
+	local label, requested = phase.label, phase.requested
+	local config = M.phase_config(self.original, self.targets, requested, phase.revision)
 	local archive = self.runtime:build(label, config)
 	self.box:phase(label, function()
-		local previous = self:service_pids()
+		local previous = self.runtime:service_pids()
 		self.runtime:deploy(archive)
 		self.runtime:write_config(config)
 		self.runtime:service('restart')
 		self:wait_for(label .. ' fresh service process', function()
-			local pids = self:service_pids()
+			local pids = self.runtime:service_pids()
 			for pid in pairs(pids) do if previous[pid] then return false end end
 			return next(pids) ~= nil
 		end)
-		local expected = unchanged and 'valid' or field
-		local records = self:wait_logs(field,
-			unchanged and 'cellular_modes_unsupported' or 'cellular_modes_applied', label)
-		local actual = self:wait_modes(expected, label)
-		self.summary[#self.summary + 1] = { phase = label, requested = field, actual = actual, records = records }
+		local records = self:wait_logs(label, phase.log_requests or requested, phase.event or 'cellular_modes_applied')
+		local actual = self:wait_modes(label, phase.expected or requested)
+		local previous_phase = self.summary[#self.summary]
+		local before = previous_phase and previous_phase.actual or {}
+		if not previous_phase then
+			for imei, target in pairs(self.targets) do before[imei] = target.original end
+		end
+		self.summary[#self.summary + 1] = { phase = label, before = before, requested = requested,
+			actual = actual, records = records, restore_skipped = phase.restore_skipped }
 		util.write(self.box.artifacts .. '/results.json', util.encode(self.summary))
-		print('[' .. label .. '] PASS: mmcli modes and local UI records verified')
+		print('[' .. label .. '] PASS: ' .. phase.message)
 	end)
 end
 
@@ -305,40 +332,68 @@ function Runner:rollback()
 		local ok, err = pcall(body)
 		if not ok then errors[#errors + 1] = tostring(err) end
 	end
-	recover(function() self.runtime:restore_runtime() end)
+	self.runtime:restore_runtime()
 	if next(self.original_pids) then recover(function() self.runtime:service('restart') end) end
 	for _, imei in ipairs(util.keys(self.targets)) do
-		local original = self.targets[imei].original
-		recover(function()
-			self:wait_for('Restore modem ' .. imei, function()
-				local info = self.modems:inventory()[imei]
-				if not info then return false end
-				self.box.ssh:run('mmcli -m ' .. quote(info.id) .. ' --set-allowed-modes='
-					.. quote(table.concat(original.allowed, '|'))
-					.. ' --set-preferred-mode=' .. quote(original.preferred), { timeout = 45 })
-				local actual = self:read_modes(imei)
-				return modes.equal(actual, original)
+		local target = self.targets[imei]
+		if not target.restore_skip then
+			local original = target.original
+			recover(function()
+				self:wait_for('Restore modem ' .. imei, function()
+					local actual, _, _, info = self:read_modes(imei)
+					if modes.equal(actual, original) then return true end
+					self.box.ssh:run('mmcli -m ' .. quote(info.id) .. ' --set-allowed-modes='
+						.. quote(table.concat(original.allowed, '|'))
+						.. ' --set-preferred-mode=' .. quote(original.preferred), { timeout = 45 })
+					return modes.equal(self:read_modes(imei), original)
+				end)
 			end)
-		end)
+		else
+			print(('Rollback: leaving %s …%s modem modes as-is; %s'):format(
+				target.name, imei:sub(-4), target.restore_skip))
+		end
 	end
-	recover(function() self:wait_modes('original', 'rollback') end)
 	assert(#errors == 0, table.concat(errors, '\n'))
 end
 
 function Runner:run()
 	return self.box:run(function()
 		self:prepare()
-		self:phase('01-valid', 'valid', 1)
-		self:phase('02-unsupported', 'invalid', 2, true)
-		self:phase('03-original', 'original', 3)
+		local valid, unsupported, restored, restore_logs, skipped = {}, {}, {}, {}, {}
+		for imei, target in pairs(self.targets) do
+			valid[imei], unsupported[imei] = target.requested, target.unsupported
+			if target.restore_skip then
+				skipped[imei], restored[imei] = target.restore_skip, target.requested
+			else
+				restored[imei], restore_logs[imei] = target.original, target.original
+			end
+		end
+		self:phase { label = '01-valid', revision = 1, requested = valid,
+			message = 'different supported modes applied and verified' }
+		self:phase { label = '02-unsupported', revision = 2, requested = unsupported,
+			expected = valid, event = 'cellular_modes_unsupported',
+			message = 'unsupported warnings recorded and modem modes unchanged' }
+		self:phase { label = '03-restore', revision = 3, requested = restored, log_requests = restore_logs,
+			restore_skipped = skipped, message = 'final safe modes verified' }
+		for _, imei in ipairs(util.keys(skipped)) do
+			print(('[03-restore] SKIP original modes for %s …%s: %s; kept phase-one modes'):format(
+				self.targets[imei].name, imei:sub(-4), skipped[imei]))
+		end
 	end, {
 		diagnostics = function()
 			local commands = self.runtime:diagnostic_commands()
 			for name, command in pairs(self.modems:diagnostic_commands()) do commands[name] = command end
 			self.box.logs:diagnostics('failure', commands)
 		end,
-		rollback = function() if self.runtime.changed then self:rollback() end end,
-		success_message = 'PASS: valid modes, unsupported warning, and original modes verified',
+		restore = function(failed)
+			if not self.runtime.changed then return end
+			if failed then self:rollback()
+			else
+				self.runtime:restore_runtime()
+				if next(self.original_pids) then self.runtime:service('start') end
+			end
+		end,
+		success_message = 'PASS: mode application, rejection and eligible restoration checks passed',
 	})
 end
 

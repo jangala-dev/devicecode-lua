@@ -143,48 +143,16 @@ LOG  gsm  info  state        primary modem state -> connected
 	end, 'No PDP lifecycle events recognised')
 end
 
----@return nil
-function tests.restart_order_ignores_lines_replayed_before_the_capture_began()
-	-- logread -f replays the ring first: here an earlier run's double reset and its marker.
-	local reset = 'LOG  gsm  info  pdp_restart  pdp_restart modem=primary limit=2 count='
-	local inspected = 'LOG  gsm  info  pdp_contexts_checked  pdp_contexts_checked modem=primary contexts=1:IP:active'
-	-- Then this phase's capture marker, the runtime being replaced double-resetting while
-	-- the archive uploads, and the marker written once that runtime has stopped.
-	local capture = table.concat({
-		'Mon Nov 16 09:00:00 2026 user.notice onbox-test: BEGIN 01-ip tested runtime',
-		'Mon Nov 16 09:00:01 2026 daemon.info devicecode[11]: ' .. reset .. '1',
-		'Mon Nov 16 09:00:02 2026 daemon.info devicecode[11]: ' .. reset .. '2',
-		'Mon Nov 16 10:00:00 2026 user.notice onbox-test: BEGIN 01-ip',
-		'Mon Nov 16 10:00:01 2026 daemon.info devicecode[22]: ' .. reset .. '1',
-		'Mon Nov 16 10:00:02 2026 daemon.info devicecode[22]: ' .. reset .. '2',
-		'Mon Nov 16 10:00:30 2026 user.notice onbox-test: BEGIN 01-ip tested runtime',
-		'Mon Nov 16 10:00:41 2026 daemon.info devicecode[33]: ' .. reset .. '1',
-		'Mon Nov 16 10:00:42 2026 daemon.info devicecode[33]: ' .. inspected,
-		'',
-	}, '\n')
-	rejects(function() runner.check_restart_order(capture) end,
-		'restarted twice without an intervening context inspection')
-	local current = runner.current_capture(capture)
-	assert(not current:find('devicecode[11]', 1, true), 'replayed lines were kept')
-	assert(not current:find('devicecode[22]', 1, true), 'the replaced runtime\'s lines were kept')
-	assert(current:find('devicecode[33]', 1, true), 'the tested runtime\'s lines were dropped')
-	runner.check_restart_order(current)
-	rejects(function() runner.current_capture('LOG  gsm  info  pdp_restart  pdp_restart modem=primary\n') end,
-		'no onbox-test BEGIN marker')
-end
-
----@return nil
-function tests.tested_runtime_marker_is_a_capture_boundary()
-	local commands = {}
+function tests.tested_runtime_uses_the_stream_checkpoint()
 	local instance = runner.from_session({
 		args = {},
-		ssh = { run = function(_, command) commands[#commands + 1] = command end },
+		logs = { checkpoint = function(_, label, observe)
+			equal(label, 'BEGIN 02-alternate tested runtime')
+			observe('LOG gsm info pdp_contexts_checked pdp_contexts_checked modem=primary')
+		end },
 	})
 	instance:mark_tested_runtime('02-alternate')
-	equal(commands, { "logger -t onbox-test 'BEGIN 02-alternate tested runtime'" })
-	-- logread shows the tag and message as "onbox-test: <message>", which current_capture finds.
-	local capture = 'old\nMon Nov 16 10:00:30 2026 user.notice onbox-test: BEGIN 02-alternate tested runtime\nnew\n'
-	equal(runner.current_capture(capture), 'new\n')
+	instance.verify_restart_order()
 end
 
 ---@return nil
@@ -228,12 +196,6 @@ function tests.restart_order_exempts_only_unobserved_transition_reasons()
 	end, 'exhausted its restart budget before post-reset inspection')
 end
 
-function tests.restart_order_requires_a_log_marker_boundary()
-	rejects(function()
-		runner.check_restart_order('BLOG gsm info pdp_contexts_checked modem=primary')
-	end, 'No PDP lifecycle events recognised')
-end
-
 function tests.arguments()
 	local args = runner.parse_args({}, repo, here)
 	equal(args.first, 'IP')
@@ -241,11 +203,10 @@ function tests.arguments()
 	equal(args.password_file, repo .. '/boxkey')
 	equal(args.ask_pass, false)
 	equal(args.build_command, 'make build-all')
-	args = runner.parse_args({ '--ssh-key-auth', '--timeout', '42', '--keep-final-config',
+	args = runner.parse_args({ '--ssh-key-auth', '--timeout', '42',
 		'--first', 'IPV6', '--second', 'IP', '--artifacts', 'my logs' }, repo, here)
 	equal(args.password_file, nil)
 	equal(args.timeout, 42)
-	equal(args.keep_final_config, true)
 	equal(args.artifacts, posix.getcwd() .. '/my logs')
 	rejects(function() runner.parse_args({ '--first', 'IPV4V6' }, repo, here) end, 'Choose different')
 	rejects(function() runner.parse_args({ '--timeout', '0' }, repo, here) end, 'Timeout must be positive')
@@ -268,6 +229,7 @@ function tests.prepare_recovers_missing_at_ports_before_backup_or_deployment()
 		instance.runtime = {
 			original = config,
 			prepare = function() calls[#calls + 1] = 'prepare' end,
+			service_pids = function() return {} end,
 			ensure_dependencies = function() calls[#calls + 1] = 'dependencies' end,
 			backup = function() calls[#calls + 1] = 'backup' end,
 		}
@@ -325,7 +287,7 @@ end
 
 ---@return nil
 function tests.rollback_does_not_require_at_ports_and_restarts_after_reset_error()
-	for _, fail_reset in ipairs({ false, true }) do
+	for _, fail_step in ipairs({ 'none', 'reset', 'resume' }) do
 		local calls = {}
 		local instance = runner.from_session({ args = {} })
 		instance.runtime = {
@@ -333,18 +295,22 @@ function tests.rollback_does_not_require_at_ports_and_restarts_after_reset_error
 			service = function(_, action) calls[#calls + 1] = action end,
 		}
 		instance.modems = {
-			resume_manager = function() calls[#calls + 1] = 'resume' end,
+			resume_manager = function()
+				calls[#calls + 1] = 'resume'
+				if fail_step == 'resume' then error('resume failed') end
+			end,
 			clean_boot = function(_, targets, require_at)
 				equal(targets, instance.targets)
 				equal(require_at, nil)
 				calls[#calls + 1] = 'reset'
-				if fail_reset then error('reset failed') end
+				if fail_step == 'reset' then error('reset failed') end
 			end,
 		}
+		instance.original_pids = { ['1'] = true }
 		local ok, err = pcall(function() instance:rollback() end)
-		equal(ok, not fail_reset)
-		if fail_reset then assert(tostring(err):find('reset failed', 1, true)) end
-		equal(calls, { 'resume', 'restore', 'reset', 'restart' })
+		equal(ok, fail_step == 'none')
+		if fail_step ~= 'none' then assert(tostring(err):find(fail_step .. ' failed', 1, true)) end
+		equal(calls, { 'resume', 'restore', 'reset', 'start' })
 	end
 end
 
@@ -365,6 +331,7 @@ function tests.prepare_uses_the_active_config_when_one_is_saved()
 		original = config,
 		persistent_existed = true,
 		prepare = function() end,
+		service_pids = function() return {} end,
 		ensure_dependencies = function() end,
 		backup = function() end,
 	}
@@ -382,6 +349,7 @@ function tests.prepare_uses_the_active_config_when_one_is_saved()
 	instance = runner.from_session({ args = {} })
 	instance.runtime.original, instance.runtime.persistent_existed = config, false
 	instance.runtime.prepare = function() end
+	instance.runtime.service_pids = function() return {} end
 	instance.runtime.ensure_dependencies = function() end
 	instance.runtime.backup = function() end
 	instance.modems = {
@@ -400,15 +368,17 @@ end
 function tests.phases_use_the_active_config_and_restore_it_before_restarting()
 	local calls, written = {}, {}
 	local instance = runner.from_session({
-		args = { first = 'IP', second = 'IPV4V6', keep_final_config = false },
+		args = { first = 'IP', second = 'IPV4V6' },
 		phase = function(_, _, body) body() end,
-		run = function(_, body) body(); return 0 end,
+		run = function(_, body, hooks) body(); hooks.restore(false); return 0 end,
 	})
-	instance.prepare = function(self) self.active = active end
+	instance.prepare = function(self) self.active = active; self.original_pids = { ['1'] = true } end
 	instance.inspect = function(_, label, cfg) calls[#calls + 1] = 'inspect ' .. label; written[label] = cfg end
 	instance.mark_tested_runtime = function(_, label) calls[#calls + 1] = 'mark ' .. label end
 	instance.runtime = {
 		original = config,
+		changed = true,
+		restore_runtime = function() calls[#calls + 1] = 'restore runtime' end,
 		build = function(_, label) return label .. '.tar.gz' end,
 		deploy = function() calls[#calls + 1] = 'deploy' end,
 		write_config = function(_, cfg)
@@ -429,7 +399,7 @@ function tests.phases_use_the_active_config_and_restore_it_before_restarting()
 		'deploy', 'mark 01-ip', 'write active network settings', 'reset', 'restart', 'inspect 01-ip',
 		'deploy', 'mark 02-alternate', 'write active network settings', 'reset', 'restart', 'inspect 02-alternate',
 		'deploy', 'mark 03-restored-config', 'write bootstrap', 'restore persistent', 'reset', 'restart',
-		'inspect 03-restored-config',
+		'inspect 03-restored-config', 'restore runtime', 'start',
 	})
 end
 
