@@ -843,20 +843,6 @@ function HalService.start(conn, opts)
 		end
 	end
 
-	local function log_modem_lifecycle(what, cap, device)
-		if cap.class ~= 'modem' then return end
-		local suffix = tostring(cap.id):sub(-4)
-		local port = tostring(device.id):match('[^/]+$') or 'unknown'
-		local address = tostring(device.meta.address or 'unknown')
-		log('info', what, {
-			summary = ('imei_suffix=%s device=%s address=%s'):format(suffix, port, address),
-			include_event_time = true,
-			imei_suffix = suffix,
-			device = port,
-			address = address,
-		})
-	end
-
 	local function register_device(event_type, device)
 		local ok, set_err = registry:set_device(device)
 		if not ok then
@@ -888,7 +874,6 @@ function HalService.start(conn, opts)
 					source = source,
 				})
 				retain_cap_projection(event_type, cap.class, cap.id, entry)
-				log_modem_lifecycle('modem_added', cap, device)
 			end
 		end
 
@@ -930,8 +915,6 @@ function HalService.start(conn, opts)
 						class = cap.class,
 						id    = cap.id,
 					})
-				else
-					log_modem_lifecycle('modem_removed', cap, device)
 				end
 			end
 		end

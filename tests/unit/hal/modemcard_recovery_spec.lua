@@ -1,6 +1,12 @@
 local fibers = require 'fibers'
+local channel = require 'fibers.channel'
+local op = require 'fibers.op'
 local attempts_counter = require 'services.hal.managers.modemcard.attempts_counter'
 local modemcard = require 'services.hal.managers.modemcard'
+local modem_provider = require 'services.hal.backends.modem.provider'
+local modem_driver = require 'services.hal.drivers.modem'
+local Logger = require 'services.hal.logger'
+local run_fibers = require 'tests.support.run_virtual_fibers'
 
 local tests = {}
 
@@ -223,6 +229,61 @@ function tests.test_reset_failure_is_terminal_and_not_logged_as_retrying()
 	eq(logger.errors[1].what, 'reset_driver_failed')
 	eq(logger.errors[1].retry, false)
 	eq(#logger.warnings, 0)
+end
+
+function tests.test_manager_reports_registered_modem_and_removal()
+	run_fibers.run_auto(function(scope)
+		local incoming, devices, logs = channel.new(), channel.new(), channel.new(2)
+		local address = '/org/freedesktop/ModemManager1/Modem/7'
+		local device = '/sys/devices/platform/usb1/1-1.2'
+		local summary = 'imei_suffix=3456 device=1-1.2 address=' .. address
+		local logged_add = false
+		local function observe(level, record)
+			if level == 'info' then
+				if record.what == 'modem_added' then logged_add = true end
+				logs:put(record)
+			end
+		end
+		local original_monitor, original_driver = modem_provider.new_monitor, modem_driver.new
+		local original_scope, original_modems = modemcard.scope, modemcard.modems
+		scope:finally(function()
+			modem_provider.new_monitor, modem_driver.new = original_monitor, original_driver
+			modemcard.scope, modemcard.modems = original_scope, original_modems
+			modemcard.started = false
+		end)
+		modemcard.modems = {}
+		modem_provider.new_monitor = function()
+			return { next_event_op = function() return incoming:get_op() end }
+		end
+		modem_driver.new = function()
+			return { address = address, imei = '012345678123456', scope = { fault_op = op.never },
+				init = function() return '' end,
+				get = function() return true, device end,
+				capabilities = function() return {} end,
+				start = function() assert(logged_add, 'Driver started before the modem registration log'); return true end,
+				stop = function() return true end }
+		end
+
+		eq(modemcard.start(Logger.new(observe, { manager = 'modemcard' }), devices, channel.new()), '')
+		incoming:put({ is_added = true, address = address })
+		local added = fibers.perform(devices:get_op())
+		eq(added.event_type, 'added')
+		eq(logged_add, false)
+		added.ready_cond:signal()
+		local detected = fibers.perform(logs:get_op())
+		eq(detected.what, 'modem_added')
+		eq(detected.summary, summary)
+		eq(detected.manager, 'modemcard')
+		eq(detected.include_event_time, true)
+
+		incoming:put({ is_added = false, address = address })
+		local removed = fibers.perform(devices:get_op())
+		eq(removed.event_type, 'removed')
+		local withdrawn = fibers.perform(logs:get_op())
+		eq(withdrawn.what, 'modem_removed')
+		eq(withdrawn.summary, summary)
+		assert(modemcard.stop())
+	end)
 end
 
 return tests

@@ -94,6 +94,19 @@ local function detector(scope)
 	end
 end
 
+local function log_modem_lifecycle(what, driver, device)
+	local suffix = tostring(driver.imei):sub(-4)
+	local port = tostring(device):match('[^/]+$') or 'unknown'
+	log:info({
+		what = what,
+		summary = ('imei_suffix=%s device=%s address=%s'):format(suffix, port, driver.address),
+		include_event_time = true,
+		imei_suffix = suffix,
+		device = port,
+		address = driver.address,
+	})
+end
+
 ---Handle modem removal.
 ---@param dev_ev_ch Channel Device event channel (DeviceEvent messages)
 ---@param address ModemAddress
@@ -140,6 +153,7 @@ local function on_remove(dev_ev_ch, address)
 	end
 
 	dev_ev_ch:put(device_event)
+	log_modem_lifecycle('modem_removed', driver, device)
 end
 
 ---@param address ModemAddress
@@ -304,6 +318,7 @@ local function on_driver(dev_ev_ch, cap_emit_ch, driver)
 	-- capabilities are registered before starting the driver.
 	dev_ev_ch:put(device_event)
 	ready_cond:wait()
+	log_modem_lifecycle('modem_added', driver, device)
 
 	-- Start the driver only after capability registration, so initial retained
 	-- state emissions cannot race ahead of the registry.
@@ -314,6 +329,7 @@ local function on_driver(dev_ev_ch, cap_emit_ch, driver)
 		local remove_event = hal_types.new.DeviceEvent("removed", "modemcard", device)
 		if remove_event then
 			dev_ev_ch:put(remove_event)
+			log_modem_lifecycle('modem_removed', driver, device)
 		end
 		return
 	end

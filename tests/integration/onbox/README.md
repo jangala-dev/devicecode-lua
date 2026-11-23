@@ -55,10 +55,11 @@ states may vary with modem, network, and firmware.
 Modem reset requires at least two detected modems in a full run and checks
 that every detected modem is connected before testing. With Devicecode running,
 it resets them one at a time and waits for the verified replacement to
-reconnect before resetting the next modem. HAL and GSM must each report removal
-followed by reappearance for the modem under test. ModemManager must confirm the same IMEI
-on the new object reported by HAL. `results.json` records each modem's events
-and object IDs. The test reads info-level logs in the default `operator` monitor
+reconnect before resetting the next modem. The HAL modem manager and GSM must each
+report removal followed by reappearance for the modem under test. ModemManager must
+confirm the same IMEI on the new object reported by the HAL manager.
+`results.json` records each modem's events and object IDs.
+The test reads info-level logs in the default `operator` monitor
 profile. Use `--imei IMEI` for a single-modem troubleshooting run.
 
 Modem autoconnect off requires both modems to be detected. It turns off GSM
@@ -73,9 +74,9 @@ end marker.
 `results.json` and `modem-state-*.log` contain the per-modem evidence.
 
 Modem recovery timing requires both modems to start connected with their WAN
-members online. It resets them one at a time. Each result records the new HAL
-modem registration, GSM connected, and NET reporting that modem's interface
-online. The runner calculates all three elapsed intervals in milliseconds
+members online. It resets them one at a time. Each result records modem
+registration acknowledged by HAL, GSM connected, and NET reporting that modem's
+interface online. The runner calculates all three elapsed intervals in milliseconds
 using the timestamps recorded when each service emits its event. `--max-connected-seconds` and
 `--max-online-seconds` set optional limits measured from reappearance.
 `--imei IMEI` is available for single-modem troubleshooting.
