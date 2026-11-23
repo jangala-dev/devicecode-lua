@@ -30,8 +30,9 @@ end
 ---Check the installed tools even if opkg reports errors while updating/installing.
 ---@param dependencies OnboxDependencies
 ---@param label string?
+---@param check_only boolean?
 ---@return nil
-function Devicecode:ensure_dependencies(dependencies, label)
+function Devicecode:ensure_dependencies(dependencies, label, check_only)
 	local checks = {}
 	for command, package in pairs(dependencies.commands or {}) do
 		checks[#checks + 1] = { check = 'command -v ' .. quote(command) .. ' >/dev/null', package = package }
@@ -42,11 +43,13 @@ function Devicecode:ensure_dependencies(dependencies, label)
 			package = package,
 		}
 	end
-	local script = { "missing=''" }
-	for _, check in ipairs(checks) do
-		script[#script + 1] = check.check .. ' || missing="$missing "' .. quote(check.package)
-	end
-	script[#script + 1] = [[
+	local script = {}
+	if not check_only then
+		script[1] = "missing=''"
+		for _, check in ipairs(checks) do
+			script[#script + 1] = check.check .. ' || missing="$missing "' .. quote(check.package)
+		end
+		script[#script + 1] = [[
         if [ -n "$missing" ]; then
             echo "Missing packages:$missing"
             echo "Package installation is persistent and is not reverted by runtime rollback"
@@ -55,6 +58,7 @@ function Devicecode:ensure_dependencies(dependencies, label)
             opkg install $missing || true
         fi
     ]]
+	end
 	for _, check in ipairs(checks) do script[#script + 1] = check.check .. ' || exit 1' end
 	local result = self.box.ssh:run(table.concat(script, '\n'), { timeout = 180, check = false })
 	label = label or 'dependencies'
@@ -63,8 +67,9 @@ function Devicecode:ensure_dependencies(dependencies, label)
 end
 
 ---Read and save configuration without changing the running service.
+---@param check_only boolean? Require dependencies already installed.
 ---@return nil
-function Devicecode:prepare()
+function Devicecode:prepare(check_only)
 	self.box.ssh:run('test -x ' .. quote(self.args.service)
 		.. ' && test -f ' .. quote(self.runtime .. '/main.lua'))
 	self.args.target = self.args.target or util.trim(
@@ -81,7 +86,8 @@ function Devicecode:prepare()
 	assert(config_root, 'No config filesystem root')
 	if config_root:sub(1, 1) ~= '/' then config_root = self.runtime .. '/' .. config_root end
 	self.config_path = config_root:gsub('/+$', '') .. '/' .. self.args.target .. '.json'
-	local existing = self.box.ssh:run('if test -f ' .. quote(self.config_path)
+	local existing = self.box.ssh:run('if test -L ' .. quote(self.config_path)
+		.. '; then echo "Persistent config is a symlink" >&2; exit 45; fi; if test -f ' .. quote(self.config_path)
 		.. '; then cat ' .. quote(self.config_path)
 		.. '; elif test ! -e ' .. quote(self.config_path) .. '; then exit 44; else exit 45; fi',
 		{ check = false, timeout = 30 })
@@ -92,7 +98,7 @@ function Devicecode:prepare()
 	self.persistent_existed = existing.code == 0
 	if self.persistent_existed then util.write(self.box.artifacts .. '/original-persistent.json', existing.stdout) end
 	self:ensure_dependencies({ commands = { luajit = 'luajit', tar = 'tar' },
-		modules = { ['cjson.safe'] = 'lua-cjson' } })
+		modules = { ['cjson.safe'] = 'lua-cjson' } }, nil, check_only)
 end
 
 ---@return nil
@@ -143,7 +149,24 @@ end
 ---@return nil
 function Devicecode:service(action)
 	assert(action == 'start' or action == 'stop' or action == 'restart', 'Invalid service action')
-	self.box.ssh:run(quote(self.args.service) .. ' ' .. action, { timeout = 45 })
+	local timeout = 45
+	local deadline = process.now() + timeout
+	self.box.ssh:run(quote(self.args.service) .. ' ' .. action, { timeout = timeout })
+	if action ~= 'stop' then return end
+
+	-- procd acknowledges the stop request while the process is still shutting down.
+	local pids = {}
+	while true do
+		local remaining = deadline - process.now()
+		if remaining <= 0 then
+			local detail = next(pids) and (' (PIDs: ' .. table.concat(util.keys(pids), ', ') .. ')') or ''
+			error('Devicecode is still running after stop' .. detail, 0)
+		end
+		pids = self:service_pids(remaining)
+		if not next(pids) then return end
+		remaining = deadline - process.now()
+		if remaining > 0 then process.pause(math.min(0.25, remaining)) end
+	end
 end
 
 ---@param archive string? Omit to stop the service without replacing code.
@@ -180,6 +203,68 @@ function Devicecode:restore_persistent()
 	end
 end
 
+function Devicecode:service_pids(timeout)
+	local name = assert(self.args.service:match('([^/]+)$'))
+	local result = self.box.ssh:run('ubus call service list ' .. quote(util.encode({ name = name })),
+		{ timeout = math.min(timeout or 15, 15) })
+	local service = util.decode(result.stdout)[name] or {}
+	local pids = {}
+	for _, instance in pairs(service.instances or {}) do
+		if instance.running and instance.pid then pids[tostring(instance.pid)] = true end
+	end
+	return pids
+end
+
+function M.same_pids(before, after)
+	for pid in pairs(before) do if not after[pid] then return false end end
+	for pid in pairs(after) do if not before[pid] then return false end end
+	return next(before) ~= nil
+end
+
+function M.restore(runtime, original_pids, timeout, now)
+	if not runtime.changed then return end
+	runtime:restore_runtime()
+	if not next(original_pids) then
+		assert(not next(runtime:service_pids()), 'Original Devicecode service did not remain stopped')
+		return
+	end
+	runtime:service('start')
+	local deadline = now() + math.min(timeout, 15)
+	while not next(runtime:service_pids()) do
+		local remaining = deadline - now()
+		assert(remaining > 0, 'Original Devicecode service did not return to running')
+		process.pause(math.min(0.25, remaining))
+	end
+end
+
+-- Compare on the host so the target only needs its existing BusyBox tar.
+function Devicecode:verify_restored()
+	local remote = self.box.remote .. '/restored-runtime.tar.gz'
+	local actual = self.box.artifacts .. '/restored-runtime.tar.gz'
+	self.box.ssh:run('tar -czf ' .. quote(remote) .. ' -C ' .. quote(self.runtime) .. ' .', { timeout = 120 })
+	self.box.ssh:download(remote, actual)
+	local report = self.box.artifacts .. '/restore-verification.log'
+	local commands = self.box.recovering and self.box.recovery_process or self.box.process
+	local comparison = commands:run('set -e; cd ' .. quote(self.box.artifacts)
+		.. [=[; compare=$(mktemp -d ./restore-check.XXXXXX); trap 'rm -rf "$compare"' EXIT]=]
+		.. '; mkdir "$compare/original" "$compare/restored"'
+		.. '; tar -xzf ' .. quote(self.backup_path) .. ' -C "$compare/original"'
+		.. '; tar -xzf ' .. quote(actual) .. ' -C "$compare/restored"'
+		.. '; diff -qr --no-dereference "$compare/original" "$compare/restored"',
+		{ timeout = 120, log_path = report })
+	assert(comparison.code == 0, 'Restored runtime differs from backup; see ' .. report)
+	if self.persistent_existed then
+		local result = self.box.ssh:run('cat ' .. quote(self.config_path), { timeout = 30 })
+		assert(result.stdout == util.read(self.box.artifacts .. '/original-persistent.json'),
+			'Restored persistent configuration differs from backup')
+	elseif self.config_path ~= self.runtime .. '/configs/' .. self.args.target .. '.json' then
+		local path = quote(self.config_path)
+		self.box.ssh:run('test ! -e ' .. path .. ' && test ! -L ' .. path, { timeout = 30 })
+	end
+	util.write(report, 'Verified original runtime contents and configuration.\n')
+	print('Verified original runtime and configuration')
+end
+
 ---Leave the restored service stopped so the caller can perform device-specific recovery.
 ---@return nil
 function Devicecode:restore_runtime()
@@ -204,6 +289,7 @@ function Devicecode:restore_runtime()
 		.. 'if mv "$stage" "$runtime"; then rm -rf "$previous"; '
 		.. 'else mv "$previous" "$runtime"; exit 1; fi', { timeout = 120 })
 	self:restore_persistent()
+	self:verify_restored()
 end
 
 ---@return table<string, string>

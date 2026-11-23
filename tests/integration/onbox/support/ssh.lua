@@ -163,11 +163,12 @@ end
 
 ---@param command string
 ---@param log_path string
+---@param stream boolean? Keep stdout available for a live reader.
 ---@return integer pid
-function Ssh:start(command, log_path)
+function Ssh:start(command, log_path, stream)
 	return self:with_command(function(ssh_command, lease)
 		return self:_commands():start(ssh_command .. ' ' .. quote(command), log_path, nil,
-			{ inherit_fds = lease and { lease } or nil })
+			{ inherit_fds = lease and { lease } or nil, stream = stream })
 	end)
 end
 

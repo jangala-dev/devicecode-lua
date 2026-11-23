@@ -15,8 +15,7 @@ local ok, code = pcall(function()
 		print([[
   --first TYPE              Default IP
   --second TYPE             Default IPV4V6
-  --keep-final-config       Leave the second PDP config active
-By default restore the original modem config, keeping the new code deployed.]])
+The original runtime and configuration are restored and verified after the test.]])
 		print('A modem without an AT port is reset immediately, with up to two recovery resets per wait.')
 		return 0
 	end

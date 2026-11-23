@@ -2,6 +2,7 @@ local busmod      = require 'bus'
 local safe        = require 'coxpcall'
 local fibers      = require 'fibers'
 local channel     = require 'fibers.channel'
+local cond        = require 'fibers.cond'
 local op          = require 'fibers.op'
 
 local probe       = require 'tests.support.bus_probe'
@@ -345,6 +346,31 @@ function T.hal_publishes_raw_host_cap_meta_status_and_rpc_on_add()
 			assert(reply.reason.mode == 'raw-host')
 
 			listener:close()
+		end)
+	end)
+end
+
+function T.hal_reports_registration_outcome_before_signalling_readiness()
+	runfibers.run_auto(function(scope)
+		local rawprobe = new_rawprobe_manager()
+		with_real_hal(scope, {
+			['services.hal.managers.filesystem'] = new_bootstrap_filesystem_manager(),
+			['services.hal.managers.rawprobe'] = rawprobe,
+		}, function(bus)
+			local admin = bus:connect()
+			publish_hal_config(admin, add_rawprobe_config())
+			wait_payload(admin, { 'raw', 'host', 'uart_main', 'cap', 'uart', 'main', 'status' })
+			local function register(device_id, cap_id)
+				local ready = cond.new()
+				local cap = assert(cap_types.new.Capability('uart', cap_id, channel.new(), { 'open' }))
+				local event = assert(hal_types.new.DeviceEvent('added', 'uart', device_id, {}, { cap }, ready))
+				rawprobe.dev_ev_ch:put(event)
+				ready:wait()
+				return event.registration_ok
+			end
+			assert(register('another', 'another') == true, 'Expected successful registration to be acknowledged')
+			assert(register('main', 'unique') == false, 'Duplicate device was accepted')
+			assert(register('third', 'main') == false, 'Duplicate capability was accepted')
 		end)
 	end)
 end

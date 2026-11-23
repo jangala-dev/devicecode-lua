@@ -851,9 +851,10 @@ function HalService.start(conn, opts)
 				class = device.class,
 				id    = device.id,
 			})
-			return
+			return false
 		end
 
+		local registered = true
 		local source_kind = 'host'
 		local source = device_source_id(device)
 
@@ -862,6 +863,7 @@ function HalService.start(conn, opts)
 		for _, cap in ipairs(device.capabilities) do
 			local entry, cap_set_err = registry:set_cap(cap.class, cap.id, cap, source_kind, source)
 			if not entry then
+				registered = false
 				log('warn', 'register_capability_skipped', {
 					err   = cap_set_err,
 					class = cap.class,
@@ -886,6 +888,7 @@ function HalService.start(conn, opts)
 			event_type = event_type,
 			source     = source,
 		})
+		return registered
 	end
 
 	local function unregister_device(event_type, device)
@@ -1086,8 +1089,9 @@ function HalService.start(conn, opts)
 				})
 				return
 			end
-			register_device(device_event.event_type, dev_inst)
+			local registered = register_device(device_event.event_type, dev_inst)
 			if device_event.ready_cond then
+				device_event.registration_ok = registered
 				device_event.ready_cond:signal()
 			end
 			return

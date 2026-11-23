@@ -232,10 +232,16 @@ local function log_mwan_backhaul_transitions(state, before, after, trigger)
 			local prev_rec = prev[uplink_id]
 			local prev_state = type(prev_rec) == 'table' and prev_rec.state or nil
 			local state_now = rec.state
-			if (state_now == 'online' or state_now == 'offline') and state_now ~= prev_state and (tool == nil or tool == 'mwan3') then
+			local rebound = state_now == 'online' and prev_state == 'online'
+				and (rec.ifname ~= prev_rec.ifname or rec.routing_interface ~= prev_rec.routing_interface)
+			if (state_now == 'online' or state_now == 'offline') and (state_now ~= prev_state or rebound)
+				and (tool == nil or tool == 'mwan3') then
 				obs_log(state.svc, 'info', {
 					what = state_now == 'online' and 'mwan_member_online' or 'mwan_member_offline',
-					summary = string.format('mwan member %s %s interface=%s ifname=%s', tostring(uplink_id), tostring(state_now), tostring(rec.interface or '?'), tostring(rec.ifname or '?')),
+					include_event_time = true,
+					summary = string.format('mwan member %s %s interface=%s ifname=%s via=%s',
+						tostring(uplink_id), tostring(state_now), tostring(rec.interface or '?'),
+						tostring(rec.ifname or '?'), tostring(rec.routing_interface or '?')),
 					uplink_id = tostring(uplink_id),
 					interface = rec.interface,
 					ifname = rec.ifname,
@@ -1167,11 +1173,16 @@ local function handle_speedtest_done(state, ev)
 			obs_log(state.svc, rec.ok == true and 'info' or 'warn', {
 				what = 'speedtest_completed',
 				summary = rec.ok == true
-					and string.format('speedtest %s on %s/%s: %.1f Mbps', tostring(ev.uplink_id), tostring(rec.interface or '?'), tostring(rec.device or '?'), mbps or 0)
+					and string.format('speedtest %s on %s/%s: %.6f Mbps%s source=%s via=%s', tostring(ev.uplink_id),
+						tostring(rec.interface or '?'), tostring(rec.device or '?'), mbps or 0,
+						rec.lower_bound and ' (lower bound)' or '', tostring(rec.local_ip or '?'),
+						tostring(rec.hal_interface or '?'))
 					or string.format('speedtest %s failed: %s', tostring(ev.uplink_id), tostring(rec.err or 'unknown')),
 				uplink_id = ev.uplink_id,
 				interface = rec.interface,
 				device = rec.device,
+				local_ip = rec.local_ip,
+				hal_interface = rec.hal_interface,
 				ok = rec.ok == true,
 				err = rec.err,
 				peak_mbps = mbps,

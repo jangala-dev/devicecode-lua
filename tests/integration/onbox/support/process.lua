@@ -637,26 +637,40 @@ function Process:_launch(command, opts, background, on_handle)
 		pid_path = workspace .. '/pid'
 		assert(not stat.lstat(pid_path), 'Process handoff already exists')
 		local stdout_path = opts.log_path or (self.artifacts .. '/command.stdout')
-		local stderr_path = opts.log_path and nil or (self.artifacts .. '/command.stderr')
+		local stderr_path = opts.stream and (stdout_path .. '.stderr')
+			or (not opts.log_path and (self.artifacts .. '/command.stderr') or nil)
 		local stdout, stdout_err = f.file.open(stdout_path, 'w')
 		assert(stdout, stdout_err)
 		outputs = { stdout }
 		local stderr
-		if not opts.log_path then
+		if stderr_path then
 			local stream, stream_err = f.file.open(stderr_path, 'w')
 			assert(stream, stream_err)
 			stderr, outputs[#outputs + 1] = stream, stream
 		end
+		local reader, writer
+		if opts.stream then
+			-- Supply our own pipe. Waiting for an exec-owned stdout pipe would
+			-- close its read end on child exit, before we can drain pending data.
+			reader, writer = f.file.pipe()
+			assert(reader and writer, 'Cannot open stream pipe')
+			outputs[#outputs + 1], outputs[#outputs + 2] = reader, writer
+			set_fd_cloexec(assert(reader.io:fileno()), true)
+			local writer_fd = assert(writer.io:fileno())
+			set_fd_cloexec(writer_fd, true)
+			local flags = assert(fcntl.fcntl(writer_fd, fcntl.F_GETFL))
+			assert(fcntl.fcntl(writer_fd, fcntl.F_SETFL, bit.band(flags, bit.bnot(fcntl.O_NONBLOCK or 2048))))
+		end
 		local argv = background
 			and { 'setsid', 'sh', '-c', WRAPPER, 'onbox-command', pid_path, 'sh', '-c', command }
 			or { 'sh', '-c', WRAPPER, 'onbox-command', pid_path, 'sh', '-c', command }
-		local spec = { stdin = 'pipe', stdout = stdout, stderr = opts.log_path and 'stdout' or stderr,
+		local spec = { stdin = 'pipe', stdout = writer or stdout, stderr = stderr or 'stdout',
 			flags = background and nil or { process_group = true } }
 		for i, value in ipairs(argv) do spec[i] = value end
 		local cmd = f.exec.command(spec)
 		handle = { command = cmd, workspace = workspace, pid_path = pid_path,
 			stdout_path = stdout_path, stderr_path = stderr_path, outputs = outputs,
-			source = input,
+			source = input, reader = reader, sink = opts.stream and stdout or nil,
 			completed = f.oneshot.new(), feeder_done = f.oneshot.new(), feeder_failed = f.oneshot.new(),
 			outcome_ready = f.oneshot.new(), lifecycle_done = f.oneshot.new(), outcome_sequence = 0,
 			feeder_state = 'not_started', background = background }
@@ -680,6 +694,10 @@ function Process:_launch(command, opts, background, on_handle)
 		self:_spawn_waiter(handle)
 		self.by_pid[handle.pgid] = handle
 		self:_start_feeder(handle)
+		if writer then
+			local closed, close_err = close_stream(writer, false)
+			assert(closed, close_err)
+		end
 	end)
 
 	if launched then
@@ -863,6 +881,9 @@ end
 function Process:start(command, log_path, input_path, opts)
 	self:check_interrupted()
 	opts = opts or {}
+	if opts.stream then
+		assert(fiber_runtime.in_fiber() and log_path, 'Streaming requires a fiber and a log path')
+	end
 	if not fiber_runtime.in_fiber() then
 		local input_fd = open_input_fd(input_path)
 		local acquired, gate_token = pcall(acquire_launch_gate, self.state, false)
@@ -948,8 +969,13 @@ function Process:start(command, log_path, input_path, opts)
 		error(table.concat(errors, '\n'), 0)
 	end
 	local handle = self:_launch(command, { log_path = log_path, input_path = input_path, timeout = 40,
-		inherit_fds = opts.inherit_fds }, true)
+		inherit_fds = opts.inherit_fds, stream = opts.stream }, true)
 	return assert(handle.pgid)
+end
+
+function Process:stream_handles(pid)
+	local handle = assert(self.by_pid[pid], 'Unknown stream process')
+	return assert(handle.reader), assert(handle.sink)
 end
 
 function Process:_stop_legacy_record(record, grace)

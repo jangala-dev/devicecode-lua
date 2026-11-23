@@ -243,8 +243,12 @@ local function summarise_log_payload(payload)
 end
 
 local function format_log_line(rec)
+	local time = fmt_time(rec.mono)
+	if type(rec.payload) == 'table' and rec.payload.include_event_time == true and type(rec.payload.ts) == 'number' then
+		time = time .. (' (event_mono=%.6f)'):format(rec.payload.ts)
+	end
 	return string.format('%s  LOG  %-10s %-5s  %-24s  %s',
-		fmt_time(rec.mono), tostring(rec.service), tostring(rec.level), tostring(rec.what or ''), summarise_log_payload(rec.payload))
+		time, tostring(rec.service), tostring(rec.level), tostring(rec.what or ''), summarise_log_payload(rec.payload))
 end
 
 local function format_canonical_line(msg)

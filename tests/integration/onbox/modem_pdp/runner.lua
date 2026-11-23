@@ -2,7 +2,6 @@ local support = require 'onbox.support.runner'
 local devicecode = require 'onbox.support.devicecode'
 local modem_support = require 'onbox.support.modem'
 local util = require 'onbox.support.util'
-local process = require 'onbox.support.process'
 local tablex = require 'shared.table'
 
 local M = {}
@@ -74,13 +73,11 @@ function M.check_contexts(response, expected)
 	return active
 end
 
----@param content string
----@return nil
-function M.check_restart_order(content)
-	-- A reset may replace the ModemManager object, but the next owner must establish
-	-- the current PDP facts before it spends another restart reservation or fails open.
-	local awaiting_inspection, recognised = {}, 0
-	for line in content:gmatch('[^\n]+') do
+function M.restart_order()
+	-- After replacing a modem object, GSM must inspect the current PDP contexts
+	-- before spending another restart reservation or failing open.
+	local awaiting_inspection, recognised, first_error = {}, 0, nil
+	local function inspect(line)
 		-- logread preserves the monitor timestamp and may add a syslog prefix.
 		-- Locate the LOG columns independently of those prefixes.
 		local service, _, event = line:match('%f[%w]LOG%s+(%S+)%s+(%S+)%s+(%S+)%s+')
@@ -108,34 +105,30 @@ function M.check_restart_order(content)
 			end
 		end
 	end
-	assert(recognised > 0, 'No PDP lifecycle events recognised in monitor-format logs')
-	for modem in pairs(awaiting_inspection) do
-		error(('PDP modem %s reached the end of the phase without post-reset inspection'):format(modem), 0)
+	local function observe(line)
+		if first_error then return end
+		local ok, err = pcall(inspect, line)
+		if not ok then first_error = err end
 	end
+	local function verify()
+		if first_error then error(first_error, 0) end
+		assert(recognised > 0, 'No PDP lifecycle events recognised in monitor-format logs')
+		for modem in pairs(awaiting_inspection) do
+			error(('PDP modem %s reached the end of the phase without post-reset inspection'):format(modem), 0)
+		end
+	end
+	return observe, verify
 end
 
----@param content string
----@return string
-function M.current_capture(content)
-	-- `logread -f` replays the syslog ring before following it, so a capture starts
-	-- with older lines, possibly from an earlier run or firmware. Only lines after the
-	-- last BEGIN marker, which Logs:start writes once the capture is running, belong
-	-- to this run.
-	local marker, from = 'onbox-test: BEGIN ', nil
-	local at = content:find(marker, 1, true)
-	while at do
-		from = at
-		at = content:find(marker, at + 1, true)
-	end
-	assert(from, 'Log capture has no onbox-test BEGIN marker')
-	local line_end = content:find('\n', from, true)
-	return line_end and content:sub(line_end + 1) or ''
+function M.check_restart_order(content)
+	local observe, verify = M.restart_order()
+	for line in content:gmatch('[^\n]+') do observe(line) end
+	verify()
 end
 
 ---@class PdpBoxArgs: OnboxArgs
 ---@field first string
 ---@field second string
----@field keep_final_config boolean
 
 ---@class PdpBoxRunner
 ---@field box OnboxSession
@@ -153,9 +146,8 @@ Runner.__index = Runner
 function M.parse_args(argv, repo, here)
 	local args = support.parse_args(argv, repo, here, {
 		prefix = 'pdp-box',
-		defaults = { first = 'IP', second = 'IPV4V6', keep_final_config = false },
+		defaults = { first = 'IP', second = 'IPV4V6' },
 		values = { ['--first'] = 'first', ['--second'] = 'second' },
-		flags = { ['--keep-final-config'] = 'keep_final_config' },
 	})
 	---@cast args PdpBoxArgs
 	local valid = { IP = true, IPV4V6 = true, IPV6 = true }
@@ -174,12 +166,15 @@ end
 ---@param args PdpBoxArgs
 ---@return PdpBoxRunner
 function M.new(args)
-	return M.from_session(support.open(args, { 'gsm', 'pdp', 'devicecode', 'error', 'failed' }))
+	local instance = M.from_session(support.open(args, { 'gsm', 'pdp', 'devicecode', 'error', 'failed' }))
+	instance.modems.watch_inventory = true
+	return instance
 end
 
 ---@return nil
 function Runner:prepare()
 	self.runtime:prepare()
+	self.original_pids = self.runtime:service_pids()
 	self.runtime:ensure_dependencies({ commands = { mmcli = 'modemmanager' } }, 'modem-dependencies')
 	-- The service runs on the saved config when there is one, so phases start from it rather
 	-- than the bootstrap config, which would replace the box's own settings.
@@ -223,19 +218,17 @@ function Runner:inspect(label, config)
 			label, self.targets[imei].name, imei:sub(-4), table.concat(cids, ','), expected))
 	end
 	self.modems:wait(self.targets, 'connected')
-	M.check_restart_order(M.current_capture(util.read(self.box.logs.path)))
+	self.box.logs:checkpoint('END ' .. label .. ' tested runtime')
+	self.verify_restart_order()
 	self.summary[#self.summary + 1] = { phase = label, modems = results }
 	util.write(self.box.artifacts .. '/results.json', util.encode(self.summary))
 end
 
--- Logs:start writes the capture's first BEGIN marker before deploy stops the runtime
--- being replaced, which can still log PDP events while the archive uploads. This
--- marker comes after that stop and before the tested runtime starts, so the restart
--- order check in inspect (which reads from the last marker) sees only the tested runtime.
----@param label string
----@return nil
+-- Arm the PDP observer after the old service stops and before the tested service starts.
 function Runner:mark_tested_runtime(label)
-	self.box.ssh:run('logger -t onbox-test ' .. process.quote('BEGIN ' .. label .. ' tested runtime'))
+	local observe, verify = M.restart_order()
+	self.box.logs:checkpoint('BEGIN ' .. label .. ' tested runtime', observe)
+	self.verify_restart_order = verify
 end
 
 ---@param label string
@@ -258,11 +251,12 @@ end
 ---@return nil
 function Runner:rollback()
 	print('Rolling back the original runtime and configuration')
-	self.modems:resume_manager()
+	local resumed, resume_err = pcall(function() self.modems:resume_manager() end)
 	self.runtime:restore_runtime()
-	local ok, err = pcall(function() self.modems:clean_boot(self.targets) end)
-	self.runtime:service('restart')
-	if not ok then error(err, 0) end
+	local reset, reset_err = pcall(function() self.modems:clean_boot(self.targets) end)
+	if next(self.original_pids) then self.runtime:service('start') end
+	if not resumed then error(resume_err, 0) end
+	if not reset then error(reset_err, 0) end
 end
 
 ---@return integer exit_code
@@ -275,21 +269,24 @@ function Runner:run()
 			local config = M.phase_config(self.active, phase[2])
 			self:phase(phase[1], config, self.runtime:build(phase[1], config))
 		end
-		if not args.keep_final_config then
-			-- Both configs go back before the restart, so the service starts on the box's own settings.
-			self:phase('03-restored-config', self.active, nil, function()
-				self.runtime:write_config(self.runtime.original)
-				self.runtime:restore_persistent()
-			end)
-		end
+		-- Prove the original settings on the candidate code before restoring the original runtime.
+		self:phase('03-restored-config', self.active, nil, function()
+			self.runtime:write_config(self.runtime.original)
+			self.runtime:restore_persistent()
+		end)
 	end, {
 		diagnostics = function()
 			local commands = self.runtime:diagnostic_commands()
 			for name, command in pairs(self.modems:diagnostic_commands()) do commands[name] = command end
 			self.box.logs:diagnostics('failure', commands)
 		end,
-		rollback = function()
-			if self.runtime.changed then self:rollback() end
+		restore = function(failed)
+			if not self.runtime.changed then return end
+			if failed then self:rollback()
+			else
+				self.runtime:restore_runtime()
+				if next(self.original_pids) then self.runtime:service('start') end
+			end
 		end,
 		success_message = 'PASS: all phases verified',
 	})

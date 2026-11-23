@@ -1,10 +1,12 @@
 local stdlib = require 'posix.stdlib'
 local process = require 'onbox.support.process'
 local util = require 'onbox.support.util'
+local stream = require 'onbox.support.stream'
 local quote = process.quote
 
 local M = {}
 local MAX_AT_RECOVERY_RESETS = 2
+local SNAPSHOT_INTERVAL = 2
 
 ---@class OnboxModemInfo
 ---@field id string
@@ -15,6 +17,7 @@ local MAX_AT_RECOVERY_RESETS = 2
 ---@field plugin string
 ---@field model string
 ---@field at_port string?
+---@field net_ports string[]?
 ---@field name string?
 
 ---@class OnboxModems
@@ -29,28 +32,124 @@ function M.new(box)
 	return setmetatable({ box = box }, Modems)
 end
 
+---@param strict boolean? Reject incomplete enumeration when a test needs every listed modem.
 ---@return table<string, OnboxModemInfo>
-function Modems:inventory()
+function Modems:inventory(strict)
 	local listing = self.box.ssh:run('mmcli -L', { timeout = 20 }).stdout
 	local result = {}
 	for id in listing:gmatch('/Modem/(%d+)') do
 		local reply = self.box.ssh:run('mmcli -m ' .. id .. ' -J', { check = false, timeout = 20 })
+		assert(not strict or reply.code == 0, 'Cannot inspect listed ModemManager object ' .. id)
 		if reply.code == 0 then
 			local generic = util.decode(reply.stdout).modem.generic
-			local imei, ports = tostring(generic['equipment-identifier'] or ''), {}
+			local imei, ports, net_ports = tostring(generic['equipment-identifier'] or ''), {}, {}
+			if strict then
+				assert(imei:match('^%d+$'), 'Listed ModemManager object ' .. id .. ' has no usable IMEI')
+				assert(not result[imei], 'ModemManager reported a duplicate IMEI')
+			end
 			for _, port in ipairs(generic.ports or {}) do
 				local name = port:match('^(.*) %(at%)$')
 				if name then ports[#ports + 1] = name end
+				local dev = port:match('^(.*) %(net%)$')
+				if dev then net_ports[#net_ports + 1] = dev end
 			end
 			if imei ~= '' then
 				local at_port = ports[2] or ports[1]
 				result[imei] = { id = id, imei = imei, device = generic.device or '', state = generic.state,
 					failed_reason = generic['state-failed-reason'], plugin = generic.plugin or '',
-					model = generic.model or '', at_port = at_port and '/dev/' .. at_port or nil }
+					model = generic.model or '', at_port = at_port and '/dev/' .. at_port or nil, net_ports = net_ports }
 			end
 		end -- Objects can disappear between list and query during reset.
 	end
 	return result
+end
+
+-- The kernel alarm survives exec and bounds the same process even when
+-- the SSH connection drops. LuaJIT is already required on the test box.
+local function mmcli_watch_command(seconds, args)
+	local argv = { "'mmcli'" }
+	for _, value in ipairs(args) do argv[#argv + 1] = string.format('%q', value) end
+	local script = ([=[
+local ffi = require 'ffi'
+ffi.cdef[[
+	unsigned int alarm(unsigned int seconds);
+	int execvp(const char *file, const char *const argv[]);
+]]
+local argv = ffi.new('const char *[%d]', { %s })
+ffi.C.alarm(%d)
+ffi.C.execvp(argv[0], argv)
+io.stderr:write('Cannot start mmcli monitor (errno ', ffi.errno(), ')\n')
+os.exit(127)
+]=]):format(#argv + 1, table.concat(argv, ', '), math.ceil(seconds))
+	return 'exec luajit -e ' .. quote(script)
+end
+
+function M.inventory_watch_command(seconds)
+	return mmcli_watch_command(seconds, { '-M' })
+end
+
+function M.parse_state_watch(line)
+	local id, message = line:match('^%s*/org/freedesktop/ModemManager1/Modem/(%d+): (.*)$')
+	if not id then return end
+	local initial = message:match("^Initial state, '([%w_-]+)'%s*$")
+	if initial then return { kind = 'initial', state = initial, object_id = id } end
+	local from, state = message:match("^State changed, '([%w_-]+)' %-%-> '([%w_-]+)' %(")
+	if state then return { kind = 'transition', from = from, state = state, object_id = id } end
+	if message:match('^Removed%s*$') then return { kind = 'removed', state = 'absent', object_id = id } end
+end
+
+function M.parse_state_syslog(line)
+	local id, from, state = line:match('%]: <%w+>%s+%[modem(%d+)%] state changed %(([%w_-]+) %-> ([%w_-]+)%)')
+	if id then return { kind = 'daemon', from = from, state = state, object_id = id } end
+end
+
+function Modems:watch_state(id, seconds, observe)
+	assert(id:match('^%d+$'), 'Invalid ModemManager ID')
+	local path = self.box.artifacts .. '/modem-state-' .. id .. '.log'
+	local ssh = self.box.ssh
+	local pid_path = quote(self.box.remote .. '/modem-state-' .. id .. '.pid')
+	local marker = 'onbox-modem-watch-end ' .. util.trim(util.read('/proc/sys/kernel/random/uuid'))
+	-- Wait for mmcli to exit before appending the marker to the same stdout.
+	-- The reader must consume every earlier line before it can acknowledge it.
+	local command = [[
+umask 077
+finish_watch() {
+	kill -KILL "$onbox_watch_child" 2>/dev/null || exit 1
+	wait "$onbox_watch_child" 2>/dev/null
+	[ "$?" -eq 137 ] || exit 1
+	printf '%s\n' ]] .. quote(marker) .. '\n' .. [[
+	exit 0
+}
+trap finish_watch USR1
+]] .. mmcli_watch_command(seconds, { '-m', id, '-w' }) .. [[ &
+onbox_watch_child=$!
+printf '%s\n' "$$" > ]] .. pid_path .. [[
+
+wait "$onbox_watch_child"
+exit 1
+]]
+	local drained = false
+	local capture = stream.open(ssh, self.box.process, command, path, function(line)
+		if line == marker then drained = true; return true end
+		if line:match('^%s*$') then return false end
+		local event = assert(M.parse_state_watch(line), 'Unrecognised ModemManager state line: ' .. line)
+		assert(event.object_id == id, 'ModemManager state monitor reported a different object')
+		observe(event)
+		return true
+	end)
+	function capture.finish(watch)
+		watch:assert_open()
+		local signal = 'onbox_watch_pid=$(cat ' .. pid_path .. [[)
+case "$onbox_watch_pid" in ''|*[!0-9]*) exit 1;; esac
+tr '\000' '\n' < "/proc/$onbox_watch_pid/cmdline" | grep -Fq ]] .. quote(marker) .. [[ || exit 1
+kill -USR1 "$onbox_watch_pid"
+]]
+		local deadline = process.now() + 15
+		ssh:run(signal, { timeout = 15 })
+		watch:wait_for('end marker from ModemManager object ' .. id, deadline, function() return drained end)
+		watch:close()
+	end
+	return capture
 end
 
 ---@param targets table<string, OnboxModemInfo> Stable IMEI keys, not mmcli IDs.
@@ -59,11 +158,32 @@ end
 ---@param require_at boolean? Immediately reset a modem without an AT port, up to twice per modem.
 ---@return table<string, OnboxModemInfo>
 function Modems:wait(targets, state, old_ids, require_at)
+	-- Keep the recovery path independent of the normal process manager.
+	if not self.watch_inventory or self.box.recovering then
+		return self:_wait(targets, state, old_ids, require_at)
+	end
+	self.watch_number = (self.watch_number or 0) + 1
+	local path = self.box.artifacts .. '/modem-watch-' .. self.watch_number .. '.log'
+	local capture = stream.open(self.box.ssh, self.box.process,
+		M.inventory_watch_command(self.box.args.timeout + 10), path,
+		function(line) return line:match('/Modem/%d+') ~= nil end)
+	local ok, result = pcall(self._wait, self, targets, state, old_ids, require_at, capture)
+	local closed, close_err = pcall(function() capture:close() end)
+	if not ok then
+		if not closed then io.stderr:write('Modem monitor cleanup failed: ', tostring(close_err), '\n') end
+		error(result, 0)
+	end
+	assert(closed, close_err)
+	return result
+end
+
+function Modems:_wait(targets, state, old_ids, require_at, capture)
 	local deadline, last_status = process.now() + self.box.args.timeout, ''
 	local excluded_ids, resets = {}, {}
 	for imei, id in pairs(old_ids or {}) do excluded_ids[imei] = { [id] = true } end
 	local description = state or 'AT ports'
 	while process.now() < deadline do
+		local seen = capture and capture:version()
 		local ok, current = pcall(function() return self:inventory() end)
 		if ok then
 			local statuses, matched, result = {}, true, {}
@@ -100,8 +220,19 @@ function Modems:wait(targets, state, old_ids, require_at)
 				last_status = status
 			end
 			if matched then return result end
-		elseif self.box.interrupted then error('Interrupted', 0) end
-		process.pause(2)
+		elseif self.box.interrupted and not self.box.recovering then error('Interrupted', 0) end
+		if capture then
+			-- Object changes wake immediately. State and AT ports can change on
+			-- the same object, so periodically recheck those fields.
+			local next_check = math.min(deadline, process.now() + SNAPSHOT_INTERVAL)
+			local _, err = capture:wait_change(seen, next_check)
+			if err then
+				io.stderr:write('Modem monitor unavailable, using snapshots: ', tostring(err), '\n')
+				capture = nil
+			end
+		else
+			process.pause(math.max(0, math.min(SNAPSHOT_INTERVAL, deadline - process.now())))
+		end
 	end
 	error(('Timed out after %ss waiting for %s: %s'):format(self.box.args.timeout, description, last_status), 0)
 end
@@ -114,7 +245,8 @@ end
 
 ---@param targets table<string, OnboxModemInfo>
 ---@param require_at boolean? Reset/recovery itself does not require an AT port.
----@return nil
+---@return table<string, OnboxModemInfo>
+---@return table<string, string> Old object IDs by IMEI.
 function Modems:clean_boot(targets, require_at)
 	local current, old_ids = self:inventory(), {}
 	for _, imei in ipairs(util.keys(targets)) do
@@ -123,7 +255,7 @@ function Modems:clean_boot(targets, require_at)
 	for _, imei in ipairs(util.keys(old_ids)) do
 		self.box.ssh:run('mmcli -m ' .. old_ids[imei] .. ' --reset', { timeout = 45 })
 	end
-	self:wait(targets, 'disabled', old_ids, require_at)
+	return self:wait(targets, 'disabled', old_ids, require_at), old_ids
 end
 
 ---Run AT commands with ModemManager paused; a remote watchdog always resumes it.

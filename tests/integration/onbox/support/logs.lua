@@ -1,8 +1,13 @@
 local process = require 'onbox.support.process'
 local util = require 'onbox.support.util'
+local stream = require 'onbox.support.stream'
 local quote = process.quote
 
 local M = {}
+
+function M.event_time(line)
+	return tonumber(line:match('%(event_mono=([%d.]+)%)'))
+end
 
 ---@param content string
 ---@param filters string[]? Case-insensitive literal fragments.
@@ -55,10 +60,35 @@ function Logs:start(label)
 	self.ssh:run('umask 077; mkdir -p ' .. quote(self.remote))
 	self.pid_path = self.remote .. '/' .. label .. '-logread.pid'
 	self.path = self.artifacts .. '/' .. label .. '-service.log'
-	self.pid = self.ssh:start('echo $$ > ' .. quote(self.pid_path) .. '; exec logread -f', self.path)
+	self.capture = stream.open(self.ssh, self.process,
+		'echo $$ > ' .. quote(self.pid_path) .. '; exec logread -f', self.path, function(line)
+			local boundary = self.boundary
+			if boundary and line:sub(-#boundary.suffix) == boundary.suffix then
+				self.observer, self.boundary = boundary.observer, nil
+				return true
+			end
+			return self.observer and self.observer(line) == true or false
+		end)
+	self.pid = self.capture.pid
 	self.ssh:run('for i in $(seq 1 10); do test -s ' .. quote(self.pid_path)
 		.. ' && exit 0; sleep 1; done; exit 1', { timeout = 15 })
-	self.ssh:run('logger -t onbox-test ' .. quote('BEGIN ' .. label))
+	self:checkpoint('BEGIN ' .. label)
+end
+
+-- Acknowledge marker delivery through the actual stream, including its disk capture.
+-- Switch observers on receipt so lines in the same SSH chunk are assigned correctly.
+function Logs:checkpoint(label, observer)
+	local suffix = 'onbox-test: ' .. label .. ' ' .. util.trim(util.read('/proc/sys/kernel/random/uuid'))
+	local boundary = { suffix = suffix, observer = observer }
+	self.boundary = boundary
+	local deadline = process.now() + 15
+	self.ssh:run('logger -t onbox-test ' .. quote(suffix:sub(#'onbox-test: ' + 1)), { timeout = 15 })
+	self.capture:wait_for(label .. ' in syslog', deadline, function() return self.boundary ~= boundary end)
+end
+
+-- An observer can return true to wake a waiter after recording a matching line.
+function Logs:wait_for(label, deadline, check)
+	return self.capture:wait_for(label, deadline, check)
 end
 
 ---@return nil
@@ -85,7 +115,11 @@ function Logs:stop()
 	if not ok then errors[#errors + 1] = tostring(err) end
 	if self.pid then
 		local stopped, stop_err = pcall(function() self.process:stop(self.pid) end)
-		if stopped then self.pid = nil else errors[#errors + 1] = tostring(stop_err) end
+		if stopped then
+			self.pid, self.capture, self.observer, self.boundary = nil, nil, nil, nil
+		else
+			errors[#errors + 1] = tostring(stop_err)
+		end
 	end
 	state.recovering = recovering
 	self.stopping = false

@@ -15,6 +15,8 @@ local logs = require 'onbox.support.logs'
 local devicecode = require 'onbox.support.devicecode'
 local modem = require 'onbox.support.modem'
 local util = require 'onbox.support.util'
+local onbox_stream = require 'onbox.support.stream'
+local ui_logs = require 'onbox.support.ui_logs'
 local quote = process.quote
 
 local tests = {}
@@ -583,35 +585,228 @@ function tests.remote_workspace_cleanup_uses_exact_registered_path()
 	end)
 end
 
----@return nil
-function tests.phase_captures_and_stops_logs_without_preparing_a_devicecode_runtime()
+function tests.stream_delivers_split_lines_and_keeps_stderr_out_of_capture()
+	with_session(function(box)
+		box.ssh.command = 'sh -c'
+		local path = box.artifacts .. '/wire.log'
+		equal(box:run(function()
+			local lines = {}
+			local capture = onbox_stream.open(box.ssh, box.process,
+				[[printf 'fir'; sleep 0.05; printf 'st\r\nsecond\npartial'; echo warning >&2]], path,
+				function(line) lines[#lines + 1] = line end)
+			rejects(function()
+				capture:wait_for('third line', process.now() + 2, function() return lines[3] end)
+			end, 'middle of a line')
+			capture:close()
+			equal(table.concat(lines, ','), 'first,second')
+		end), 0)
+		equal(util.read(path), 'first\r\nsecond\npartial')
+		equal(util.read(path .. '.stderr'), 'warning\n')
+	end)
+end
+
+function tests.stream_accepts_last_complete_line_before_eof()
+	with_session(function(box)
+		equal(box:run(function()
+			local f = fiber_runtime.get()
+			local release = f.oneshot.new()
+			local reads = 0
+			local reader = { read_some_op = function()
+				reads = reads + 1
+				if reads == 1 then
+					return fiber_runtime.oneshot_op(release):wrap(function() return 'last line\n' end)
+				end
+				return f.op.always(nil)
+			end }
+			local sink = {
+				write_op = function(_, data) return f.op.always(#data) end,
+				flush_op = function() return f.op.always(true) end,
+			}
+			local commands = { stream_handles = function() return reader, sink end }
+			local ssh = { start = function() return 123 end }
+			local seen
+			local capture = onbox_stream.open(ssh, commands, 'unused', 'wire.log', function(line) seen = line end)
+			assert(f.fibers.spawn(function() release:signal() end))
+			equal(capture:wait_for('complete line', process.now() + 2, function() return seen end), 'last line')
+		end), 0)
+	end)
+end
+
+function tests.phase_observer_only_sees_lines_between_acknowledged_markers()
 	with_session(function(box, temp)
 		local bin = temp .. '/bin'
+		local fixture = temp .. '/syslog'
 		assert(process.execute('mkdir -p ' .. quote(bin)) == 0)
-		util.write(bin .. '/logread', "#!/bin/sh\nprintf 'capture ready\\n'\n"
-			.. "trap 'kill \"$child\" 2>/dev/null; wait \"$child\" 2>/dev/null; exit 0' TERM\n"
-			.. "sleep 30 & child=$!\nwait \"$child\"\n")
-		util.write(bin .. '/logger', '#!/bin/sh\nexit 0\n')
+		util.write(fixture, 'old: replayed\n')
+		util.write(bin .. '/logread', '#!/bin/sh\nexec tail -n +1 -s 0.02 -f "$SYSLOG_FIXTURE"\n')
+		util.write(bin .. '/logger', "#!/bin/sh\nprintf '%s: %s\\n' \"$2\" \"$3\" >> \"$SYSLOG_FIXTURE\"\n")
 		assert(stat.chmod(bin .. '/logread', 448))
 		assert(stat.chmod(bin .. '/logger', 448))
-		box.ssh.command = 'env PATH=' .. quote(bin) .. ':"$PATH" sh -c'
-		local body_ok, body_err = pcall(function()
+		box.ssh.command = 'env PATH=' .. quote(bin) .. ':"$PATH" SYSLOG_FIXTURE=' .. quote(fixture) .. ' sh -c'
+		equal(box:run(function()
 			box:phase('example', function()
-				local deadline = process.now() + 2
-				while process.now() < deadline do
-					if util.read(box.logs.path):find('capture ready', 1, true) then return end
+				local observed = {}
+				box.ssh:run('logger -t old old-runtime')
+				box.logs:checkpoint('BEGIN tested runtime', function(line)
+					observed[#observed + 1] = line
+					return line == 'fixture: live'
+				end)
+				local f = fiber_runtime.get()
+				assert(f.fibers.spawn(function()
 					process.pause(0.02)
-				end
-				error('Background log capture did not start')
+					box.ssh:run('logger -t fixture live')
+				end))
+				box.logs:wait_for('live event', process.now() + 2, function() return #observed > 0 end)
+				box.logs:checkpoint('END tested runtime')
+				box.ssh:run('logger -t later cleanup')
+				box.logs:checkpoint('AFTER cleanup')
+				equal(table.concat(observed, ','), 'fixture: live')
 			end)
-		end)
-		-- Always stop the owned group, including after a fixture assertion fails.
-		local stopped, stop_err = pcall(function() box.logs:stop() end)
-		assert(body_ok, body_err)
-		assert(stopped, stop_err)
+		end), 0)
 		equal(box.logs.pid, nil)
 		equal(box.logs.pid_path, nil)
-		assert(util.read(box.logs.path):find('capture ready', 1, true))
+		assert(util.read(box.logs.path):find('old: replayed', 1, true))
+	end)
+end
+
+function tests.modem_object_event_wakes_inventory_before_snapshot_interval()
+	with_session(function(box, temp)
+		local mmcli = temp .. '/mmcli'
+		local checked = temp .. '/initial-snapshot'
+		-- OpenWrt may ship without the timeout applet.
+		assert(process.execute('ln -s "$(command -v luajit)" ' .. quote(temp .. '/luajit')
+			.. ' && ln -s "$(command -v sleep)" ' .. quote(temp .. '/sleep')) == 0)
+		box.ssh.command = 'env PATH=' .. quote(temp) .. ' INITIAL_SNAPSHOT=' .. quote(checked) .. ' /bin/sh -c'
+		util.write(mmcli, [=[#!/bin/sh
+test "$1" = -M || exit 1
+while ! test -f "$INITIAL_SNAPSHOT"; do sleep 0.02; done
+printf '+ /org/freedesktop/ModemManager1/Modem/7\n'
+exec sleep 5
+]=])
+		assert(stat.chmod(mmcli, 448))
+		equal(box:run(function()
+			local modems, reads = modem.new(box), 0
+			box.args.timeout = 2
+			modems.watch_inventory = true
+			modems.inventory = function()
+				reads = reads + 1
+				if reads == 1 then util.write(checked, ''); return {} end
+				return { ['123'] = { id = '7', state = 'connected' } }
+			end
+			equal(modems:wait({ ['123'] = {} }, 'connected')['123'].id, '7')
+			equal(reads, 2)
+			assert(util.read(box.artifacts .. '/modem-watch-1.log'):find('/Modem/7', 1, true),
+				'inventory check passed without evidence from the watch')
+			local deadline = box.ssh:run(modem.inventory_watch_command(1), { timeout = 3, check = false })
+			assert(deadline.stdout:find('/Modem/7', 1, true), 'watch did not start')
+			equal(deadline.code, 128 + signals.SIGALRM)
+		end), 0)
+	end)
+end
+
+function tests.modem_wait_rechecks_same_object_with_short_timeout()
+	with_session(function(box, temp)
+		local mmcli = temp .. '/mmcli'
+		box.ssh.command = 'env PATH=' .. quote(temp) .. ':"$PATH" sh -c'
+		util.write(mmcli, '#!/bin/sh\nexec sleep 5\n')
+		assert(stat.chmod(mmcli, 448))
+		equal(box:run(function()
+			local modems = modem.new(box)
+			box.args.timeout, modems.watch_inventory = 3, true
+			local started = process.now()
+			modems.inventory = function()
+				local state = process.now() - started >= 1 and 'connected' or 'registered'
+				return { ['123'] = { id = '7', state = state } }
+			end
+			equal(modems:wait({ ['123'] = {} }, 'connected')['123'].id, '7')
+		end), 0)
+	end)
+end
+
+function tests.modem_state_watch_captures_transitions_and_reports_eof()
+	with_session(function(box, temp)
+		local mmcli, release = temp .. '/mmcli', temp .. '/release-state-watch'
+		assert(process.execute('mkdir -p ' .. quote(box.remote)) == 0)
+		box.ssh.command = 'env PATH=' .. quote(temp) .. ':"$PATH" RELEASE_STATE_WATCH=' .. quote(release) .. ' sh -c'
+		util.write(mmcli, [=[#!/bin/sh
+test "$1" = -m && test "$3" = -w || exit 1
+printf "\t/org/freedesktop/ModemManager1/Modem/%s: Initial state, 'disabled'\n" "$2"
+printf "\t/org/freedesktop/ModemManager1/Modem/%s: State changed, 'disabled' --> 'enabling' (Reason: User)\n" "$2"
+if [ "$2" = 28 ]; then exec sleep 8; fi
+while ! test -f "$RELEASE_STATE_WATCH"; do sleep 0.02; done
+]=])
+		assert(stat.chmod(mmcli, 448))
+		equal(box:run(function()
+			local events = {}
+			local watch = modem.new(box):watch_state('27', 10, function(event) events[#events + 1] = event end)
+			watch:wait_for('two state events', process.now() + 2, function() return #events == 2 end)
+			watch:assert_open()
+			equal(events[1].state, 'disabled')
+			equal(events[2].from, 'disabled')
+			equal(events[2].state, 'enabling')
+			local wait_change = watch.wait_change
+			watch.wait_change = function(self)
+				self.wait_change = wait_change
+				return false -- The scheduler can wake just before the monotonic deadline.
+			end
+			local deadline = process.now() + 0.05
+			watch:wait_for('quiet observation window', deadline, function()
+				watch:assert_open()
+				return process.now() >= deadline
+			end)
+			util.write(release, '')
+			local _, err = watch:wait_change(watch:version(), process.now() + 2)
+			assert(err and err:find('unexpected EOF', 1, true))
+			rejects(function() watch:assert_open() end, 'unexpected EOF')
+			watch:close()
+			local drained = {}
+			local final = modem.new(box):watch_state('28', 10, function(event) drained[#drained + 1] = event end)
+			final:wait_for('initial state', process.now() + 2, function() return drained[1] end)
+			final:finish()
+			equal(drained[2].state, 'enabling')
+			assert(util.read(box.artifacts .. '/modem-state-28.log'):find('onbox-modem-watch-end', 1, true))
+		end), 0)
+	end)
+end
+
+function tests.ui_log_follow_combines_replay_live_and_one_shot_snapshots()
+	with_session(function(box, temp)
+		local curl = temp .. '/curl'
+		local boot_checked = temp .. '/boot'
+		box.ssh.command = 'env PATH=' .. quote(temp) .. ':"$PATH" BOOT_CHECKED=' .. quote(boot_checked) .. ' sh -c'
+		util.write(curl, [=[#!/bin/sh
+case "$*" in
+*'/api/logs/follow')
+	printf 'event: log\r\ndata: {"kind":"log",\r\n'
+	printf 'data: "replay":true,"record":{"what":"recent"}}\r\n\r\n'
+	printf 'event: ready\ndata: {"kind":"ready"}\n\n'
+	while ! test -f "$BOOT_CHECKED"; do sleep 0.02; done
+	printf 'data: {"kind":"log","record":{"what":"live"}}\n\n'
+	;;
+*'/api/logs')
+	# An older record was still in the recent ring but fell out of the replay queue.
+	echo recent >> "$BOOT_CHECKED.recent"
+	echo '{"ok":true,"records":[{"what":"replay-truncated"}]}'
+	;;
+*'/api/logs?boot=true')
+	echo boot >> "$BOOT_CHECKED"
+	echo '{"ok":true,"records":[{"what":"boot"}]}'
+	;;
+*) exit 1 ;;
+esac
+]=])
+		assert(stat.chmod(curl, 448))
+		equal(box:run(function()
+			local records = {}
+			local result = ui_logs.follow(box, 'http://127.0.0.1', 'phase', process.now() + 4,
+				function(record) records[record.what] = true; return true end,
+				function() return records.recent and records.boot and records.live and records['replay-truncated']
+				end, 'four records')
+			equal(result, true)
+		end), 0)
+		equal(util.read(boot_checked), 'boot\n')
+		equal(util.read(boot_checked .. '.recent'), 'recent\n')
+		assert(util.read(box.artifacts .. '/phase-ui-logs.sse'):find('"what":"live"', 1, true))
 	end)
 end
 
@@ -670,6 +865,23 @@ function tests.success_runs_cleanup_without_invoking_rollback()
 		}), 0)
 		equal(cleaned, true)
 	end)
+end
+
+function tests.teardown_restores_before_reporting_success_and_fails_on_mismatch()
+	for _, should_fail in ipairs({ false, true }) do
+		with_session(function(box)
+			local restored = false
+			box.logs.stop = function() end
+			box:defer(function() assert(restored, 'Cleanup ran before restoration') end)
+			equal(box:run(function() end, {
+				restore = function(failed)
+					equal(failed, false)
+					restored = true
+					if should_fail then error('restore verification failed') end
+				end,
+			}), should_fail and 1 or 0)
+		end)
+	end
 end
 
 ---@return nil
@@ -738,6 +950,9 @@ function tests.devicecode_preserves_configuration_and_restores_persistent_file_p
 				util.write(config_root .. '/example.json', '{"original":"persistent"}')
 			end
 			box.ssh.run = function(_, command, opts)
+				if command == 'ubus call service list ' .. quote(util.encode({ name = 'service' })) then
+					return { stdout = '{}', stderr = '', code = 0 }
+				end
 				opts = opts or {}
 				if opts.data then
 					opts.input_path = box.artifacts .. '/request.stdin'
@@ -764,6 +979,12 @@ function tests.devicecode_preserves_configuration_and_restores_persistent_file_p
 			if existed then equal(util.read(config_root .. '/example.json'), '{"original":"persistent"}')
 			else equal(stat.stat(config_root .. '/example.json'), nil) end
 			equal(util.decode(util.read(runtime .. '/configs/example.json')).unrelated.data.value, 'preserved')
+			util.write(runtime .. '/deployment-only.lua', '-- unexpected extra file\n')
+			rejects(function() app:verify_restored() end, 'Restored runtime differs from backup')
+			assert(os.remove(runtime .. '/deployment-only.lua'))
+			util.write(config_root .. '/example.json', '{"unexpected":"config"}')
+			rejects(function() app:verify_restored() end,
+				existed and 'Restored persistent configuration differs' or 'Expected 0, got 1')
 		end)
 	end
 end
@@ -931,6 +1152,22 @@ function tests.modems_rediscover_by_imei_and_use_secondary_at_port()
 end
 
 ---@return nil
+function tests.strict_inventory_rejects_partial_data_for_listed_modems()
+	for _, failure in ipairs({ 'lookup', 'identity', 'duplicate' }) do
+		local modems = modem.new({ ssh = { run = function(_, command)
+			if command == 'mmcli -L' then
+				return { stdout = '/org/freedesktop/ModemManager1/Modem/1\n/org/freedesktop/ModemManager1/Modem/2' }
+			end
+			local second = command == 'mmcli -m 2 -J'
+			if second and failure == 'lookup' then return { code = 1 } end
+			local imei = second and failure == 'identity' and '--' or '123'
+			return { code = 0, stdout = util.encode({ modem = { generic = { ['equipment-identifier'] = imei } } }) }
+		end } })
+		local expected = { lookup = 'Cannot inspect', identity = 'no usable IMEI', duplicate = 'duplicate IMEI' }
+		rejects(function() modems:inventory(true) end, expected[failure])
+	end
+end
+
 function tests.modem_inventory_keeps_disabled_modems_without_at_ports()
 	local box = { ssh = { run = function(_, command)
 		if command == 'mmcli -L' then
