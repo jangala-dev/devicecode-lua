@@ -157,11 +157,12 @@ end
 ---@field conn             Connection?   nil before M.start() is called
 ---@field name             string?       nil before M.start() is called
 ---@field http_ref         CapabilityReference?
----@field http_send_ch     Channel?      nil before M.start() is called
+---@field http_send_ch     table?        nil before M.start() is called
 ---@field pipelines_map    PipelineMap
 ---@field metric_states    MetricStates
 ---@field endpoint_to_pipe table<string, string>
 ---@field metric_values    MetricValues
+---@field http_configured  boolean?
 ---@field publish_period   number?
 ---@field cloud_url        string?
 ---@field mainflux_config  table?
@@ -170,6 +171,7 @@ end
 ---@field fs_cap           CapabilityReference?  nil before filesystem cap is resolved
 
 return {
+	HTTP_DIAGNOSTIC_PREFIX = 'metrics.http.',
 	new          = new,
 	BaseTime     = BaseTime,
 	CloudConfig  = CloudConfig,

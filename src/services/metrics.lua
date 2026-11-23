@@ -267,24 +267,31 @@ end
 ---@param data table<string, MetricSample>
 ---@param on_result fun(accepted: boolean)? called with the cloud's answer, and the send
 --- isn't retried: the caller paces its own retries
+---@param diagnostics_only boolean? send a snapshot if the ordinary publisher is idle
 ---@return boolean queued
-local function http_publish(data, on_result)
-	local senml_list, encode_err = senml.encode_r('', data)
-	if encode_err then
-		State.svc:obs_log('error', { what = 'senml_encode_failed', err = tostring(encode_err) })
-		return false
-	end
-	if #senml_list == 0 then return false end
+local function http_publish(data, on_result, diagnostics_only)
+	local body = '[]'
+	if not diagnostics_only then
+		local senml_list, encode_err = senml.encode_r('', data)
+		if encode_err then
+			State.svc:obs_log('error', { what = 'senml_encode_failed', err = tostring(encode_err) })
+			return false
+		end
+		if #senml_list == 0 then return false end
 
-	local body, json_err = json.encode(senml_list)
-	if not body then
-		State.svc:obs_log('error', { what = 'http_publish_encode_failed', err = tostring(json_err) })
-		return false
+		local json_err
+		body, json_err = json.encode(senml_list)
+		if not body then
+			State.svc:obs_log('error', { what = 'http_publish_encode_failed', err = tostring(json_err) })
+			return false
+		end
 	end
 
 	local valid, config_err = conf.validate_http_config(State.cloud_config)
 	if not valid then
-		State.svc:obs_log('error', { what = 'http_publish_skipped', err = tostring(config_err) })
+		if not diagnostics_only then
+			State.svc:obs_log('error', { what = 'http_publish_skipped', err = tostring(config_err) })
+		end
 		return false
 	end
 
@@ -296,7 +303,9 @@ local function http_publish(data, on_result)
 		end
 	end
 	if channel_id == nil then
-		State.svc:obs_log('error', { what = 'http_publish_failed', err = 'no data channel id found' })
+		if not diagnostics_only then
+			State.svc:obs_log('error', { what = 'http_publish_failed', err = 'no data channel id found' })
+		end
 		return false
 	end
 
@@ -306,8 +315,10 @@ local function http_publish(data, on_result)
 
 	-- Non-blocking enqueue: drop and log if the channel is at capacity.
 	local send_ch = on_result and State.crash_send_ch or State.http_send_ch
+	if diagnostics_only and not send_ch:should_report(uri, auth) then return false end
 	local full = perform(send_ch:put_op({
-		uri = uri, auth = auth, body = body, on_result = on_result, one_shot = on_result ~= nil,
+		uri = uri, auth = auth, body = body, on_result = on_result,
+		one_shot = on_result ~= nil or diagnostics_only == true, diagnostics_only = diagnostics_only,
 	})
 		:or_else(function() return true end))
 
@@ -470,6 +481,11 @@ local function handle_metric(msg)
 	end
 
 	local endpoint_str = table.concat(topic, '.')
+	local reserved = types.HTTP_DIAGNOSTIC_PREFIX
+	if pipe_cfg.protocol == 'http' and endpoint_str:sub(1, #reserved) == reserved then
+		State.svc:obs_log('warn', { what = 'metric_reserved_namespace', metric = metric_name })
+		return
+	end
 
 	-- Get-or-create per-endpoint processing state.
 	if not State.metric_states[endpoint_str] then
@@ -537,6 +553,13 @@ local function handle_config(payload)
 
 	local log_fn = function(level, msg) State.svc:obs_log(level, msg) end
 	local new_pipelines_map, new_publish_period = conf.apply_config(payload, log_fn)
+	State.http_configured = false
+	for _, pipeline in pairs(new_pipelines_map) do
+		if pipeline.protocol == 'http' then
+			State.http_configured = true
+			break
+		end
+	end
 
 	if next(new_pipelines_map) == nil then
 		State.svc:obs_log('warn', { what = 'config_no_pipelines' })
@@ -678,6 +701,9 @@ local function main()
 				State.svc:obs_log('debug', string.format('publishing %d metric(s)', total))
 			end
 			publish_all(values)
+			if not values.http and State.http_configured and State.cloud_config and State.base_time.synced then
+				http_publish({}, nil, true)
+			end
 			prune_idle_endpoints(now())
 			send_pending_crash()
 		elseif which == 'crash' then
@@ -717,7 +743,10 @@ function M.start(conn, opts)
 	State.name             = name
 	State.http_ref         = http_sdk.new_ref(conn, opts.http_service_id or 'main')
 	local function publisher_log(level, payload) svc:obs_log(level, payload) end
-	State.http_send_ch     = http_m.start_http_publisher(State.http_ref, publisher_log)
+	State.http_send_ch     = http_m.start_http_publisher(State.http_ref, publisher_log, function(mono)
+		local base_time = State.base_time
+		return math.floor((base_time.real + (mono - base_time.mono)) * 1000)
+	end)
 	-- A publisher sends one payload at a time and retries ordinary telemetry for ever
 	-- on a network failure, so crash records can't wait in the same queue.
 	State.crash_send_ch    = http_m.start_http_publisher(State.http_ref, publisher_log)
@@ -727,6 +756,7 @@ function M.start(conn, opts)
 	State.metric_values    = {}
 	State.ui_visits        = ui_usage.new()
 	State.publish_period   = nil
+	State.http_configured  = false
 	State.cloud_url        = nil
 	State.mainflux_config  = nil
 	State.cloud_config     = nil
