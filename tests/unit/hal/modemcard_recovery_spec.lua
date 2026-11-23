@@ -235,11 +235,13 @@ function tests.test_manager_reports_registered_modem_and_removal()
 	run_fibers.run_auto(function(scope)
 		local incoming, devices, logs = channel.new(), channel.new(), channel.new(2)
 		local address = '/org/freedesktop/ModemManager1/Modem/7'
+		local rejected_address = '/org/freedesktop/ModemManager1/Modem/8'
 		local device = '/sys/devices/platform/usb1/1-1.2'
 		local summary = 'imei_suffix=3456 device=1-1.2 address=' .. address
-		local logged_add = false
+		local logged_add, lifecycle_count = false, 0
 		local function observe(level, record)
 			if level == 'info' then
+				lifecycle_count = lifecycle_count + 1
 				if record.what == 'modem_added' then logged_add = true end
 				logs:put(record)
 			end
@@ -255,8 +257,8 @@ function tests.test_manager_reports_registered_modem_and_removal()
 		modem_provider.new_monitor = function()
 			return { next_event_op = function() return incoming:get_op() end }
 		end
-		modem_driver.new = function()
-			return { address = address, imei = '012345678123456', scope = { fault_op = op.never },
+		modem_driver.new = function(id)
+			return { address = id, imei = '012345678123456', scope = { fault_op = op.never },
 				init = function() return '' end,
 				get = function() return true, device end,
 				capabilities = function() return {} end,
@@ -269,6 +271,7 @@ function tests.test_manager_reports_registered_modem_and_removal()
 		local added = fibers.perform(devices:get_op())
 		eq(added.event_type, 'added')
 		eq(logged_add, false)
+		added.registration_ok = true
 		added.ready_cond:signal()
 		local detected = fibers.perform(logs:get_op())
 		eq(detected.what, 'modem_added')
@@ -276,12 +279,22 @@ function tests.test_manager_reports_registered_modem_and_removal()
 		eq(detected.manager, 'modemcard')
 		eq(detected.include_event_time, true)
 
+		incoming:put({ is_added = true, address = rejected_address })
+		local rejected = fibers.perform(devices:get_op())
+		eq(rejected.event_type, 'added')
+		rejected.registration_ok = false
+		rejected.ready_cond:signal()
+		incoming:put({ is_added = false, address = rejected_address })
+		local rejected_removal = fibers.perform(devices:get_op())
+		eq(rejected_removal.event_type, 'removed')
+
 		incoming:put({ is_added = false, address = address })
 		local removed = fibers.perform(devices:get_op())
 		eq(removed.event_type, 'removed')
 		local withdrawn = fibers.perform(logs:get_op())
 		eq(withdrawn.what, 'modem_removed')
 		eq(withdrawn.summary, summary)
+		eq(lifecycle_count, 2)
 		assert(modemcard.stop())
 	end)
 end

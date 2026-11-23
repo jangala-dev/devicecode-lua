@@ -95,6 +95,7 @@ local function detector(scope)
 end
 
 local function log_modem_lifecycle(what, driver, device)
+	if not driver.hal_registered then return end
 	local suffix = tostring(driver.imei):sub(-4)
 	local port = tostring(device):match('[^/]+$') or 'unknown'
 	log:info({
@@ -318,6 +319,7 @@ local function on_driver(dev_ev_ch, cap_emit_ch, driver)
 	-- capabilities are registered before starting the driver.
 	dev_ev_ch:put(device_event)
 	ready_cond:wait()
+	driver.hal_registered = device_event.registration_ok
 	log_modem_lifecycle('modem_added', driver, device)
 
 	-- Start the driver only after capability registration, so initial retained

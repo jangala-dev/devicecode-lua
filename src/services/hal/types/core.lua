@@ -131,7 +131,8 @@ end
 ---@field id DeviceId
 ---@field meta Meta
 ---@field capabilities CapList
----@field ready_cond Cond? Optional one-shot condition; signalled by HAL after the device is fully registered.
+---@field ready_cond Cond? Optional one-shot condition signalled after HAL processes a valid addition.
+---@field registration_ok boolean? Device and capabilities registered. Set before ready_cond is signalled.
 local DeviceEvent = {}
 DeviceEvent.__index = DeviceEvent
 
@@ -141,7 +142,7 @@ DeviceEvent.__index = DeviceEvent
 ---@param id DeviceId
 ---@param meta Meta?
 ---@param capabilities CapList?
----@param ready_cond Cond? Optional one-shot condition; signalled by HAL after the device is fully registered.
+---@param ready_cond Cond? Optional one-shot condition signalled after HAL processes a valid addition.
 ---@return DeviceEvent?
 ---@return string error
 function new.DeviceEvent(event_type, class, id, meta, capabilities, ready_cond)
