@@ -226,6 +226,29 @@ Cancellation does not invoke the callback.
 Queue-full drops are unchanged. A long outage can still fill the queue and drop
 new payloads, and retrying a request whose response was lost can duplicate metrics.
 
+#### HTTP delivery diagnostics
+
+The ordinary telemetry publisher exports delivery statistics as numeric SenML
+records under the reserved `metrics.http.*` prefix:
+
+| Suffix | Meaning |
+| --- | --- |
+| `dropped_queue_full` | Telemetry batches dropped because the HTTP queue was full |
+| `rejected.<status>` | Telemetry batches discarded after a final HTTP response, grouped by status. Missing or malformed statuses use `rejected.invalid_response`. |
+| `retries` | Additional POST attempts started for ordinary telemetry batches |
+| `queue_depth` | Ordinary telemetry batches waiting in the queue, excluding the active request |
+| `started_at` | Metrics service start time in Unix milliseconds, identifying the counter generation |
+
+Counters reset when the metrics service restarts. A missing rejection series
+means zero for that generation. The publisher samples the counters and queue
+depth immediately before building each POST, including retries, and sends the
+snapshot if its values or destination differ from the last acknowledged
+snapshot. A `2xx` acknowledges the exact snapshot carried by the request.
+
+On a publish tick with HTTP telemetry configured, an idle publisher can send a
+one-shot diagnostics-only POST if a snapshot is pending. These reports and crash
+record deliveries are excluded from ordinary telemetry accounting.
+
 ### Bus
 
 For testability a bus protocol should be provided which will publish the metrics under the topic

@@ -352,7 +352,7 @@ local function with_pending_crash(synced, body, opts)
 	local sent = {}
 	package.loaded['services.metrics.http'] = {
 		start_http_publisher = function()
-			local channel = {}
+			local channel = { should_report = function() return false end }
 			channel.put_op = function(_, data)
 				data.channel = channel
 				sent[#sent + 1] = data
@@ -807,6 +807,7 @@ function T.http_pipeline_enqueues_request_payload()
 	package.loaded['services.metrics.http'] = {
 		start_http_publisher = function()
 			return {
+				should_report = function() return false end,
 				put_op = function(_, data)
 					captured = data
 					return op.always(true)
@@ -887,6 +888,7 @@ function T.ui_visits_are_batched_in_http_payload()
 	package.loaded['services.metrics.http'] = {
 		start_http_publisher = function()
 			return {
+				should_report = function() return false end,
 				put_op = function(_, data)
 					captured = data
 					return op.always(true)
@@ -961,6 +963,104 @@ function T.ui_visits_are_batched_in_http_payload()
 	package.loaded['services.metrics.http'] = original_http_mod
 
 	assert(ok_run, tostring(run_err))
+end
+
+function T.delivery_diagnostics_survive_queue_overflow_and_report_only_changes()
+	local sdk = require('services.http').sdk
+	local original_new_ref = sdk.new_ref
+	local attempts = {}
+	local responses = { '503', '202' }
+	local ref = {}
+	function ref:exchange_op(args)
+		local status = responses[#attempts + 1] or '202'
+		local records = assert(json.decode((perform(args.body_source:read_chunk_op()))))
+		local by_name = {}
+		for _, record in ipairs(records) do
+			assert(not by_name[record.n], 'duplicate record ' .. record.n)
+			by_name[record.n] = record
+		end
+		attempts[#attempts + 1] = by_name
+		return op.always({ result = { status = status, headers = status == '503'
+			and { ['retry-after'] = '20' } or {} } })
+	end
+	sdk.new_ref = function() return ref end
+
+	local ok, err = pcall(function()
+		runfibers.run(function(scope)
+			local clock = new_test_clock()
+			scope:finally(function() clock:restore() end)
+			local bus = make_bus()
+			local conn = bus:connect()
+			conn:retain({ 'cap', 'fs', 'credentials', 'state' }, 'added')
+			start_mock_hal(conn, scope)
+			conn:retain({ 'state', 'time', 'synced' }, true)
+			local cfg = bus_pipeline_config('sim', 1)
+			cfg.data.cloud_url = 'http://localhost:18080'
+			cfg.data.pipelines.sim.protocol = 'http'
+			conn:retain({ 'cfg', 'metrics' }, cfg)
+			local svc_scope = start_metrics(bus, scope, { crash_store = {
+				next_send_at = function() return nil end,
+				next_pending = function() return nil end,
+			} })
+			flush_ticks()
+
+			local function tick(value)
+				if value ~= nil then
+					conn:publish({ 'obs', 'v1', 'modem', 'metric', 'sim' }, { value = value })
+					flush_ticks()
+				end
+				clock:advance(1)
+				flush_ticks()
+			end
+
+			for i = 1, 13 do tick(i) end
+			assert(#attempts == 1, 'expected one delivery attempt, got ' .. #attempts)
+			assert(attempts[1]['metrics.http.queue_depth'].v == 0)
+			for _ = 1, 8 do tick() end
+
+			local recovered = assert(attempts[2])
+			assert(recovered['obs.v1.modem.metric.sim'].v == 1)
+			assert(recovered['obs.v1.modem.metric.sim'].t == attempts[1]['obs.v1.modem.metric.sim'].t)
+			assert(recovered['metrics.http.dropped_queue_full'].v == 2)
+			assert(recovered['metrics.http.retries'].v == 1)
+			assert(recovered['metrics.http.queue_depth'].v == 10)
+			assert(recovered['metrics.http.started_at'].v == attempts[1]['metrics.http.started_at'].v)
+			assert(recovered['metrics.http.rejected.503'] == nil)
+			assert(#attempts == 12 and attempts[12]['metrics.http.queue_depth'].v == 0)
+
+			conn:retain({ 'cfg', 'metrics' }, cfg)
+			flush_ticks()
+			tick()
+			assert(#attempts == 12, 'unchanged diagnostics should not send an idle POST')
+			conn:publish({ 'obs', 'v1', 'modem', 'metric', 'sim' }, {
+				value = 999, namespace = { 'metrics', 'http', 'retries' },
+			})
+			tick(14)
+			assert(#attempts == 13 and attempts[13]['obs.v1.modem.metric.sim'].v == 14)
+			assert(attempts[13]['metrics.http.retries'] == nil, 'pipeline cannot write reserved delivery metrics')
+
+			responses[14] = '401'
+			tick(15)
+			assert(attempts[14]['metrics.http.rejected.401'] == nil)
+			tick()
+			assert(attempts[15]['metrics.http.rejected.401'].v == 1)
+			assert(attempts[15]['obs.v1.modem.metric.sim'] == nil)
+			tick()
+			assert(#attempts == 15)
+
+			for i = 16, 19 do responses[i] = '400' end
+			tick(16)
+			for _ = 1, 7 do tick() end
+			assert(attempts[19]['metrics.http.retries'].v == 4)
+			assert(attempts[19]['metrics.http.rejected.400'] == nil)
+			if not attempts[20] then tick() end
+			assert(attempts[20]['metrics.http.rejected.400'].v == 1)
+			assert(attempts[20]['metrics.http.rejected.401'].v == 1)
+			stop_scope(svc_scope)
+		end, { timeout = 60 })
+	end)
+	sdk.new_ref = original_new_ref
+	assert(ok, tostring(err))
 end
 
 -- Receiving a new config replaces existing pipelines; old metric names are dropped.
