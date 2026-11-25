@@ -9,6 +9,7 @@ local sleep = require 'fibers.sleep'
 local runfibers = require 'tests.support.run_virtual_fibers'
 local gen = require 'services.wifi.gen'
 local wifi = require 'services.wifi'
+local probe = require 'tests.support.bus_probe'
 
 local T = {}
 
@@ -127,16 +128,26 @@ function T.removed_radio_drops_out_of_global_num_sta_and_ends_its_sessions()
 			conn = conn,
 			radio_scopes = {},
 			radio_sessions = { radio0 = { aa = { uid = 'u1', sid = 's1' } } },
-			radio_sta = { radio0 = 1, radio1 = 2 },
+			radio_sta = { radio0 = 1, radio1 = 2, radio2 = 3 },
 		}
 
 		wifi._test.remove_radio(ctx, 'radio0')
+		local summary = probe.wait_retained_payload(conn, { 'state', 'wifi', 'summary' })
+		eq(summary.num_sta, 5, 'dashboard sums the remaining radios')
+		eq(summary.clients, nil, 'dashboard state contains no client identities')
 		sleep.sleep(0.01)
 
 		local global = find(metrics, 'num_sta', 'wifi.num_sta')
-		eq(global[#global].value, 2, 'only radio1 counted')
+		eq(global[#global].value, 5, 'only radio1 and radio2 counted')
 		eq(#find(metrics, 'session_end', 'wifi.clients.u1.sessions.s1'), 1, 'radio0 session ended')
 		eq(ctx.radio_sessions.radio0, nil)
+
+		wifi._test.remove_radio(ctx, 'radio2')
+		summary = probe.wait_retained_payload(conn, { 'state', 'wifi', 'summary' })
+		eq(summary.num_sta, 2, 'dashboard count decreases when a radio is removed')
+		wifi._test.remove_radio(ctx, 'radio1')
+		summary = probe.wait_retained_payload(conn, { 'state', 'wifi', 'summary' })
+		eq(summary.num_sta, 0, 'dashboard retains a measured zero for a new subscriber')
 	end, { timeout = 1 })
 end
 

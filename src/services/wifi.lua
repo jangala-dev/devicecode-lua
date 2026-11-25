@@ -701,6 +701,7 @@ local function publish_global_num_sta(conn, radio_sta)
 	local total = 0
 	for _, n in pairs(radio_sta) do total = total + n end
 	conn:retain(t_obs_metric('num_sta'), { value = total, namespace = { 'wifi', 'num_sta' } })
+	conn:retain({ 'state', 'wifi', 'summary' }, { num_sta = total })
 end
 
 ------------------------------------------------------------------------

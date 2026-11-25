@@ -46,6 +46,9 @@ function T.devhost_local_ui_serves_curated_bootstrap_over_real_http()
 		assert_not_nil(payload.items['state/device/components'], 'bootstrap should include curated device state')
 		assert_not_nil(payload.items['state/system/stats'],
 			'bootstrap should include curated system stats')
+		local wifi = assert_not_nil(payload.items['state/wifi/summary'],
+			'bootstrap should include aggregate Wi-Fi client count')
+		assert_eq(wifi.payload.num_sta, 5)
 		assert_nil(payload.items['raw/host/secret'], 'bootstrap must not include raw HAL topics')
 		assert_nil(payload.items['cfg/secret'], 'bootstrap must not include cfg topics')
 	end, { timeout = 12 })
