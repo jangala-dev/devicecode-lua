@@ -32,6 +32,7 @@ local ALLOW_PREFIXES = {
 	{ 'state', 'net' },
 	{ 'state', 'gsm' },
 	{ 'state', 'system' },
+	{ 'state', 'wifi', 'summary' },
 	{ 'state', 'fabric' },
 	{ 'state', 'update' },
 	{ 'state', 'workflow', 'update-job' },

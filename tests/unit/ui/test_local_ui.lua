@@ -60,9 +60,29 @@ function tests.test_sse_defaults_use_local_ui_prefixes_without_root_hash()
 	ok(seen['state/device/#'], 'state/device stream missing')
 	ok(seen['state/net/#'], 'state/net stream missing')
 	ok(seen['state/system/#'], 'state/system stream missing')
+	ok(seen['state/wifi/summary/#'], 'Wi-Fi summary stream missing')
+	eq(seen['state/wifi/#'], nil, 'only aggregate Wi-Fi state should be streamed')
 	eq(seen['obs/v1/system/metric/#'], nil, 'system metrics should not be a default UI stream')
 	eq(seen['obs/v1/gsm/event/#'], nil, 'generic GSM events should not be watched by /events')
 	eq(seen['obs/v1/+/event/log'], nil, 'logs should use the monitor log follow endpoint')
+end
+
+function tests.test_wifi_summary_is_available_in_bootstrap_and_live_events()
+	local topic = { 'state', 'wifi', 'summary' }
+	local model = read_model.new()
+	for _, count in ipairs({ 5, 0 }) do
+		model:set(topic, { num_sta = count })
+		local boot = local_model.bootstrap(model:snapshot())
+		local summary = boot.items['state/wifi/summary']
+		ok(summary, 'bootstrap must include aggregate Wi-Fi client count')
+		eq(summary.payload.num_sta, count)
+		local event = local_model.project_event({ op = 'set', topic = topic, payload = { num_sta = count } })
+		ok(event, 'live Wi-Fi counts must pass the local UI filter')
+		eq(event.payload.num_sta, count)
+	end
+	ok(local_model.project_event({ op = 'delete', topic = topic }), 'count removal must reach the UI')
+	eq(local_model.allowed({ 'state', 'wifi', 'clients' }), false, 'client identities stay private')
+	eq(local_model.allowed({ 'obs', 'v1', 'wifi', 'metric', 'num_sta' }), false, 'telemetry stays excluded')
 end
 
 function tests.test_sse_default_encoder_emits_parseable_json_for_multiline_strings()

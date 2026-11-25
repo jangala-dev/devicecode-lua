@@ -177,6 +177,7 @@ function M.publish_demo_state(conn)
 		state = 'ok',
 		cpu = { utilisation = 12.5 },
 	})
+	conn:retain({ 'state', 'wifi', 'summary' }, { num_sta = 5 })
 	conn:retain({ 'state', 'fabric', 'summary' }, {
 		schema = 'devicecode.fabric.summary/1',
 		state = 'running',
